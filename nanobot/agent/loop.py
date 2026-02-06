@@ -20,6 +20,12 @@ from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.subagent import SubagentManager
 from nanobot.session.manager import SessionManager
+from nanobot.config.model_capabilities import supports_function_calling
+from nanobot.agent.hallucination_detector import (
+    detect_hallucination, 
+    create_honest_response,
+    create_no_tools_available_response
+)
 
 
 class AgentLoop:
@@ -236,14 +242,20 @@ class AgentLoop:
         # Agent loop
         iteration = 0
         final_content = None
+        tools_were_called = False  # 追踪是否真正调用了工具
+        
+        # 检查模型是否支持 Function Calling
+        model_supports_tools = supports_function_calling(self.model)
+        if not model_supports_tools:
+            logger.warning(f"Model {self.model} does not support function calling, tools disabled")
         
         while iteration < self.max_iterations:
             iteration += 1
             
-            # Call LLM
+            # Call LLM - 根据模型能力决定是否传递 tools
             response = await self.provider.chat(
                 messages=messages,
-                tools=self.tools.get_definitions(),
+                tools=self.tools.get_definitions() if model_supports_tools else None,
                 model=self.model
             )
             
@@ -268,18 +280,33 @@ class AgentLoop:
                 # Execute tools
                 for tool_call in response.tool_calls:
                     args_str = json.dumps(tool_call.arguments)
-                    logger.debug(f"Executing tool: {tool_call.name} with arguments: {args_str}")
+                    logger.info(f"Executing tool: {tool_call.name} with arguments: {args_str}")
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
+                    tools_were_called = True  # 标记工具被调用
             else:
                 # No tool calls, we're done
                 final_content = response.content
                 break
         
         if final_content is None:
-            final_content = "I've completed processing but have no response to give."
+            final_content = "处理完成，但没有生成响应。"
+        
+        # 幻觉检测：如果模型不支持工具调用，检查响应是否包含可疑内容
+        if not model_supports_tools or not tools_were_called:
+            hallucination = detect_hallucination(
+                final_content, 
+                tools_were_called=tools_were_called,
+                model_supports_tools=model_supports_tools
+            )
+            if hallucination.is_hallucination:
+                logger.warning(
+                    f"Hallucination detected and blocked: {hallucination.pattern_name} "
+                    f"(confidence: {hallucination.confidence:.2f})"
+                )
+                final_content = create_honest_response(self.model)
         
         # Save to session
         session.add_message("user", msg.content)

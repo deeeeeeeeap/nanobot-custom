@@ -269,13 +269,31 @@ class TelegramChannel(BaseChannel):
                 
                 logger.info(f"Model switched from {old_model} to {new_model}")
                 
-                await update.message.reply_text(
-                    f"✅ <b>模型已切换</b>\n\n"
-                    f"<b>旧模型</b>: <code>{old_model}</code>\n"
-                    f"<b>新模型</b>: <code>{new_model}</code>\n\n"
-                    f"⚠️ 注意：新模型将在下一条消息时生效。",
-                    parse_mode="HTML"
-                )
+                # 检查新模型是否支持工具调用
+                from nanobot.config.model_capabilities import supports_function_calling
+                supports_tools = supports_function_calling(new_model)
+                
+                if supports_tools:
+                    await update.message.reply_text(
+                        f"✅ <b>模型已切换</b>\n\n"
+                        f"<b>旧模型</b>: <code>{old_model}</code>\n"
+                        f"<b>新模型</b>: <code>{new_model}</code>\n\n"
+                        f"✨ 此模型支持所有工具功能。",
+                        parse_mode="HTML"
+                    )
+                else:
+                    await update.message.reply_text(
+                        f"⚠️ <b>模型已切换（功能受限）</b>\n\n"
+                        f"<b>旧模型</b>: <code>{old_model}</code>\n"
+                        f"<b>新模型</b>: <code>{new_model}</code>\n\n"
+                        f"❌ <b>此模型不支持工具调用</b>\n\n"
+                        f"以下功能<b>不可用</b>:\n"
+                        f"- 🔍 网络搜索\n"
+                        f"- 💻 执行命令\n"
+                        f"- 📁 文件操作\n\n"
+                        f"此模型仅适合<b>纯对话</b>场景。",
+                        parse_mode="HTML"
+                    )
                 
         except Exception as e:
             logger.error(f"Error handling /model command: {e}")
