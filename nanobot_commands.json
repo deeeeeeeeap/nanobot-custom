@@ -1,0 +1,89 @@
+{
+    "nanobot_commands": {
+        "daily_update": {
+            "description": "日常更新",
+            "commands": [
+                "cd /opt/nanobot",
+                "git pull",
+                "sudo systemctl restart nanobot"
+            ]
+        },
+        "view_status": {
+            "description": "查看状态",
+            "commands": {
+                "service_status": "sudo systemctl status nanobot",
+                "realtime_log": "journalctl -u nanobot -f",
+                "recent_log": "journalctl -u nanobot -n 100"
+            }
+        },
+        "service_control": {
+            "description": "服务控制",
+            "commands": {
+                "start": "sudo systemctl start nanobot",
+                "stop": "sudo systemctl stop nanobot",
+                "restart": "sudo systemctl restart nanobot"
+            }
+        },
+        "config": {
+            "description": "配置文件",
+            "commands": {
+                "edit": "nano ~/.nanobot/config.json",
+                "view": "cat ~/.nanobot/config.json"
+            }
+        },
+        "full_reinstall": {
+            "description": "完整重装（保留配置）",
+            "steps": [
+                {
+                    "step": 1,
+                    "description": "停止服务",
+                    "command": "sudo systemctl stop nanobot"
+                },
+                {
+                    "step": 2,
+                    "description": "备份配置",
+                    "command": "cp ~/.nanobot/config.json /tmp/config-backup.json"
+                },
+                {
+                    "step": 3,
+                    "description": "删除旧安装",
+                    "commands": [
+                        "pipx uninstall nanobot",
+                        "rm -rf /opt/nanobot ~/.nanobot"
+                    ]
+                },
+                {
+                    "step": 4,
+                    "description": "重新安装",
+                    "commands": [
+                        "git clone https://github.com/deeeeeeeeap/nanobot-custom.git /opt/nanobot",
+                        "cd /opt/nanobot && pipx install -e . --force"
+                    ]
+                },
+                {
+                    "step": 5,
+                    "description": "恢复配置",
+                    "commands": [
+                        "mkdir -p ~/.nanobot",
+                        "mv /tmp/config-backup.json ~/.nanobot/config.json"
+                    ]
+                },
+                {
+                    "step": 6,
+                    "description": "启动服务",
+                    "command": "sudo systemctl restart nanobot"
+                }
+            ]
+        },
+        "testing": {
+            "description": "测试",
+            "commands": {
+                "network_test": "time curl -s \"wttr.in/NewYork?format=3\"",
+                "python_syntax": "python3 -c \"import nanobot\""
+            }
+        }
+    },
+    "github_repo": "https://github.com/deeeeeeeeap/nanobot-custom",
+    "install_path": "/opt/nanobot",
+    "config_path": "~/.nanobot/config.json"
+}

@@ -338,8 +338,9 @@ class AgentLoop:
         if final_content is None:
             final_content = "处理完成，但没有生成响应。"
         
-        # 幻觉检测：如果模型不支持工具调用，检查响应是否包含可疑内容
-        if not model_supports_tools or not tools_were_called:
+        # 幻觉检测：只有当模型不支持工具调用时，才检查响应是否包含可疑内容
+        # 如果模型支持工具但这次没调用，说明不需要工具，不应误判为幻觉
+        if not model_supports_tools:
             hallucination = detect_hallucination(
                 final_content, 
                 tools_were_called=tools_were_called,
