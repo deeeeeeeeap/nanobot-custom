@@ -153,7 +153,7 @@ systemctl restart nanobot
 | Provider | 模型 | Function Calling | 说明 |
 |----------|------|:----------------:|------|
 | MiniMax | `minimax/MiniMax-M2.1` | ✅ | 推荐，性价比高 |
-| Gemini | `gemini-2.5-flash-preview` | ✅ | Google 免费模型 |
+| Gemini | `gemini-2.5-flash-preview` | ✅ | Google 高速模型 |
 | Claude | `anthropic/claude-sonnet-4-5` | ✅ | Anthropic 模型 |
 | DeepSeek | `deepseek/deepseek-chat` | ✅ | 国产模型 |
 | Kimi | `moonshot/kimi-k2.5` | ✅ | Moonshot 模型 |
