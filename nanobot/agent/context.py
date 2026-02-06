@@ -123,7 +123,7 @@ Skills with available="false" need dependencies installed first - you can try in
 
 ---
 
-⚠️ **重要**：如果你发现我无法调用工具，请使用 `/model gemini-2.5-flash-preview` 切换模型。
+⚠️ **重要**：如果你发现我无法调用工具，请使用 `/model gemini-2.5-flash-preview` 切换模型。"""
     
     def _load_bootstrap_files(self) -> str:
         """Load all bootstrap files from workspace."""
