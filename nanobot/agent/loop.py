@@ -153,6 +153,25 @@ class AgentLoop:
         
         logger.info(f"Processing message from {msg.channel}:{msg.sender_id}")
         
+        # 动态读取最新的模型配置，让 /model 命令切换立即生效
+        from nanobot.config.loader import load_config
+        try:
+            current_config = load_config()
+            current_model = current_config.agents.defaults.model
+            # 更新 provider 的 API key 和 base（如果模型变更需要不同的 provider）
+            if current_model != self.model:
+                logger.info(f"Model changed from {self.model} to {current_model}")
+                self.model = current_model
+                # 更新 provider 环境变量
+                api_key = current_config.get_api_key(current_model)
+                api_base = current_config.get_api_base(current_model)
+                if api_key:
+                    self.provider.api_key = api_key
+                if api_base:
+                    self.provider.api_base = api_base
+        except Exception as e:
+            logger.warning(f"Failed to reload config: {e}, using cached model")
+        
         # Get or create session
         session = self.sessions.get_or_create(msg.session_key)
         
