@@ -20,13 +20,17 @@
 
 ⚡ **模型热切换**：通过 `/model` 命令随时切换 AI 模型
 
+📊 **实时状态反馈**：工具执行时显示实时进度（🤔→🔧→✅）
+
+🛡️ **防幻觉机制**：自动检测和拦截模型编造的虚假信息
+
 ## 🚀 快速部署
 
 ### 1. 克隆项目
 
 ```bash
-git clone https://github.com/deeeeeeeeap/nanobot-custom.git /root/nanobot
-cd /root/nanobot
+git clone https://github.com/deeeeeeeeap/nanobot-custom.git /opt/nanobot
+cd /opt/nanobot
 ```
 
 ### 2. 安装
@@ -68,7 +72,7 @@ nanobot onboard
   "providers": {
     "minimax": {
       "apiKey": "你的MiniMax-API-Key",
-      "apiBase": "https://api.minimaxi.com/anthropic"
+      "apiBase": "https://api.minimaxi.com/v1"
     }
   },
   "tools": {
@@ -92,7 +96,7 @@ After=network.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/root/nanobot
+WorkingDirectory=/opt/nanobot
 ExecStart=/root/.local/bin/nanobot gateway
 Restart=always
 RestartSec=10
@@ -112,12 +116,14 @@ systemctl start nanobot
 |------|------|
 | `/start` | 开始使用 |
 | `/model` | 查看当前模型和可用 providers |
-| `/model <模型名>` | 切换模型 |
+| `/model <模型名>` | 切换模型（会显示能力警告） |
+| `/new` | 开始新会话 |
+| `/help` | 查看帮助 |
 
 **切换模型示例**：
 ```
 /model minimax/MiniMax-M2.1
-/model gemini-3-flash-preview
+/model gemini-2.5-flash-preview
 ```
 
 ## 🔧 常用操作
@@ -131,16 +137,45 @@ systemctl restart nanobot
 
 # 查看日志
 journalctl -u nanobot -f
+
+# 完整更新（保留配置）
+cp ~/.nanobot/config.json /tmp/config-backup.json
+pipx uninstall nanobot
+rm -rf /opt/nanobot ~/.nanobot
+git clone https://github.com/deeeeeeeeap/nanobot-custom.git /opt/nanobot
+cd /opt/nanobot && pipx install -e .
+mkdir -p ~/.nanobot && mv /tmp/config-backup.json ~/.nanobot/config.json
+systemctl restart nanobot
 ```
 
 ## 📦 支持的模型
 
-| Provider | 模型 | 说明 |
-|----------|------|------|
-| MiniMax | `minimax/MiniMax-M2.1` | 推荐，性价比高 |
-| Gemini | `gemini-3-flash-preview` | Google 免费模型 |
-| Claude | `anthropic/claude-sonnet-4-5` | Anthropic 模型 |
-| DeepSeek | `deepseek/deepseek-chat` | 国产模型 |
+| Provider | 模型 | Function Calling | 说明 |
+|----------|------|:----------------:|------|
+| MiniMax | `minimax/MiniMax-M2.1` | ✅ | 推荐，性价比高 |
+| Gemini | `gemini-2.5-flash-preview` | ✅ | Google 免费模型 |
+| Claude | `anthropic/claude-sonnet-4-5` | ✅ | Anthropic 模型 |
+| DeepSeek | `deepseek/deepseek-chat` | ✅ | 国产模型 |
+| Kimi | `moonshot/kimi-k2.5` | ✅ | Moonshot 模型 |
+
+## 🛡️ 防幻觉机制
+
+当模型不支持或未正确调用工具时，系统会自动检测并拦截虚假信息：
+
+- ❌ 不会假装执行命令并编造输出
+- ❌ 不会假装搜索并编造结果
+- ✅ 如果无法执行，会明确告知用户
+
+## 📊 实时状态反馈
+
+执行工具时，会显示实时进度：
+
+```
+🤔 正在思考...
+🔧 💻 正在执行命令: df -h
+✅ 命令执行完成
+[最终回复]
+```
 
 ## 🙏 致谢
 
