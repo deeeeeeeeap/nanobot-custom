@@ -199,7 +199,14 @@ def gateway(
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
     
-    # Create agent with cron service
+    # Create channel manager first (needed for reporter_factory)
+    channels = ChannelManager(config, bus)
+    
+    # Create reporter factory for real-time status updates
+    def reporter_factory(channel_name: str, chat_id: str):
+        return channels.create_reporter(channel_name, chat_id)
+    
+    # Create agent with cron service and reporter factory
     agent = AgentLoop(
         bus=bus,
         provider=provider,
@@ -209,6 +216,7 @@ def gateway(
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
         cron_service=cron,
+        reporter_factory=reporter_factory,
     )
     
     # Set cron callback (needs agent)
@@ -241,9 +249,6 @@ def gateway(
         interval_s=30 * 60,  # 30 minutes
         enabled=True
     )
-    
-    # Create channel manager
-    channels = ChannelManager(config, bus)
     
     if channels.enabled_channels:
         console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")

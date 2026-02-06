@@ -26,6 +26,7 @@ from nanobot.agent.hallucination_detector import (
     create_honest_response,
     create_no_tools_available_response
 )
+from nanobot.agent.status import StatusMessage, StatusReporter, NullReporter
 
 
 class AgentLoop:
@@ -50,9 +51,11 @@ class AgentLoop:
         brave_api_key: str | None = None,
         exec_config: "ExecToolConfig | None" = None,
         cron_service: "CronService | None" = None,
+        reporter_factory: "Callable[[str, str], StatusReporter] | None" = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         from nanobot.cron.service import CronService
+        from typing import Callable
         self.bus = bus
         self.provider = provider
         self.workspace = workspace
@@ -61,6 +64,7 @@ class AgentLoop:
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
+        self.reporter_factory = reporter_factory  # 状态报告器工厂
         
         self.context = ContextBuilder(workspace)
         self.sessions = SessionManager(workspace)
@@ -121,18 +125,34 @@ class AgentLoop:
                     timeout=1.0
                 )
                 
+                # 创建状态报告器（如果有工厂）
+                reporter = None
+                if self.reporter_factory and msg.channel != "system":
+                    try:
+                        reporter = self.reporter_factory(msg.channel, msg.chat_id)
+                    except Exception as e:
+                        logger.warning(f"Failed to create reporter: {e}")
+                
                 # Process it
                 try:
-                    response = await self._process_message(msg)
+                    response = await self._process_message(msg, reporter=reporter)
+                    
+                    # 完成后清理状态消息
+                    if reporter:
+                        await reporter.finalize(delete_status=True)
+                    
                     if response:
                         await self.bus.publish_outbound(response)
                 except Exception as e:
                     logger.error(f"Error processing message: {e}")
+                    # 完成后清理状态消息（出错时也要清理）
+                    if reporter:
+                        await reporter.finalize(delete_status=True)
                     # Send error response
                     await self.bus.publish_outbound(OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
-                        content=f"Sorry, I encountered an error: {str(e)}"
+                        content=f"抱歉，处理时遇到错误: {str(e)}"
                     ))
             except asyncio.TimeoutError:
                 continue
@@ -182,16 +202,25 @@ class AgentLoop:
         if api_base:
             self.provider.api_base = api_base
     
-    async def _process_message(self, msg: InboundMessage) -> OutboundMessage | None:
+    async def _process_message(
+        self, 
+        msg: InboundMessage,
+        reporter: StatusReporter | None = None
+    ) -> OutboundMessage | None:
         """
         Process a single inbound message.
         
         Args:
             msg: The inbound message to process.
+            reporter: 可选的状态报告器，用于实时反馈进度
         
         Returns:
             The response message, or None if no response needed.
         """
+        # 使用空报告器如果没有提供
+        if reporter is None:
+            reporter = NullReporter()
+        
         # Handle system messages (subagent announces)
         # The chat_id contains the original "channel:chat_id" to route back to
         if msg.channel == "system":
@@ -252,6 +281,9 @@ class AgentLoop:
         while iteration < self.max_iterations:
             iteration += 1
             
+            # 报告思考状态
+            await reporter.report(StatusMessage.thinking())
+            
             # Call LLM - 根据模型能力决定是否传递 tools
             response = await self.provider.chat(
                 messages=messages,
@@ -281,7 +313,19 @@ class AgentLoop:
                 for tool_call in response.tool_calls:
                     args_str = json.dumps(tool_call.arguments)
                     logger.info(f"Executing tool: {tool_call.name} with arguments: {args_str}")
+                    
+                    # 报告工具开始执行
+                    await reporter.report(StatusMessage.tool_start(
+                        tool_call.name, 
+                        tool_call.arguments
+                    ))
+                    
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    
+                    # 报告工具执行完成
+                    success = not (isinstance(result, str) and result.startswith("Error"))
+                    await reporter.report(StatusMessage.tool_done(tool_call.name, success))
+                    
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )

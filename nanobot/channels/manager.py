@@ -159,3 +159,29 @@ class ChannelManager:
     def enabled_channels(self) -> list[str]:
         """Get list of enabled channel names."""
         return list(self.channels.keys())
+    
+    def create_reporter(self, channel_name: str, chat_id: str):
+        """
+        创建状态报告器。
+        
+        Args:
+            channel_name: 通道名称（如 "telegram"）
+            chat_id: 聊天 ID
+        
+        Returns:
+            StatusReporter 实例，如果不支持则返回 NullReporter
+        """
+        from nanobot.agent.status import NullReporter
+        
+        if channel_name == "telegram":
+            channel = self.channels.get("telegram")
+            if channel and hasattr(channel, "_app") and channel._app:
+                from nanobot.channels.telegram_reporter import TelegramStatusReporter
+                return TelegramStatusReporter(
+                    bot=channel._app.bot,
+                    chat_id=int(chat_id)
+                )
+        
+        # 其他通道或不支持的情况返回空报告器
+        return NullReporter()
+
