@@ -98,14 +98,14 @@ MODEL_CAPABILITIES: dict[str, ModelCapability] = {
         "streaming": True,
     },
     
-    # ===== MiniMax 系列 - 不支持 Function Calling =====
+    # ===== MiniMax 系列 - 通过 OpenAI 兼容 API 支持 Function Calling =====
     "minimax-m2.1": {
-        "function_calling": False,
+        "function_calling": True,  # 使用 OpenAI 兼容 API
         "vision": False,
         "streaming": True,
     },
     "minimax-text-01": {
-        "function_calling": False,
+        "function_calling": True,  # 使用 OpenAI 兼容 API
         "vision": False,
         "streaming": True,
     },
@@ -162,12 +162,8 @@ def supports_function_calling(model: str) -> bool:
             return caps.get("function_calling", False)
     
     # 基于关键词的快速判断
-    # MiniMax 明确不支持
-    if "minimax" in model_lower:
-        return False
-    
     # 这些通常支持
-    if any(kw in model_lower for kw in ["gemini", "claude", "gpt-4", "gpt-3", "deepseek"]):
+    if any(kw in model_lower for kw in ["gemini", "claude", "gpt-4", "gpt-3", "deepseek", "minimax"]):
         return True
     
     # 默认：假设支持（保守起见可改为 False）

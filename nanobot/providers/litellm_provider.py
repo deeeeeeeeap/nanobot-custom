@@ -115,13 +115,13 @@ class LiteLLMProvider(LLMProvider):
         if "gemini" in model.lower() and not model.startswith("gemini/"):
             model = f"gemini/{model}"
 
-        # For MiniMax, use anthropic/ prefix (Anthropic API 兼容模式)
+        # For MiniMax, use openai/ prefix (OpenAI API 兼容模式，支持 tools)
         if "minimax" in model.lower() and not (
-            model.startswith("anthropic/") or model.startswith("openrouter/")
+            model.startswith("openai/") or model.startswith("openrouter/")
         ):
-            # 提取模型名称并使用 anthropic 前缀
+            # 提取模型名称并使用 openai 前缀
             model_name = model.split("/")[-1] if "/" in model else model
-            model = f"anthropic/{model_name}"
+            model = f"openai/{model_name}"
 
         # For vLLM, use hosted_vllm/ prefix per LiteLLM docs
         # Convert openai/ prefix to hosted_vllm/ if user specified it
@@ -143,10 +143,12 @@ class LiteLLMProvider(LLMProvider):
         if self.api_base:
             kwargs["api_base"] = self.api_base
         
-        # For MiniMax, explicitly pass api_key and api_base
+        # For MiniMax, explicitly pass api_key and api_base (OpenAI 兼容端点)
         if "minimax" in (model or self.default_model).lower():
             kwargs["api_key"] = self.api_key
-            kwargs["api_base"] = self.api_base or "https://api.minimaxi.com/anthropic"
+            kwargs["api_base"] = self.api_base or "https://api.minimaxi.com/v1"
+            # MiniMax 要求 temperature 在 (0.0, 1.0] 范围内
+            kwargs["temperature"] = min(max(temperature, 0.01), 1.0)
         
         if tools:
             kwargs["tools"] = tools
