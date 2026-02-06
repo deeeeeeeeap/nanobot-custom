@@ -123,6 +123,12 @@ class TelegramChannel(BaseChannel):
         # Add /model command handler for dynamic model switching
         self._app.add_handler(CommandHandler("model", self._on_model))
         
+        # Add /status command handler
+        self._app.add_handler(CommandHandler("status", self._on_status))
+        
+        # Add /clear command handler
+        self._app.add_handler(CommandHandler("clear", self._on_clear))
+        
         logger.info("Starting Telegram bot (polling mode)...")
         
         # Initialize and start polling
@@ -277,6 +283,61 @@ class TelegramChannel(BaseChannel):
                 f"❌ <b>错误</b>: {str(e)}",
                 parse_mode="HTML"
             )
+    
+    async def _on_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /status command - show current bot status."""
+        if not update.message:
+            return
+        
+        try:
+            from nanobot.config.loader import load_config
+            config = load_config()
+            
+            current_model = config.agents.defaults.model
+            brave_key = config.tools.web.search.api_key
+            workspace = config.workspace_path
+            
+            status_msg = (
+                f"📊 <b>Bot 状态</b>\n\n"
+                f"🤖 <b>当前模型</b>: <code>{current_model}</code>\n"
+                f"🔍 <b>搜索 API</b>: {'✅ 已配置' if brave_key else '❌ 未配置'}\n"
+                f"📍 <b>工作目录</b>: <code>{workspace}</code>\n"
+            )
+            
+            await update.message.reply_text(status_msg, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Error handling /status command: {e}")
+            await update.message.reply_text(f"❌ 获取状态失败: {e}")
+    
+    async def _on_clear(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /clear command - clear session history."""
+        if not update.message or not update.effective_user:
+            return
+        
+        try:
+            chat_id = str(update.message.chat_id)
+            user_id = str(update.effective_user.id)
+            
+            # 构造 session key (与 loop.py 中的逻辑一致)
+            session_key = f"telegram:{chat_id}"
+            
+            # 尝试清除会话
+            from pathlib import Path
+            session_dir = Path.home() / ".nanobot" / "sessions"
+            session_file = session_dir / f"{session_key.replace(':', '_')}.json"
+            
+            if session_file.exists():
+                session_file.unlink()
+                logger.info(f"Cleared session: {session_key}")
+            
+            await update.message.reply_text(
+                "🗑️ <b>会话已清空</b>\n\n"
+                "对话历史已重置，让我们重新开始！",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Error handling /clear command: {e}")
+            await update.message.reply_text(f"❌ 清空失败: {e}")
     
     async def _on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming messages (text, photos, voice, documents)."""

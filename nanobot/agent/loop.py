@@ -136,6 +136,46 @@ class AgentLoop:
         self._running = False
         logger.info("Agent loop stopping")
     
+    def _update_provider_env(self, model: str, api_key: str | None, api_base: str | None) -> None:
+        """
+        更新 provider 的 API key 和环境变量。
+        
+        Args:
+            model: 模型名称
+            api_key: API 密钥
+            api_base: API 基础 URL
+        """
+        import os
+        
+        if api_key:
+            self.provider.api_key = api_key
+            model_lower = model.lower()
+            
+            # 根据模型名称设置对应的环境变量
+            env_mapping = {
+                "gemini": "GEMINI_API_KEY",
+                "anthropic": "ANTHROPIC_API_KEY",
+                "claude": "ANTHROPIC_API_KEY",
+                "openai": "OPENAI_API_KEY",
+                "gpt": "OPENAI_API_KEY",
+                "deepseek": "DEEPSEEK_API_KEY",
+                "groq": "GROQ_API_KEY",
+            }
+            
+            for keyword, env_var in env_mapping.items():
+                if keyword in model_lower:
+                    os.environ[env_var] = api_key
+                    logger.debug(f"Set {env_var} for model {model}")
+                    break
+            
+            # MiniMax 需要特殊处理（使用 Anthropic 兼容 API）
+            if "minimax" in model_lower:
+                os.environ["ANTHROPIC_API_KEY"] = api_key
+                os.environ["ANTHROPIC_BASE_URL"] = api_base or "https://api.minimaxi.com/anthropic"
+        
+        if api_base:
+            self.provider.api_base = api_base
+    
     async def _process_message(self, msg: InboundMessage) -> OutboundMessage | None:
         """
         Process a single inbound message.
@@ -154,7 +194,6 @@ class AgentLoop:
         logger.info(f"Processing message from {msg.channel}:{msg.sender_id}")
         
         # 动态读取最新的模型配置，让 /model 命令切换立即生效
-        import os
         from nanobot.config.loader import load_config
         try:
             current_config = load_config()
@@ -163,29 +202,9 @@ class AgentLoop:
             if current_model != self.model:
                 logger.info(f"Model changed from {self.model} to {current_model}")
                 self.model = current_model
-                # 更新 provider 属性和环境变量
                 api_key = current_config.get_api_key(current_model)
                 api_base = current_config.get_api_base(current_model)
-                if api_key:
-                    self.provider.api_key = api_key
-                    # 根据模型名称设置对应的环境变量
-                    model_lower = current_model.lower()
-                    if "gemini" in model_lower:
-                        os.environ["GEMINI_API_KEY"] = api_key
-                        logger.debug(f"Set GEMINI_API_KEY for model {current_model}")
-                    elif "anthropic" in model_lower or "claude" in model_lower:
-                        os.environ["ANTHROPIC_API_KEY"] = api_key
-                    elif "openai" in model_lower or "gpt" in model_lower:
-                        os.environ["OPENAI_API_KEY"] = api_key
-                    elif "deepseek" in model_lower:
-                        os.environ["DEEPSEEK_API_KEY"] = api_key
-                    elif "minimax" in model_lower:
-                        os.environ["ANTHROPIC_API_KEY"] = api_key
-                        os.environ["ANTHROPIC_BASE_URL"] = api_base or "https://api.minimaxi.com/anthropic"
-                    elif "groq" in model_lower:
-                        os.environ["GROQ_API_KEY"] = api_key
-                if api_base:
-                    self.provider.api_base = api_base
+                self._update_provider_env(current_model, api_key, api_base)
         except Exception as e:
             logger.warning(f"Failed to reload config: {e}, using cached model")
         
