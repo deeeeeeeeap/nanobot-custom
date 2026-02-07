@@ -171,23 +171,78 @@ class TelegramChannel(BaseChannel):
             chat_id = int(msg.chat_id)
             # Convert markdown to Telegram HTML
             html_content = _markdown_to_telegram_html(msg.content)
-            await self._app.bot.send_message(
-                chat_id=chat_id,
-                text=html_content,
-                parse_mode="HTML"
-            )
+            
+            # Telegram 消息限制 4096 字符，需要分片发送
+            MAX_LENGTH = 4000  # 留一些余量
+            if len(html_content) <= MAX_LENGTH:
+                await self._app.bot.send_message(
+                    chat_id=chat_id,
+                    text=html_content,
+                    parse_mode="HTML"
+                )
+            else:
+                # 分片发送长消息
+                chunks = self._split_message(html_content, MAX_LENGTH)
+                for i, chunk in enumerate(chunks):
+                    try:
+                        await self._app.bot.send_message(
+                            chat_id=chat_id,
+                            text=chunk,
+                            parse_mode="HTML"
+                        )
+                    except Exception:
+                        # HTML 解析失败时用纯文本
+                        plain_chunk = self._split_message(msg.content, MAX_LENGTH)[i] if i < len(self._split_message(msg.content, MAX_LENGTH)) else chunk
+                        await self._app.bot.send_message(
+                            chat_id=chat_id,
+                            text=plain_chunk
+                        )
         except ValueError:
             logger.error(f"Invalid chat_id: {msg.chat_id}")
         except Exception as e:
             # Fallback to plain text if HTML parsing fails
             logger.warning(f"HTML parse failed, falling back to plain text: {e}")
             try:
-                await self._app.bot.send_message(
-                    chat_id=int(msg.chat_id),
-                    text=msg.content
-                )
+                # 分片发送纯文本
+                MAX_LENGTH = 4000
+                if len(msg.content) <= MAX_LENGTH:
+                    await self._app.bot.send_message(
+                        chat_id=int(msg.chat_id),
+                        text=msg.content
+                    )
+                else:
+                    for chunk in self._split_message(msg.content, MAX_LENGTH):
+                        await self._app.bot.send_message(
+                            chat_id=int(msg.chat_id),
+                            text=chunk
+                        )
             except Exception as e2:
                 logger.error(f"Error sending Telegram message: {e2}")
+    
+    def _split_message(self, text: str, max_length: int) -> list[str]:
+        """将长消息分割成多个片段，尽量在换行处分割。"""
+        if len(text) <= max_length:
+            return [text]
+        
+        chunks = []
+        current = ""
+        
+        for line in text.split('\n'):
+            if len(current) + len(line) + 1 <= max_length:
+                current += line + '\n'
+            else:
+                if current:
+                    chunks.append(current.rstrip())
+                # 如果单行超长，强制截断
+                while len(line) > max_length:
+                    chunks.append(line[:max_length])
+                    line = line[max_length:]
+                current = line + '\n'
+        
+        if current.strip():
+            chunks.append(current.rstrip())
+        
+        return chunks if chunks else [text[:max_length]]
     
     async def _on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /start command."""
