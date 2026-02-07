@@ -126,10 +126,7 @@ class LiteLLMProvider(LLMProvider):
             model_name = model.split("/")[-1] if "/" in model else model
             model = f"openai/{model_name}"
 
-        # For vLLM, use hosted_vllm/ prefix per LiteLLM docs
-        # Convert openai/ prefix to hosted_vllm/ if user specified it
-        if self.is_vllm:
-            model = f"hosted_vllm/{model}"
+        # 注意：is_vllm 逻辑已移除，现在只在 OpenAI/GPT 模型处理中应用自定义端点
         
         # kimi-k2.5 only supports temperature=1.0
         if "kimi-k2.5" in model.lower():
@@ -142,9 +139,7 @@ class LiteLLMProvider(LLMProvider):
             "temperature": temperature,
         }
         
-        # Pass api_base directly for custom endpoints (vLLM, etc.)
-        if self.api_base:
-            kwargs["api_base"] = self.api_base
+        # 注意：api_base 现在只对特定模型（OpenAI/GPT、MiniMax）传递，避免影响 Gemini 等原生模型
         
         # For MiniMax, explicitly pass api_key and api_base (OpenAI 兼容端点)
         if "minimax" in (model or self.default_model).lower():
