@@ -267,7 +267,7 @@ class TelegramChannel(BaseChannel):
         Examples:
             /model minimax/MiniMax-M2.1
             /model gemini-3-flash-preview
-            /model anthropic/claude-sonnet-4-5
+            /model openai/gpt-5.3-codex
         """
         if not update.message or not update.effective_user:
             return
@@ -308,7 +308,7 @@ class TelegramChannel(BaseChannel):
                     f"<b>切换模型</b>:\n"
                     f"<code>/model minimax/MiniMax-M2.1</code>\n"
                     f"<code>/model gemini-3-flash-preview</code>\n"
-                    f"<code>/model anthropic/claude-sonnet-4-5</code>",
+                    f"<code>/model openai/gpt-5.3-codex</code>",
                     parse_mode="HTML"
                 )
             else:
