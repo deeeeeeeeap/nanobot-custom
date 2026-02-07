@@ -74,6 +74,18 @@ MODEL_CAPABILITIES: dict[str, ModelCapability] = {
         "streaming": True,
     },
     
+    # ===== GPT-5 Codex 系列 - 通过 Codex CLI/反代访问，不支持 Function Calling =====
+    "gpt-5.3-codex": {
+        "function_calling": False,  # Codex 不支持外部工具调用
+        "vision": False,
+        "streaming": True,
+    },
+    "gpt-5-codex": {
+        "function_calling": False,  # Codex 不支持外部工具调用
+        "vision": False,
+        "streaming": True,
+    },
+    
     # ===== DeepSeek 系列 - 支持 FC =====
     "deepseek-chat": {
         "function_calling": True,
