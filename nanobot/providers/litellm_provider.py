@@ -68,6 +68,9 @@ class LiteLLMProvider(LLMProvider):
         
         # Disable LiteLLM logging noise
         litellm.suppress_debug_info = True
+        
+        # 自动丢弃不支持的参数（如 tool_choice），避免兼容性错误
+        litellm.drop_params = True
     
     async def chat(
         self,
