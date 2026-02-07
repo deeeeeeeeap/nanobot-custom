@@ -155,23 +155,30 @@ class LiteLLMProvider(LLMProvider):
         
         # For OpenAI/GPT models with custom api_base (支持 Codex bridge 等自定义端点)
         # 确保使用 openai/ 前缀让 LiteLLM 正确识别为 OpenAI 兼容格式
-        if ("gpt" in model.lower() or "openai" in model.lower()) and self.api_base:
+        if "gpt" in model.lower() or "openai" in model.lower():
             # 确保模型有 openai/ 前缀
             if not model.startswith("openai/"):
                 model_name = model.split("/")[-1] if "/" in model else model
                 model = f"openai/{model_name}"
             kwargs["model"] = model  # 更新 kwargs 中的 model
-            kwargs["api_key"] = self.api_key
-            kwargs["api_base"] = self.api_base
+            # 如果配置了自定义 api_base，显式传递（支持 Codex bridge）
+            if self.api_base:
+                kwargs["api_key"] = self.api_key
+                kwargs["api_base"] = self.api_base
         
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
         
+        # 调试日志：显示实际发送的请求参数
+        from loguru import logger
+        logger.debug(f"LiteLLM request: model={kwargs.get('model')}, api_base={kwargs.get('api_base', 'default')}, api_key={kwargs.get('api_key', 'env')[:10]}..." if kwargs.get('api_key') else f"LiteLLM request: model={kwargs.get('model')}, api_base={kwargs.get('api_base', 'default')}")
+        
         try:
             response = await acompletion(**kwargs)
             return self._parse_response(response)
         except Exception as e:
+            logger.error(f"LiteLLM API call failed: {e}")
             # Return error as content for graceful handling
             return LLMResponse(
                 content=f"Error calling LLM: {str(e)}",
