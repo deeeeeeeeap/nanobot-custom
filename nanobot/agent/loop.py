@@ -199,8 +199,8 @@ class AgentLoop:
                 os.environ["ANTHROPIC_API_KEY"] = api_key
                 os.environ["ANTHROPIC_BASE_URL"] = api_base or "https://api.minimaxi.com/anthropic"
         
-        if api_base:
-            self.provider.api_base = api_base
+        # 更新 api_base（无论是否有值，都需要更新以确保切换模型时重置）
+        self.provider.api_base = api_base
     
     async def _process_message(
         self, 
