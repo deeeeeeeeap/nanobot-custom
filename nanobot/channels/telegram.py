@@ -337,18 +337,34 @@ class TelegramChannel(BaseChannel):
                         parse_mode="HTML"
                     )
                 else:
-                    await update.message.reply_text(
-                        f"⚠️ <b>模型已切换（功能受限）</b>\n\n"
-                        f"<b>旧模型</b>: <code>{old_model}</code>\n"
-                        f"<b>新模型</b>: <code>{new_model}</code>\n\n"
-                        f"❌ <b>此模型不支持工具调用</b>\n\n"
-                        f"以下功能<b>不可用</b>:\n"
-                        f"- 🔍 网络搜索\n"
-                        f"- 💻 执行命令\n"
-                        f"- 📁 文件操作\n\n"
-                        f"此模型仅适合<b>纯对话</b>场景。",
-                        parse_mode="HTML"
-                    )
+                    # 检查是否是 Codex 模型
+                    is_codex = "codex" in new_model.lower()
+                    
+                    if is_codex:
+                        await update.message.reply_text(
+                            f"🚀 <b>模型已切换到 Codex</b>\n\n"
+                            f"<b>旧模型</b>: <code>{old_model}</code>\n"
+                            f"<b>新模型</b>: <code>{new_model}</code>\n\n"
+                            f"💡 <b>Codex 模式说明</b>:\n"
+                            f"- ✅ Codex 可以<b>自主执行命令</b>\n"
+                            f"- ✅ 支持<b>完整系统权限</b>\n"
+                            f"- ❌ 不支持 nanobot 工具调用\n\n"
+                            f"🔧 Codex 会直接在服务器上执行任务。",
+                            parse_mode="HTML"
+                        )
+                    else:
+                        await update.message.reply_text(
+                            f"⚠️ <b>模型已切换（功能受限）</b>\n\n"
+                            f"<b>旧模型</b>: <code>{old_model}</code>\n"
+                            f"<b>新模型</b>: <code>{new_model}</code>\n\n"
+                            f"❌ <b>此模型不支持工具调用</b>\n\n"
+                            f"以下功能<b>不可用</b>:\n"
+                            f"- 🔍 网络搜索\n"
+                            f"- 💻 执行命令\n"
+                            f"- 📁 文件操作\n\n"
+                            f"此模型仅适合<b>纯对话</b>场景。",
+                            parse_mode="HTML"
+                        )
                 
         except Exception as e:
             logger.error(f"Error handling /model command: {e}")
