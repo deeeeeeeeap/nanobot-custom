@@ -153,6 +153,11 @@ class LiteLLMProvider(LLMProvider):
             # MiniMax 要求 temperature 在 (0.0, 1.0] 范围内
             kwargs["temperature"] = min(max(temperature, 0.01), 1.0)
         
+        # For OpenAI/GPT models, explicitly pass api_key and api_base (支持 Codex bridge)
+        if ("openai/" in model.lower() or "gpt" in model.lower()) and self.api_base:
+            kwargs["api_key"] = self.api_key
+            kwargs["api_base"] = self.api_base
+        
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
