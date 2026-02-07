@@ -176,6 +176,9 @@ class Config(BaseSettings):
             return self.providers.zhipu.api_base
         if "vllm" in model:
             return self.providers.vllm.api_base
+        # OpenAI/GPT 模型（支持 Codex bridge 等自定义端点）
+        if any(k in model for k in ("openai", "gpt")):
+            return self.providers.openai.api_base
         return None
     
     class Config:
