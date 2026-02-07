@@ -340,7 +340,9 @@ class AgentLoop:
         
         # 幻觉检测：只有当模型不支持工具调用时，才检查响应是否包含可疑内容
         # 如果模型支持工具但这次没调用，说明不需要工具，不应误判为幻觉
-        if not model_supports_tools:
+        # 对 Codex 模型禁用幻觉检测，因为 Codex 会自己执行命令，输出包含真实的 shell 结果
+        is_codex_model = "codex" in current_model.lower()
+        if not model_supports_tools and not is_codex_model:
             hallucination = detect_hallucination(
                 final_content, 
                 tools_were_called=tools_were_called,
