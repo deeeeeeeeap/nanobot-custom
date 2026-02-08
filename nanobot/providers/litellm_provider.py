@@ -63,8 +63,8 @@ class LiteLLMProvider(LLMProvider):
                 os.environ.setdefault("ANTHROPIC_API_KEY", api_key)
                 os.environ.setdefault("ANTHROPIC_BASE_URL", api_base or "https://api.minimaxi.com/anthropic")
         
-        if api_base:
-            litellm.api_base = api_base
+        # 注意：不要设置全局 litellm.api_base，否则会影响所有模型
+        # api_base 应该在每次请求时根据模型类型显式传递
         
         # Disable LiteLLM logging noise
         litellm.suppress_debug_info = True
