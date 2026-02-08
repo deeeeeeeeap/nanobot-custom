@@ -82,7 +82,30 @@ HALLUCINATION_PATTERNS: list[tuple[str, str, float]] = [
         r"\|\s*项目\s*\|\s*状态\s*\|",  # 假的状态表格
         0.7
     ),
+    
+    # === 新增：URL/账号编造检测 ===
+    (
+        "fabricated_x_url",
+        r"https?://(?:x\.com|twitter\.com)/\w+/status/\d{15,}",  # X 链接
+        0.85  # 高置信度 - 输出未验证链接很可疑
+    ),
+    (
+        "fabricated_social_account",
+        r"@[A-Za-z_][A-Za-z0-9_]{2,14}\s*[-–—:]\s*[^\n]+",  # @账号 - 描述格式
+        0.65
+    ),
+    (
+        "overconfident_verification",
+        r"(我已|我刚刚|通过.*?)(验证|确认|检查|核实).{0,20}(存在|真实|有效)",
+        0.75  # 声称已验证但可能没有
+    ),
+    (
+        "fabricated_demo_link",
+        r"(Demo|演示|视频)链接[:：]?\s*https?://",
+        0.7
+    ),
 ]
+
 
 
 def detect_hallucination(
@@ -160,3 +183,59 @@ def create_no_tools_available_response() -> str:
         "如需使用工具功能，请切换模型：\n"
         "`/model gemini-2.5-flash-preview`"
     )
+
+
+def should_block_output(text: str) -> tuple[bool, str]:
+    """
+    检查输出是否应该被拦截（包含编造的 URL）。
+    
+    Args:
+        text: 模型的响应文本
+        
+    Returns:
+        (should_block, reason) 元组
+    """
+    try:
+        from nanobot.security.url_validator import extract_and_validate_urls
+        
+        # 检查所有 X 链接
+        url_results = extract_and_validate_urls(text)
+        for result in url_results:
+            if not result.is_valid:
+                return True, f"检测到无效 URL: {result.original} ({result.reason})"
+        
+        return False, ""
+    except ImportError:
+        # 如果 url_validator 模块不可用，跳过检查
+        return False, ""
+
+
+def filter_fabricated_content(text: str) -> tuple[str, list[str]]:
+    """
+    过滤文本中编造的内容（无效 URL）。
+    
+    Args:
+        text: 原始响应文本
+        
+    Returns:
+        (filtered_text, warnings) 元组
+    """
+    warnings = []
+    filtered = text
+    
+    try:
+        from nanobot.security.url_validator import extract_and_validate_urls
+        
+        url_results = extract_and_validate_urls(text)
+        for result in url_results:
+            if not result.is_valid:
+                warnings.append(f"{result.original}: {result.reason}")
+                # 用警告替换无效 URL
+                filtered = filtered.replace(
+                    result.original,
+                    f"[⚠️ 链接已移除: {result.reason}]"
+                )
+    except ImportError:
+        pass
+    
+    return filtered, warnings
