@@ -16,10 +16,41 @@ class ValidationResult(NamedTuple):
     url_type: str       # 链接类型: x, generic
 
 
-# X (Twitter) Status ID 有效范围（基于 Snowflake ID 时间戳）
-# Twitter Snowflake ID 从 2010 年开始，当前 ID 约在 1880000000000000000 左右
-X_STATUS_ID_MIN = 1000000000000000000   # 约 2017 年
-X_STATUS_ID_MAX = 1920000000000000000   # 约 2026 年底（预留一些余量）
+# X (Twitter) Snowflake ID 算法参数
+# Twitter 纪元：2010-11-04 01:42:54.657 UTC（毫秒时间戳）
+TWITTER_EPOCH_MS = 1288834974657
+
+# 最小有效 ID（约 2017 年）
+X_STATUS_ID_MIN = 1000000000000000000
+
+
+def get_max_valid_status_id() -> int:
+    """
+    根据当前时间动态计算 X Status ID 的最大有效值。
+    
+    Twitter Snowflake ID 结构：
+    - 高 41 位：时间戳（毫秒，基于 Twitter 纪元）
+    - 10 位：数据中心 ID + 机器 ID
+    - 12 位：序列号
+    
+    Returns:
+        当前时间 + 6 个月余量对应的最大 Status ID
+    """
+    import time
+    
+    # 当前时间的毫秒时间戳
+    current_ms = int(time.time() * 1000)
+    
+    # 加上 6 个月的余量（约 180 天）
+    buffer_ms = 180 * 24 * 60 * 60 * 1000
+    
+    # 相对于 Twitter 纪元的时间差
+    relative_ms = (current_ms + buffer_ms) - TWITTER_EPOCH_MS
+    
+    # 左移 22 位（10 位机器 ID + 12 位序列号）
+    max_id = relative_ms << 22
+    
+    return max_id
 
 # 检测 X (Twitter) URL 模式
 X_URL_PATTERN = re.compile(
@@ -73,7 +104,7 @@ def validate_x_url(url: str) -> ValidationResult:
             "x"
         )
     
-    if status_id > X_STATUS_ID_MAX:
+    if status_id > get_max_valid_status_id():
         return ValidationResult(
             False, 
             f"Status ID 过大（{status_id}），超出当前时间范围（可能是编造的）",
