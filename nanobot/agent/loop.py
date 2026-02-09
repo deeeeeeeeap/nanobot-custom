@@ -281,8 +281,9 @@ class AgentLoop:
         while iteration < self.max_iterations:
             iteration += 1
             
-            # 报告思考状态
-            await reporter.report(StatusMessage.thinking())
+            # 报告思考状态（Codex 模型使用特殊消息）
+            is_codex = "codex" in current_model.lower()
+            await reporter.report(StatusMessage.thinking(is_codex=is_codex))
             
             # Call LLM - 根据模型能力决定是否传递 tools
             response = await self.provider.chat(

@@ -65,8 +65,10 @@ class StatusMessage:
         return f"{icon} {self.message}"
     
     @classmethod
-    def thinking(cls) -> "StatusMessage":
+    def thinking(cls, is_codex: bool = False) -> "StatusMessage":
         """创建思考状态"""
+        if is_codex:
+            return cls(type=StatusType.THINKING, message="🤖 Codex 正在执行任务...")
         return cls(type=StatusType.THINKING, message="正在思考...")
     
     @classmethod
