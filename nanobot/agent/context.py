@@ -236,7 +236,8 @@ Skills with available="false" need dependencies installed first - you can try in
         self,
         messages: list[dict[str, Any]],
         content: str | None,
-        tool_calls: list[dict[str, Any]] | None = None
+        tool_calls: list[dict[str, Any]] | None = None,
+        reasoning_content: str | None = None,
     ) -> list[dict[str, Any]]:
         """
         Add an assistant message to the message list.
@@ -245,6 +246,7 @@ Skills with available="false" need dependencies installed first - you can try in
             messages: Current message list.
             content: Message content.
             tool_calls: Optional tool calls.
+            reasoning_content: 思维链输出 (DeepSeek-R1, Kimi 等).
         
         Returns:
             Updated message list.
@@ -253,6 +255,10 @@ Skills with available="false" need dependencies installed first - you can try in
         
         if tool_calls:
             msg["tool_calls"] = tool_calls
+        
+        # 思维链模型需要保留 reasoning_content 以避免历史消息报错
+        if reasoning_content:
+            msg["reasoning_content"] = reasoning_content
         
         messages.append(msg)
         return messages

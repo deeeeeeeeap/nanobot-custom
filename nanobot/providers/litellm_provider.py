@@ -211,11 +211,15 @@ class LiteLLMProvider(LLMProvider):
                 "total_tokens": response.usage.total_tokens,
             }
         
+        # 解析 reasoning_content（DeepSeek-R1, Kimi 等思维链模型）
+        reasoning = getattr(message, 'reasoning_content', None)
+        
         return LLMResponse(
             content=message.content,
             tool_calls=tool_calls,
             finish_reason=choice.finish_reason or "stop",
             usage=usage,
+            reasoning_content=reasoning,
         )
     
     def get_default_model(self) -> str:

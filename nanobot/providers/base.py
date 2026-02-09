@@ -20,6 +20,7 @@ class LLMResponse:
     tool_calls: list[ToolCallRequest] = field(default_factory=list)
     finish_reason: str = "stop"
     usage: dict[str, int] = field(default_factory=dict)
+    reasoning_content: str | None = None  # 思维链输出 (DeepSeek-R1, Kimi 等)
     
     @property
     def has_tool_calls(self) -> bool:
