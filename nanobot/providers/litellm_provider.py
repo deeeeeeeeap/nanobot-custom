@@ -35,6 +35,10 @@ class LiteLLMProvider(LLMProvider):
         # Track if using custom endpoint (vLLM, etc.)
         self.is_vllm = bool(api_base) and not self.is_openrouter
         
+        # Antigravity 网关配置（从 config 中获取）
+        self._antigravity_api_key: str | None = None
+        self._antigravity_api_base: str | None = None
+        
         # Configure LiteLLM based on provider
         if api_key:
             if self.is_openrouter:
@@ -115,8 +119,16 @@ class LiteLLMProvider(LLMProvider):
             model = f"moonshot/{model}"
 
         # For Gemini, ensure gemini/ prefix if not already present
-        if "gemini" in model.lower() and not model.startswith("gemini/"):
+        # 注意：通过 Antigravity 网关的 Gemini 模型使用 antigravity/ 前缀，不走这里
+        if "gemini" in model.lower() and not model.startswith("gemini/") and "antigravity" not in model.lower():
             model = f"gemini/{model}"
+
+        # For Antigravity 网关模型，使用 openai/ 前缀（OpenAI 兼容 API）
+        is_antigravity = "antigravity/" in model.lower()
+        if is_antigravity:
+            # 提取实际模型名（去掉 antigravity/ 前缀）
+            model_name = model.split("/", 1)[1] if "/" in model else model
+            model = f"openai/{model_name}"
 
         # For MiniMax, use openai/ prefix (OpenAI API 兼容模式，支持 tools)
         if "minimax" in model.lower() and not (
@@ -138,6 +150,11 @@ class LiteLLMProvider(LLMProvider):
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
+        
+        # Antigravity 网关专用路由（独立于 OpenAI provider）
+        if is_antigravity and self._antigravity_api_key:
+            kwargs["api_key"] = self._antigravity_api_key
+            kwargs["api_base"] = self._antigravity_api_base
         
         # 注意：api_base 现在只对特定模型（OpenAI/GPT、MiniMax）传递，避免影响 Gemini 等原生模型
         

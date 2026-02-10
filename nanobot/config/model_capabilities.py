@@ -46,6 +46,16 @@ MODEL_CAPABILITIES: dict[str, ModelCapability] = {
         "vision": True,
         "streaming": True,
     },
+    "claude-opus-4-6-thinking": {
+        "function_calling": True,
+        "vision": True,
+        "streaming": True,
+    },
+    "claude-opus-4-5-thinking": {
+        "function_calling": True,
+        "vision": True,
+        "streaming": True,
+    },
     "claude-3-5-sonnet": {
         "function_calling": True,
         "vision": True,

@@ -195,6 +195,11 @@ def gateway(
         default_model=config.agents.defaults.model
     )
     
+    # 注入 Antigravity 网关配置（独立于 OpenAI provider）
+    if config.providers.antigravity.api_key:
+        provider._antigravity_api_key = config.providers.antigravity.api_key
+        provider._antigravity_api_base = config.providers.antigravity.api_base
+    
     # Create cron service first (callback set after agent creation)
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
@@ -314,6 +319,11 @@ def agent(
         api_base=api_base,
         default_model=config.agents.defaults.model
     )
+    
+    # 注入 Antigravity 网关配置
+    if config.providers.antigravity.api_key:
+        provider._antigravity_api_key = config.providers.antigravity.api_key
+        provider._antigravity_api_base = config.providers.antigravity.api_base
     
     agent_loop = AgentLoop(
         bus=bus,

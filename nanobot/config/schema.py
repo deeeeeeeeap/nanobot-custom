@@ -79,6 +79,7 @@ class ProvidersConfig(BaseModel):
     gemini: ProviderConfig = Field(default_factory=ProviderConfig)
     moonshot: ProviderConfig = Field(default_factory=ProviderConfig)
     minimax: ProviderConfig = Field(default_factory=ProviderConfig)  # MiniMax M2.1 (Anthropic API 兼容)
+    antigravity: ProviderConfig = Field(default_factory=ProviderConfig)  # Antigravity 网关 (OpenAI 兼容)
 
 
 class GatewayConfig(BaseModel):
@@ -130,6 +131,7 @@ class Config(BaseSettings):
         providers = {
             "openrouter": self.providers.openrouter,
             "deepseek": self.providers.deepseek,
+            "antigravity": self.providers.antigravity,  # Antigravity 网关
             "anthropic": self.providers.anthropic,
             "claude": self.providers.anthropic,
             "openai": self.providers.openai,
@@ -158,10 +160,11 @@ class Config(BaseSettings):
         # Fallback: return first available key
         for provider in [
             self.providers.openrouter, self.providers.deepseek,
-            self.providers.anthropic, self.providers.openai,
-            self.providers.gemini, self.providers.zhipu,
-            self.providers.moonshot, self.providers.minimax,
-            self.providers.vllm, self.providers.groq,
+            self.providers.antigravity, self.providers.anthropic,
+            self.providers.openai, self.providers.gemini,
+            self.providers.zhipu, self.providers.moonshot,
+            self.providers.minimax, self.providers.vllm,
+            self.providers.groq,
         ]:
             if provider.api_key:
                 return provider.api_key
@@ -172,6 +175,9 @@ class Config(BaseSettings):
         model = (model or self.agents.defaults.model).lower()
         if "openrouter" in model:
             return self.providers.openrouter.api_base or "https://openrouter.ai/api/v1"
+        # Antigravity 网关（优先匹配，支持 Claude/Gemini 等模型）
+        if "antigravity" in model:
+            return self.providers.antigravity.api_base
         if any(k in model for k in ("zhipu", "glm", "zai")):
             return self.providers.zhipu.api_base
         if "vllm" in model:

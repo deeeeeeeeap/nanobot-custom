@@ -12,7 +12,9 @@
 
 🪶 **超轻量**：核心代码仅 ~3,400 行
 
-🤖 **多模型支持**：MiniMax M2.1、Gemini、Claude、GPT 等
+🤖 **多模型支持**：Claude、Gemini、GPT、MiniMax、DeepSeek 等
+
+🌐 **Antigravity 网关**：支持 Google Antigravity 多账号轮换，免费使用 Claude 和 Gemini
 
 📱 **Telegram 集成**：随时随地通过 Telegram 与 AI 对话
 
@@ -23,6 +25,8 @@
 📊 **实时状态反馈**：工具执行时显示实时进度（🤔→🔧→✅）
 
 🛡️ **防幻觉机制**：自动检测和拦截模型编造的虚假信息
+
+🧠 **思维链支持**：支持 DeepSeek-R1、Claude Thinking 等模型的推理过程输出
 
 ## 🚀 快速部署
 
@@ -59,33 +63,47 @@ nanobot onboard
 {
   "agents": {
     "defaults": {
-      "model": "minimax/MiniMax-M2.1"
+      "model": "antigravity/claude-opus-4-6-thinking"
     }
   },
   "channels": {
     "telegram": {
       "enabled": true,
       "token": "你的Telegram-Bot-Token",
-      "allowFrom": ["你的用户ID"]
+      "allow_from": ["你的用户ID"]
     }
   },
   "providers": {
-    "minimax": {
-      "apiKey": "你的MiniMax-API-Key",
-      "apiBase": "https://api.minimaxi.com/v1"
+    "antigravity": {
+      "api_key": "你的Antigravity-API-Key",
+      "api_base": "http://127.0.0.1:8045/v1"
     }
   },
   "tools": {
     "web": {
       "search": {
-        "apiKey": "你的Brave-Search-API-Key"
+        "api_key": "你的Brave-Search-API-Key"
       }
     }
   }
 }
 ```
 
-### 5. 创建 systemd 服务
+### 5. 部署 Antigravity 网关（可选）
+
+通过 Docker 部署 [Antigravity-Manager](https://github.com/lbjlaq/Antigravity-Manager)，支持多 Google 账号轮换：
+
+```bash
+docker run -d --name antigravity-manager \
+  -p 8045:8045 \
+  -e API_KEY=你的API密钥 \
+  -v ~/.antigravity_tools:/root/.antigravity_tools \
+  lbjlaq/antigravity-manager:latest
+```
+
+然后访问 `http://服务器IP:8045` 添加 Google 账号。
+
+### 6. 创建 systemd 服务
 
 ```bash
 cat > /etc/systemd/system/nanobot.service << 'EOF'
@@ -117,13 +135,14 @@ systemctl start nanobot
 | `/start` | 开始使用 |
 | `/model` | 查看当前模型和可用 providers |
 | `/model <模型名>` | 切换模型（会显示能力警告） |
-| `/new` | 开始新会话 |
-| `/help` | 查看帮助 |
+| `/status` | 查看当前状态 |
+| `/clear` | 清除会话历史 |
 
 **切换模型示例**：
 ```
-/model minimax/MiniMax-M2.1
-/model gemini-2.5-flash-preview
+/model antigravity/claude-opus-4-6-thinking
+/model antigravity/gemini-3-flash-preview
+/model openai/gpt-5.3-codex
 ```
 
 ## 🔧 常用操作
@@ -138,25 +157,32 @@ systemctl restart nanobot
 # 查看日志
 journalctl -u nanobot -f
 
-# 完整更新（保留配置）
-cp ~/.nanobot/config.json /tmp/config-backup.json
-pipx uninstall nanobot
-rm -rf /opt/nanobot ~/.nanobot
-git clone https://github.com/deeeeeeeeap/nanobot-custom.git /opt/nanobot
-cd /opt/nanobot && pipx install -e .
-mkdir -p ~/.nanobot && mv /tmp/config-backup.json ~/.nanobot/config.json
-systemctl restart nanobot
+# 快速更新（保留配置）
+cd /opt/nanobot && git pull && pipx install -e . --force && systemctl restart nanobot
 ```
 
 ## 📦 支持的模型
 
 | Provider | 模型 | Function Calling | 说明 |
 |----------|------|:----------------:|------|
-| MiniMax | `minimax/MiniMax-M2.1` | ✅ | 推荐，性价比高 |
-| Gemini | `gemini-2.5-flash-preview` | ✅ | Google 高速模型 |
-| Claude | `anthropic/claude-sonnet-4-5` | ✅ | Anthropic 模型 |
+| Antigravity | `antigravity/claude-opus-4-6-thinking` | ✅ | Claude 思维链模型 |
+| Antigravity | `antigravity/gemini-3-flash-preview` | ✅ | Gemini 3 高速模型 |
+| Antigravity | `antigravity/gemini-3-pro` | ✅ | Gemini 3 Pro |
+| OpenAI | `openai/gpt-5.3-codex` | ❌ | Codex 自主执行 |
+| MiniMax | `minimax/MiniMax-M2.1` | ✅ | 性价比高 |
+| Gemini | `gemini-2.5-flash-preview` | ✅ | 直连 Google API |
+| Claude | `anthropic/claude-sonnet-4-5` | ✅ | 直连 Anthropic |
 | DeepSeek | `deepseek/deepseek-chat` | ✅ | 国产模型 |
 | Kimi | `moonshot/kimi-k2.5` | ✅ | Moonshot 模型 |
+
+## 🌐 Antigravity 网关
+
+Antigravity 网关通过 [Antigravity-Manager](https://github.com/lbjlaq/Antigravity-Manager) 实现，提供以下功能：
+
+- 🔄 **多账号轮换**：自动在多个 Google 账号间切换
+- 🔑 **Token 自动刷新**：无需手动管理 OAuth Token
+- 📊 **配额管理**：实时查看每个账号的使用量
+- 🛡️ **独立路由**：与 OpenAI/Codex 端点完全隔离
 
 ## 🛡️ 防幻觉机制
 

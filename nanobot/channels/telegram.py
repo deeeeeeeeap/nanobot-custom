@@ -293,6 +293,7 @@ class TelegramChannel(BaseChannel):
                     ("zhipu", config.providers.zhipu),
                     ("moonshot", config.providers.moonshot),
                     ("minimax", config.providers.minimax),
+                    ("antigravity", config.providers.antigravity),
                     ("vllm", config.providers.vllm),
                 ]
                 
@@ -306,8 +307,8 @@ class TelegramChannel(BaseChannel):
                     f"🤖 <b>当前模型</b>: <code>{current_model}</code>\n\n"
                     f"<b>可用 Providers</b>:\n{providers_list}\n\n"
                     f"<b>切换模型</b>:\n"
-                    f"<code>/model minimax/MiniMax-M2.1</code>\n"
-                    f"<code>/model gemini-3-flash-preview</code>\n"
+                    f"<code>/model antigravity/claude-opus-4-6-thinking</code>\n"
+                    f"<code>/model antigravity/gemini-3-flash-preview</code>\n"
                     f"<code>/model openai/gpt-5.3-codex</code>",
                     parse_mode="HTML"
                 )
