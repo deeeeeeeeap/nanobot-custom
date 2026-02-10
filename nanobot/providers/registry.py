@@ -103,6 +103,25 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         model_overrides=(),
     ),
 
+    # Antigravity: 本地网关，OpenAI 兼容接口，支持多 Google 账号轮换。
+    # strip_model_prefix=True: 去掉 "antigravity/" 前缀，重新加 "openai/" 前缀。
+    ProviderSpec(
+        name="antigravity",
+        keywords=("antigravity",),
+        env_key="OPENAI_API_KEY",           # OpenAI 兼容
+        display_name="Antigravity",
+        litellm_prefix="openai",            # → openai/{model}
+        skip_prefixes=(),
+        env_extras=(),
+        is_gateway=True,
+        is_local=False,
+        detect_by_key_prefix="",
+        detect_by_base_keyword="antigravity",
+        default_api_base="http://127.0.0.1:8045/v1",
+        strip_model_prefix=True,            # antigravity/claude-opus-4-6 → claude-opus-4-6 → openai/claude-opus-4-6
+        model_overrides=(),
+    ),
+
     # === Standard providers (matched by model-name keywords) ===============
 
     # Anthropic: LiteLLM recognizes "claude-*" natively, no prefix needed.

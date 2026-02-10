@@ -188,6 +188,7 @@ class ProvidersConfig(BaseModel):
     gemini: ProviderConfig = Field(default_factory=ProviderConfig)
     moonshot: ProviderConfig = Field(default_factory=ProviderConfig)
     aihubmix: ProviderConfig = Field(default_factory=ProviderConfig)  # AiHubMix API gateway
+    antigravity: ProviderConfig = Field(default_factory=ProviderConfig)  # Antigravity 网关（多账号轮换）
 
 
 class GatewayConfig(BaseModel):
