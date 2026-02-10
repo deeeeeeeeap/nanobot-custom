@@ -1,5 +1,6 @@
 """LiteLLM provider implementation for multi-provider support."""
 
+import json
 import os
 from typing import Any
 
@@ -7,6 +8,7 @@ import litellm
 from litellm import acompletion
 
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from nanobot.providers.registry import find_by_model, find_gateway
 
 
 class LiteLLMProvider(LLMProvider):
@@ -14,67 +16,88 @@ class LiteLLMProvider(LLMProvider):
     LLM provider using LiteLLM for multi-provider support.
     
     Supports OpenRouter, Anthropic, OpenAI, Gemini, and many other providers through
-    a unified interface.
+    a unified interface.  Provider-specific logic is driven by the registry
+    (see providers/registry.py) — no if-elif chains needed here.
     """
     
     def __init__(
         self, 
         api_key: str | None = None, 
         api_base: str | None = None,
-        default_model: str = "anthropic/claude-opus-4-5"
+        default_model: str = "anthropic/claude-opus-4-5",
+        extra_headers: dict[str, str] | None = None,
+        provider_name: str | None = None,
     ):
         super().__init__(api_key, api_base)
         self.default_model = default_model
+        self.extra_headers = extra_headers or {}
         
-        # Detect OpenRouter by api_key prefix or explicit api_base
-        self.is_openrouter = (
-            (api_key and api_key.startswith("sk-or-")) or
-            (api_base and "openrouter" in api_base)
-        )
+        # Detect gateway / local deployment.
+        # provider_name (from config key) is the primary signal;
+        # api_key / api_base are fallback for auto-detection.
+        self._gateway = find_gateway(provider_name, api_key, api_base)
         
-        # Track if using custom endpoint (vLLM, etc.)
-        self.is_vllm = bool(api_base) and not self.is_openrouter
-        
-        # Antigravity 网关配置（从 config 中获取）
-        self._antigravity_api_key: str | None = None
-        self._antigravity_api_base: str | None = None
-        
-        # Configure LiteLLM based on provider
+        # Configure environment variables
         if api_key:
-            if self.is_openrouter:
-                # OpenRouter mode - set key
-                os.environ["OPENROUTER_API_KEY"] = api_key
-            elif self.is_vllm:
-                # vLLM/custom endpoint - uses OpenAI-compatible API
-                os.environ["OPENAI_API_KEY"] = api_key
-            elif "deepseek" in default_model:
-                os.environ.setdefault("DEEPSEEK_API_KEY", api_key)
-            elif "anthropic" in default_model:
-                os.environ.setdefault("ANTHROPIC_API_KEY", api_key)
-            elif "openai" in default_model or "gpt" in default_model:
-                os.environ.setdefault("OPENAI_API_KEY", api_key)
-            elif "gemini" in default_model.lower():
-                os.environ.setdefault("GEMINI_API_KEY", api_key)
-            elif "zhipu" in default_model or "glm" in default_model or "zai" in default_model:
-                os.environ.setdefault("ZHIPUAI_API_KEY", api_key)
-            elif "groq" in default_model:
-                os.environ.setdefault("GROQ_API_KEY", api_key)
-            elif "moonshot" in default_model or "kimi" in default_model:
-                os.environ.setdefault("MOONSHOT_API_KEY", api_key)
-                os.environ.setdefault("MOONSHOT_API_BASE", api_base or "https://api.moonshot.cn/v1")
-            elif "minimax" in default_model:
-                # MiniMax 使用 Anthropic API 兼容模式
-                os.environ.setdefault("ANTHROPIC_API_KEY", api_key)
-                os.environ.setdefault("ANTHROPIC_BASE_URL", api_base or "https://api.minimaxi.com/anthropic")
+            self._setup_env(api_key, api_base, default_model)
         
-        # 注意：不要设置全局 litellm.api_base，否则会影响所有模型
-        # api_base 应该在每次请求时根据模型类型显式传递
+        if api_base:
+            litellm.api_base = api_base
         
         # Disable LiteLLM logging noise
         litellm.suppress_debug_info = True
-        
-        # 自动丢弃不支持的参数（如 tool_choice），避免兼容性错误
+        # Drop unsupported parameters for providers (e.g., gpt-5 rejects some params)
         litellm.drop_params = True
+    
+    def _setup_env(self, api_key: str, api_base: str | None, model: str) -> None:
+        """Set environment variables based on detected provider."""
+        spec = self._gateway or find_by_model(model)
+        if not spec:
+            return
+
+        # Gateway/local overrides existing env; standard provider doesn't
+        if self._gateway:
+            os.environ[spec.env_key] = api_key
+        else:
+            os.environ.setdefault(spec.env_key, api_key)
+
+        # Resolve env_extras placeholders:
+        #   {api_key}  → user's API key
+        #   {api_base} → user's api_base, falling back to spec.default_api_base
+        effective_base = api_base or spec.default_api_base
+        for env_name, env_val in spec.env_extras:
+            resolved = env_val.replace("{api_key}", api_key)
+            resolved = resolved.replace("{api_base}", effective_base)
+            os.environ.setdefault(env_name, resolved)
+    
+    def _resolve_model(self, model: str) -> str:
+        """Resolve model name by applying provider/gateway prefixes."""
+        if self._gateway:
+            # Gateway mode: apply gateway prefix, skip provider-specific prefixes
+            prefix = self._gateway.litellm_prefix
+            if self._gateway.strip_model_prefix:
+                model = model.split("/")[-1]
+            if prefix and not model.startswith(f"{prefix}/"):
+                model = f"{prefix}/{model}"
+            return model
+        
+        # Standard mode: auto-prefix for known providers
+        spec = find_by_model(model)
+        if spec and spec.litellm_prefix:
+            if not any(model.startswith(s) for s in spec.skip_prefixes):
+                model = f"{spec.litellm_prefix}/{model}"
+        
+        return model
+    
+    def _apply_model_overrides(self, model: str, kwargs: dict[str, Any]) -> None:
+        """Apply model-specific parameter overrides from the registry."""
+        model_lower = model.lower()
+        spec = find_by_model(model)
+        if spec:
+            for pattern, overrides in spec.model_overrides:
+                if pattern in model_lower:
+                    kwargs.update(overrides)
+                    return
     
     async def chat(
         self,
@@ -97,53 +120,8 @@ class LiteLLMProvider(LLMProvider):
         Returns:
             LLMResponse with content and/or tool calls.
         """
-        model = model or self.default_model
+        model = self._resolve_model(model or self.default_model)
         
-        # For OpenRouter, prefix model name if not already prefixed
-        if self.is_openrouter and not model.startswith("openrouter/"):
-            model = f"openrouter/{model}"
-        
-        # For Zhipu/Z.ai, ensure prefix is present
-        # Handle cases like "glm-4.7-flash" -> "zai/glm-4.7-flash"
-        if ("glm" in model.lower() or "zhipu" in model.lower()) and not (
-            model.startswith("zhipu/") or 
-            model.startswith("zai/") or 
-            model.startswith("openrouter/")
-        ):
-            model = f"zai/{model}"
-
-        # For Moonshot/Kimi, ensure moonshot/ prefix (before vLLM check)
-        if ("moonshot" in model.lower() or "kimi" in model.lower()) and not (
-            model.startswith("moonshot/") or model.startswith("openrouter/")
-        ):
-            model = f"moonshot/{model}"
-
-        # For Gemini, ensure gemini/ prefix if not already present
-        # 注意：通过 Antigravity 网关的 Gemini 模型使用 antigravity/ 前缀，不走这里
-        if "gemini" in model.lower() and not model.startswith("gemini/") and "antigravity" not in model.lower():
-            model = f"gemini/{model}"
-
-        # For Antigravity 网关模型，使用 openai/ 前缀（OpenAI 兼容 API）
-        is_antigravity = "antigravity/" in model.lower()
-        if is_antigravity:
-            # 提取实际模型名（去掉 antigravity/ 前缀）
-            model_name = model.split("/", 1)[1] if "/" in model else model
-            model = f"openai/{model_name}"
-
-        # For MiniMax, use openai/ prefix (OpenAI API 兼容模式，支持 tools)
-        if "minimax" in model.lower() and not (
-            model.startswith("openai/") or model.startswith("openrouter/")
-        ):
-            # 提取模型名称并使用 openai 前缀
-            model_name = model.split("/")[-1] if "/" in model else model
-            model = f"openai/{model_name}"
-
-        # 注意：is_vllm 逻辑已移除，现在只在 OpenAI/GPT 模型处理中应用自定义端点
-        
-        # kimi-k2.5 only supports temperature=1.0
-        if "kimi-k2.5" in model.lower():
-            temperature = 1.0
-
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -151,46 +129,29 @@ class LiteLLMProvider(LLMProvider):
             "temperature": temperature,
         }
         
-        # Antigravity 网关专用路由（独立于 OpenAI provider）
-        if is_antigravity and self._antigravity_api_key:
-            kwargs["api_key"] = self._antigravity_api_key
-            kwargs["api_base"] = self._antigravity_api_base
+        # Apply model-specific overrides (e.g. kimi-k2.5 temperature)
+        self._apply_model_overrides(model, kwargs)
         
-        # 注意：api_base 现在只对特定模型（OpenAI/GPT、MiniMax）传递，避免影响 Gemini 等原生模型
-        
-        # For MiniMax, explicitly pass api_key and api_base (OpenAI 兼容端点)
-        if "minimax" in (model or self.default_model).lower():
+        # Pass api_key directly — more reliable than env vars alone
+        if self.api_key:
             kwargs["api_key"] = self.api_key
-            kwargs["api_base"] = self.api_base or "https://api.minimaxi.com/v1"
-            # MiniMax 要求 temperature 在 (0.0, 1.0] 范围内
-            kwargs["temperature"] = min(max(temperature, 0.01), 1.0)
         
-        # For OpenAI/GPT models with custom api_base (支持 Codex bridge 等自定义端点)
-        # 确保使用 openai/ 前缀让 LiteLLM 正确识别为 OpenAI 兼容格式
-        if "gpt" in model.lower() or "openai" in model.lower():
-            # 确保模型有 openai/ 前缀
-            if not model.startswith("openai/"):
-                model_name = model.split("/")[-1] if "/" in model else model
-                model = f"openai/{model_name}"
-            kwargs["model"] = model  # 更新 kwargs 中的 model
-            # 如果配置了自定义 api_base，显式传递（支持 Codex bridge）
-            if self.api_base:
-                kwargs["api_key"] = self.api_key
-                kwargs["api_base"] = self.api_base
+        # Pass api_base for custom endpoints
+        if self.api_base:
+            kwargs["api_base"] = self.api_base
+        
+        # Pass extra headers (e.g. APP-Code for AiHubMix)
+        if self.extra_headers:
+            kwargs["extra_headers"] = self.extra_headers
         
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
         
-        # 调试日志：显示实际发送的请求参数
-        from loguru import logger
-        logger.debug(f"LiteLLM request: model={kwargs.get('model')}, api_base={kwargs.get('api_base', 'default')}, api_key={kwargs.get('api_key', 'env')[:10]}..." if kwargs.get('api_key') else f"LiteLLM request: model={kwargs.get('model')}, api_base={kwargs.get('api_base', 'default')}")
-        
         try:
             response = await acompletion(**kwargs)
             return self._parse_response(response)
         except Exception as e:
-            logger.error(f"LiteLLM API call failed: {e}")
             # Return error as content for graceful handling
             return LLMResponse(
                 content=f"Error calling LLM: {str(e)}",
@@ -208,7 +169,6 @@ class LiteLLMProvider(LLMProvider):
                 # Parse arguments from JSON string if needed
                 args = tc.function.arguments
                 if isinstance(args, str):
-                    import json
                     try:
                         args = json.loads(args)
                     except json.JSONDecodeError:
@@ -228,15 +188,14 @@ class LiteLLMProvider(LLMProvider):
                 "total_tokens": response.usage.total_tokens,
             }
         
-        # 解析 reasoning_content（DeepSeek-R1, Kimi 等思维链模型）
-        reasoning = getattr(message, 'reasoning_content', None)
+        reasoning_content = getattr(message, "reasoning_content", None)
         
         return LLMResponse(
             content=message.content,
             tool_calls=tool_calls,
             finish_reason=choice.finish_reason or "stop",
             usage=usage,
-            reasoning_content=reasoning,
+            reasoning_content=reasoning_content,
         )
     
     def get_default_model(self) -> str:

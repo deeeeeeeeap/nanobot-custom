@@ -10,13 +10,13 @@
 
 ## ✨ 特性
 
-🪶 **超轻量**：核心代码仅 ~3,400 行
+🪶 **超轻量**：核心代码仅 ~4,000 行
 
 🤖 **多模型支持**：Claude、Gemini、GPT、MiniMax、DeepSeek 等
 
 🌐 **Antigravity 网关**：支持 Google Antigravity 多账号轮换，免费使用 Claude 和 Gemini
 
-📱 **Telegram 集成**：随时随地通过 Telegram 与 AI 对话
+📱 **多频道集成**：Telegram / 飞书 / 钉钉 / Slack / Email / QQ / Discord / WhatsApp
 
 🔍 **网络搜索**：集成 Brave Search，实时获取网络信息
 
@@ -24,7 +24,7 @@
 
 📊 **实时状态反馈**：工具执行时显示实时进度（🤔→🔧→✅）
 
-🛡️ **防幻觉机制**：自动检测和拦截模型编造的虚假信息
+🛡️ **防幻觉机制**：自动检测和拦截模型编造的虚假信息（URL 验证 + 输出拦截）
 
 🧠 **思维链支持**：支持 DeepSeek-R1、Claude Thinking 等模型的推理过程输出
 
@@ -71,6 +71,16 @@ nanobot onboard
       "enabled": true,
       "token": "你的Telegram-Bot-Token",
       "allow_from": ["你的用户ID"]
+    },
+    "dingtalk": {
+      "enabled": false,
+      "client_id": "",
+      "client_secret": ""
+    },
+    "slack": {
+      "enabled": false,
+      "bot_token": "",
+      "app_token": ""
     }
   },
   "providers": {
@@ -128,7 +138,20 @@ systemctl enable nanobot
 systemctl start nanobot
 ```
 
-## 📱 Telegram 命令
+## 📱 支持的频道
+
+| 频道 | 状态 | 说明 |
+|------|:----:|------|
+| Telegram | ✅ | Bot API，支持 SOCKS5 代理 |
+| 飞书 (Feishu) | ✅ | WebSocket 长连接 |
+| 钉钉 (DingTalk) | ✅ | Stream 模式 |
+| Slack | ✅ | Socket Mode |
+| Email | ✅ | IMAP 收信 + SMTP 发信 |
+| QQ | ✅ | 基于 botpy SDK |
+| Discord | ✅ | Gateway WebSocket |
+| WhatsApp | ✅ | 通过 WhatsApp Bridge |
+
+### Telegram 命令
 
 | 命令 | 说明 |
 |------|------|
@@ -205,7 +228,7 @@ Antigravity 网关通过 [Antigravity-Manager](https://github.com/lbjlaq/Antigra
 
 ## 🙏 致谢
 
-本项目基于 [HKUDS/nanobot](https://github.com/HKUDS/nanobot) 修改。
+本项目基于 [HKUDS/nanobot](https://github.com/HKUDS/nanobot) v0.1.3.post6 修改。
 
 ---
 

@@ -20,12 +20,15 @@ from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.subagent import SubagentManager
 from nanobot.session.manager import SessionManager
+# 定制：模型能力检测
 from nanobot.config.model_capabilities import supports_function_calling
+# 定制：幻觉检测
 from nanobot.agent.hallucination_detector import (
     detect_hallucination, 
     create_honest_response,
     create_no_tools_available_response
 )
+# 定制：状态报告
 from nanobot.agent.status import StatusMessage, StatusReporter, NullReporter
 
 
@@ -51,6 +54,8 @@ class AgentLoop:
         brave_api_key: str | None = None,
         exec_config: "ExecToolConfig | None" = None,
         cron_service: "CronService | None" = None,
+        restrict_to_workspace: bool = False,
+        session_manager: SessionManager | None = None,
         reporter_factory: "Callable[[str, str], StatusReporter] | None" = None,
     ):
         from nanobot.config.schema import ExecToolConfig
@@ -64,10 +69,11 @@ class AgentLoop:
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
-        self.reporter_factory = reporter_factory  # 状态报告器工厂
+        self.restrict_to_workspace = restrict_to_workspace
+        self.reporter_factory = reporter_factory  # 定制：状态报告器工厂
         
         self.context = ContextBuilder(workspace)
-        self.sessions = SessionManager(workspace)
+        self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(
             provider=provider,
@@ -76,6 +82,7 @@ class AgentLoop:
             model=self.model,
             brave_api_key=brave_api_key,
             exec_config=self.exec_config,
+            restrict_to_workspace=restrict_to_workspace,
         )
         
         self._running = False
@@ -83,32 +90,33 @@ class AgentLoop:
     
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
-        # File tools
-        self.tools.register(ReadFileTool())
-        self.tools.register(WriteFileTool())
-        self.tools.register(EditFileTool())
-        self.tools.register(ListDirTool())
+        # 文件工具（如配置则限制为 workspace 目录）
+        allowed_dir = self.workspace if self.restrict_to_workspace else None
+        self.tools.register(ReadFileTool(allowed_dir=allowed_dir))
+        self.tools.register(WriteFileTool(allowed_dir=allowed_dir))
+        self.tools.register(EditFileTool(allowed_dir=allowed_dir))
+        self.tools.register(ListDirTool(allowed_dir=allowed_dir))
         
-        # Shell tool
+        # Shell 工具
         self.tools.register(ExecTool(
             working_dir=str(self.workspace),
             timeout=self.exec_config.timeout,
-            restrict_to_workspace=self.exec_config.restrict_to_workspace,
+            restrict_to_workspace=self.restrict_to_workspace,
         ))
         
-        # Web tools
+        # Web 工具
         self.tools.register(WebSearchTool(api_key=self.brave_api_key))
         self.tools.register(WebFetchTool())
         
-        # Message tool
+        # 消息工具
         message_tool = MessageTool(send_callback=self.bus.publish_outbound)
         self.tools.register(message_tool)
         
-        # Spawn tool (for subagents)
+        # 子代理工具
         spawn_tool = SpawnTool(manager=self.subagents)
         self.tools.register(spawn_tool)
         
-        # Cron tool (for scheduling)
+        # 定时任务工具
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
     
@@ -119,36 +127,36 @@ class AgentLoop:
         
         while self._running:
             try:
-                # Wait for next message
+                # 等待下一条消息
                 msg = await asyncio.wait_for(
                     self.bus.consume_inbound(),
                     timeout=1.0
                 )
                 
-                # 创建状态报告器（如果有工厂）
+                # 定制：创建状态报告器（如果有工厂）
                 reporter = None
                 if self.reporter_factory and msg.channel != "system":
                     try:
                         reporter = self.reporter_factory(msg.channel, msg.chat_id)
                     except Exception as e:
-                        logger.warning(f"Failed to create reporter: {e}")
+                        logger.warning(f"创建状态报告器失败: {e}")
                 
-                # Process it
+                # 处理消息
                 try:
                     response = await self._process_message(msg, reporter=reporter)
                     
-                    # 完成后清理状态消息
+                    # 定制：完成后清理状态消息
                     if reporter:
                         await reporter.finalize(delete_status=True)
                     
                     if response:
                         await self.bus.publish_outbound(response)
                 except Exception as e:
-                    logger.error(f"Error processing message: {e}")
-                    # 完成后清理状态消息（出错时也要清理）
+                    logger.error(f"处理消息时出错: {e}")
+                    # 出错时也要清理状态消息
                     if reporter:
                         await reporter.finalize(delete_status=True)
-                    # Send error response
+                    # 发送错误响应
                     await self.bus.publish_outbound(OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
@@ -164,12 +172,8 @@ class AgentLoop:
     
     def _update_provider_env(self, model: str, api_key: str | None, api_base: str | None) -> None:
         """
-        更新 provider 的 API key 和环境变量。
-        
-        Args:
-            model: 模型名称
-            api_key: API 密钥
-            api_base: API 基础 URL
+        定制：更新 provider 的 API key 和环境变量。
+        用于动态模型切换时更新 provider 配置。
         """
         import os
         
@@ -212,23 +216,24 @@ class AgentLoop:
         
         Args:
             msg: The inbound message to process.
-            reporter: 可选的状态报告器，用于实时反馈进度
+            reporter: 定制：可选的状态报告器，用于实时反馈进度
         
         Returns:
             The response message, or None if no response needed.
         """
-        # 使用空报告器如果没有提供
+        # 定制：使用空报告器如果没有提供
         if reporter is None:
             reporter = NullReporter()
         
-        # Handle system messages (subagent announces)
-        # The chat_id contains the original "channel:chat_id" to route back to
+        # 处理系统消息（子代理通知）
         if msg.channel == "system":
             return await self._process_system_message(msg)
         
-        logger.info(f"Processing message from {msg.channel}:{msg.sender_id}")
+        preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
+        logger.info(f"Processing message from {msg.channel}:{msg.sender_id}: {preview}")
         
-        # 动态读取最新的模型配置，让 /model 命令切换立即生效
+        # 定制：动态读取最新的模型配置，让 /model 命令切换立即生效
+        current_model = self.model
         from nanobot.config.loader import load_config
         try:
             current_config = load_config()
@@ -243,10 +248,10 @@ class AgentLoop:
         except Exception as e:
             logger.warning(f"Failed to reload config: {e}, using cached model")
         
-        # Get or create session
+        # 获取或创建会话
         session = self.sessions.get_or_create(msg.session_key)
         
-        # Update tool contexts
+        # 更新工具上下文
         message_tool = self.tools.get("message")
         if isinstance(message_tool, MessageTool):
             message_tool.set_context(msg.channel, msg.chat_id)
@@ -259,7 +264,7 @@ class AgentLoop:
         if isinstance(cron_tool, CronTool):
             cron_tool.set_context(msg.channel, msg.chat_id)
         
-        # Build initial messages (use get_history for LLM-formatted messages)
+        # 构建消息上下文
         messages = self.context.build_messages(
             history=session.get_history(),
             current_message=msg.content,
@@ -268,12 +273,12 @@ class AgentLoop:
             chat_id=msg.chat_id,
         )
         
-        # Agent loop
+        # Agent 循环
         iteration = 0
         final_content = None
-        tools_were_called = False  # 追踪是否真正调用了工具
+        tools_were_called = False  # 定制：追踪是否真正调用了工具
         
-        # 检查模型是否支持 Function Calling
+        # 定制：检查模型是否支持 Function Calling
         model_supports_tools = supports_function_calling(self.model)
         if not model_supports_tools:
             logger.warning(f"Model {self.model} does not support function calling, tools disabled")
@@ -281,27 +286,27 @@ class AgentLoop:
         while iteration < self.max_iterations:
             iteration += 1
             
-            # 报告思考状态（Codex 模型使用特殊消息）
+            # 定制：报告思考状态（Codex 模型使用特殊消息）
             is_codex = "codex" in current_model.lower()
             await reporter.report(StatusMessage.thinking(is_codex=is_codex))
             
-            # Call LLM - 根据模型能力决定是否传递 tools
+            # 调用 LLM - 定制：根据模型能力决定是否传递 tools
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions() if model_supports_tools else None,
                 model=self.model
             )
             
-            # Handle tool calls
+            # 处理工具调用
             if response.has_tool_calls:
-                # Add assistant message with tool calls
+                # 添加 assistant 消息（含工具调用）
                 tool_call_dicts = [
                     {
                         "id": tc.id,
                         "type": "function",
                         "function": {
                             "name": tc.name,
-                            "arguments": json.dumps(tc.arguments)  # Must be JSON string
+                            "arguments": json.dumps(tc.arguments)
                         }
                     }
                     for tc in response.tool_calls
@@ -311,12 +316,12 @@ class AgentLoop:
                     reasoning_content=response.reasoning_content,
                 )
                 
-                # Execute tools
+                # 执行工具
                 for tool_call in response.tool_calls:
-                    args_str = json.dumps(tool_call.arguments)
-                    logger.info(f"Executing tool: {tool_call.name} with arguments: {args_str}")
+                    args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                    logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
                     
-                    # 报告工具开始执行
+                    # 定制：报告工具开始执行
                     await reporter.report(StatusMessage.tool_start(
                         tool_call.name, 
                         tool_call.arguments
@@ -324,7 +329,7 @@ class AgentLoop:
                     
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
                     
-                    # 报告工具执行完成
+                    # 定制：报告工具执行完成
                     success = not (isinstance(result, str) and result.startswith("Error"))
                     await reporter.report(StatusMessage.tool_done(tool_call.name, success))
                     
@@ -333,16 +338,15 @@ class AgentLoop:
                     )
                     tools_were_called = True  # 标记工具被调用
             else:
-                # No tool calls, we're done
+                # 无工具调用，完成
                 final_content = response.content
                 break
         
         if final_content is None:
             final_content = "处理完成，但没有生成响应。"
         
-        # 幻觉检测：只有当模型不支持工具调用时，才检查响应是否包含可疑内容
-        # 如果模型支持工具但这次没调用，说明不需要工具，不应误判为幻觉
-        # 对 Codex 模型禁用幻觉检测，因为 Codex 会自己执行命令，输出包含真实的 shell 结果
+        # 定制：幻觉检测 — 只有当模型不支持工具调用时才检查
+        # 对 Codex 模型禁用幻觉检测（Codex 自己执行命令，输出含真实 shell 结果）
         is_codex_model = "codex" in current_model.lower()
         if not model_supports_tools and not is_codex_model:
             hallucination = detect_hallucination(
@@ -357,7 +361,11 @@ class AgentLoop:
                 )
                 final_content = create_honest_response(self.model)
         
-        # Save to session
+        # 日志：响应预览
+        preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
+        logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
+        
+        # 保存会话
         session.add_message("user", msg.content)
         session.add_message("assistant", final_content)
         self.sessions.save(session)
@@ -365,7 +373,8 @@ class AgentLoop:
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
-            content=final_content
+            content=final_content,
+            metadata=msg.metadata or {},  # 传递频道特定元数据（如 Slack thread_ts）
         )
     
     async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage | None:
@@ -377,21 +386,20 @@ class AgentLoop:
         """
         logger.info(f"Processing system message from {msg.sender_id}")
         
-        # Parse origin from chat_id (format: "channel:chat_id")
+        # 解析来源（格式: "channel:chat_id"）
         if ":" in msg.chat_id:
             parts = msg.chat_id.split(":", 1)
             origin_channel = parts[0]
             origin_chat_id = parts[1]
         else:
-            # Fallback
             origin_channel = "cli"
             origin_chat_id = msg.chat_id
         
-        # Use the origin session for context
+        # 使用来源会话
         session_key = f"{origin_channel}:{origin_chat_id}"
         session = self.sessions.get_or_create(session_key)
         
-        # Update tool contexts
+        # 更新工具上下文
         message_tool = self.tools.get("message")
         if isinstance(message_tool, MessageTool):
             message_tool.set_context(origin_channel, origin_chat_id)
@@ -404,7 +412,7 @@ class AgentLoop:
         if isinstance(cron_tool, CronTool):
             cron_tool.set_context(origin_channel, origin_chat_id)
         
-        # Build messages with the announce content
+        # 构建消息上下文
         messages = self.context.build_messages(
             history=session.get_history(),
             current_message=msg.content,
@@ -412,7 +420,7 @@ class AgentLoop:
             chat_id=origin_chat_id,
         )
         
-        # Agent loop (limited for announce handling)
+        # Agent 循环（子代理消息处理）
         iteration = 0
         final_content = None
         
@@ -438,12 +446,13 @@ class AgentLoop:
                     for tc in response.tool_calls
                 ]
                 messages = self.context.add_assistant_message(
-                    messages, response.content, tool_call_dicts
+                    messages, response.content, tool_call_dicts,
+                    reasoning_content=response.reasoning_content,
                 )
                 
                 for tool_call in response.tool_calls:
-                    args_str = json.dumps(tool_call.arguments)
-                    logger.debug(f"Executing tool: {tool_call.name} with arguments: {args_str}")
+                    args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                    logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
@@ -455,7 +464,7 @@ class AgentLoop:
         if final_content is None:
             final_content = "Background task completed."
         
-        # Save to session (mark as system message in history)
+        # 保存会话（标记为系统消息）
         session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
         session.add_message("assistant", final_content)
         self.sessions.save(session)
