@@ -86,10 +86,11 @@ class TelegramChannel(BaseChannel):
     
     name = "telegram"
     
-    def __init__(self, config: TelegramConfig, bus: MessageBus, groq_api_key: str = ""):
+    def __init__(self, config: TelegramConfig, bus: MessageBus, groq_api_key: str = "", session_manager=None):
         super().__init__(config, bus)
         self.config: TelegramConfig = config
         self.groq_api_key = groq_api_key
+        self.session_manager = session_manager
         self._app: Application | None = None
         self._chat_ids: dict[str, int] = {}  # Map sender_id to chat_id for replies
     
