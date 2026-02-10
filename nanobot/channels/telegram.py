@@ -284,19 +284,13 @@ class TelegramChannel(BaseChannel):
             if not args:
                 # 显示当前模型和可用的 providers
                 providers_status = []
-                provider_configs = [
-                    ("anthropic", config.providers.anthropic),
-                    ("openai", config.providers.openai),
-                    ("openrouter", config.providers.openrouter),
-                    ("deepseek", config.providers.deepseek),
-                    ("gemini", config.providers.gemini),
-                    ("groq", config.providers.groq),
-                    ("zhipu", config.providers.zhipu),
-                    ("moonshot", config.providers.moonshot),
-                    ("minimax", config.providers.minimax),
-                    ("antigravity", config.providers.antigravity),
-                    ("vllm", config.providers.vllm),
-                ]
+                # 从 registry 动态获取 provider 列表，避免硬编码不同步
+                from nanobot.providers.registry import PROVIDERS
+                provider_configs = []
+                for spec in PROVIDERS:
+                    p = getattr(config.providers, spec.name, None)
+                    if p is not None:
+                        provider_configs.append((spec.name, p))
                 
                 for name, provider in provider_configs:
                     status = "✅" if provider.api_key else "❌"
