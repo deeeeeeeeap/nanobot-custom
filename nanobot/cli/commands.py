@@ -400,6 +400,22 @@ def gateway(
     # Create channel manager
     channels = ChannelManager(config, bus, session_manager=session_manager)
     
+    # 定制：连接 Telegram 状态报告器（实时进度反馈 🤔→🔧→✅）
+    if "telegram" in channels.channels:
+        from nanobot.channels.telegram_reporter import TelegramStatusReporter
+        tg_channel = channels.channels["telegram"]
+        
+        def _telegram_reporter_factory(channel: str, chat_id: str):
+            """创建 Telegram 状态报告器的工厂函数。"""
+            if channel == "telegram" and tg_channel._app and tg_channel._app.bot:
+                return TelegramStatusReporter(
+                    bot=tg_channel._app.bot,
+                    chat_id=int(chat_id),
+                )
+            return None
+        
+        agent.reporter_factory = _telegram_reporter_factory
+    
     if channels.enabled_channels:
         console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
     else:
