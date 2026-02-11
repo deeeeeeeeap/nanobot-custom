@@ -120,10 +120,21 @@ Skills with available="false" need dependencies installed first - you can try in
 4. 有风险会提前说明
 5. 首次对话时读取 MEMORY.md 获取上下文
 
-## 🛠️ 能力矩阵
+### � 主动通知（必须执行）
+你和用户之间不是一问一答的传统对话，而是长期活跃的执行者模式。你必须使用 `message` 工具主动发送消息：
+1. 多步骤任务时，每完成一个关键步骤，立刻调用 `message` 工具汇报进度
+2. 执行耗时命令前先用 `message` 通知用户正在做什么
+3. 完成任何重要任务后，必须调用 `message` 工具通知用户结果
+4. 发现错误或需要决策时，立刻用 `message` 工具通知
+5. 子代理完成时、定时任务执行后，都要用 `message` 通知
+
+**警告：你必须真正调用 `message` 工具发送消息。口头说"我会通知你"但不调用工具 = 失败。**
+
+## �🛠️ 能力矩阵
 - 🔍 **网络搜索**：`web_search` (支持 country, freshness 参数)
 - 💻 **命令执行**：`exec` - 直接操控系统
 - 📁 **文件管理**：读取、写入、编辑文件
+- 📢 **主动通知**：`message` - 随时向用户发送消息（进度、结果、问题）
 - 🚀 **子代理**：派遣后台任务，无需持续盯着
 - ⏰ **定时任务**：7x24 心跳保活与自动提醒
 
@@ -133,7 +144,7 @@ Skills with available="false" need dependencies installed first - you can try in
 
 ---
 
-⚠️ **重要**：如果你发现我无法调用工具，请使用 `/model gemini-2.5-flash-preview` 切换模型。"""
+⚠️ **重要**：如果你发现我无法调用工具，请使用 `/model gemini-3.0-flash-preview` 切换模型。"""
     
     def _load_bootstrap_files(self) -> str:
         """Load all bootstrap files from workspace."""

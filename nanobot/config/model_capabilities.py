@@ -168,7 +168,8 @@ def supports_function_calling(model: str) -> bool:
     
     # 移除常见前缀
     prefixes = ["gemini/", "anthropic/", "openai/", "deepseek/", "groq/", 
-                "openrouter/", "hosted_vllm/", "zai/", "moonshot/", "minimax/"]
+                "openrouter/", "hosted_vllm/", "zai/", "moonshot/", "minimax/",
+                "antigravity/", "dashscope/", "aihubmix/"]
     for prefix in prefixes:
         if model_lower.startswith(prefix):
             model_lower = model_lower[len(prefix):]
@@ -207,7 +208,8 @@ def get_model_capability(model: str) -> ModelCapability:
     
     # 移除前缀
     prefixes = ["gemini/", "anthropic/", "openai/", "deepseek/", "groq/", 
-                "openrouter/", "hosted_vllm/", "zai/", "moonshot/", "minimax/"]
+                "openrouter/", "hosted_vllm/", "zai/", "moonshot/", "minimax/",
+                "antigravity/", "dashscope/", "aihubmix/"]
     for prefix in prefixes:
         if model_lower.startswith(prefix):
             model_lower = model_lower[len(prefix):]
