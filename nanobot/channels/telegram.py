@@ -130,6 +130,9 @@ class TelegramChannel(BaseChannel):
         # Add /clear command handler
         self._app.add_handler(CommandHandler("clear", self._on_clear))
         
+        # Add /help command handler
+        self._app.add_handler(CommandHandler("help", self._on_help))
+        
         logger.info("Starting Telegram bot (polling mode)...")
         
         # Initialize and start polling
@@ -254,8 +257,30 @@ class TelegramChannel(BaseChannel):
         await update.message.reply_text(
             f"👋 Hi {user.first_name}! I'm nanobot.\n\n"
             "Send me a message and I'll respond!\n\n"
-            "Commands:\n"
-            "/model - View or change the AI model"
+            "ℹ️ /help - 查看所有可用命令"
+        )
+    
+    async def _on_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /help command - 显示所有可用命令。"""
+        if not update.message:
+            return
+        
+        await update.message.reply_text(
+            "🤖 <b>碳核 - 可用命令</b>\n\n"
+            "📩 <b>基本命令</b>\n"
+            "/start - 开始使用\n"
+            "/help - 显示此帮助信息\n"
+            "/clear - 清除当前会话历史\n\n"
+            "🔧 <b>模型管理</b>\n"
+            "/model - 查看当前模型和可用 providers\n"
+            "/model &lt;模型名&gt; - 切换模型\n\n"
+            "📊 <b>系统信息</b>\n"
+            "/status - 查看当前运行状态\n\n"
+            "💡 <b>使用示例</b>\n"
+            "<code>/model antigravity/claude-opus-4-6-thinking</code>\n"
+            "<code>/model antigravity/gemini-3-flash-preview</code>\n"
+            "<code>/model openai/gpt-5.3-codex</code>",
+            parse_mode="HTML"
         )
     
     async def _on_model(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
