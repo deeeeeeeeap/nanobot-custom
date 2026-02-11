@@ -345,10 +345,20 @@ class AgentLoop:
         if final_content is None:
             final_content = "处理完成，但没有生成响应。"
         
-        # 定制：幻觉检测 — 只有当模型不支持工具调用时才检查
-        # 对 Codex 模型禁用幻觉检测（Codex 自己执行命令，输出含真实 shell 结果）
+        # 定制：幻觉检测
+        # 触发条件：
+        # 1. 模型不支持工具调用（纯对话模式）
+        # 2. 模型支持工具但本次没有调用任何工具（可能编造了执行结果）
+        # 排除条件：Codex 模型（自带执行能力）、工具确实被调用过的情况
         is_codex_model = "codex" in current_model.lower()
-        if not model_supports_tools and not is_codex_model:
+        should_check_hallucination = (
+            not is_codex_model
+            and (
+                not model_supports_tools  # 模型本身不支持工具
+                or (model_supports_tools and not tools_were_called)  # 支持但没调用
+            )
+        )
+        if should_check_hallucination:
             hallucination = detect_hallucination(
                 final_content, 
                 tools_were_called=tools_were_called,
