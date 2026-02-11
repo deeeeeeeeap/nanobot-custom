@@ -149,7 +149,25 @@ class LiteLLMProvider(LLMProvider):
             kwargs["tool_choice"] = "auto"
         
         try:
+            # 调试：记录请求关键参数
+            from loguru import logger as llm_logger
+            llm_logger.debug(
+                f"LLM request: model={model}, tools={len(tools) if tools else 0}, "
+                f"api_base={kwargs.get('api_base', 'default')}"
+            )
+            
             response = await acompletion(**kwargs)
+            
+            # 调试：记录响应关键信息
+            choice = response.choices[0] if response.choices else None
+            if choice:
+                has_tc = bool(choice.message.tool_calls) if hasattr(choice.message, 'tool_calls') else False
+                llm_logger.debug(
+                    f"LLM response: finish_reason={choice.finish_reason}, "
+                    f"has_tool_calls={has_tc}, "
+                    f"content_len={len(choice.message.content or '')}"
+                )
+            
             return self._parse_response(response)
         except Exception as e:
             # Return error as content for graceful handling
