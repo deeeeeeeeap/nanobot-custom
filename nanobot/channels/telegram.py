@@ -431,14 +431,25 @@ class TelegramChannel(BaseChannel):
             # 构造 session key (与 loop.py 中的逻辑一致)
             session_key = f"telegram:{chat_id}"
             
-            # 尝试清除会话
+            # 清除磁盘上的 session 文件
             from pathlib import Path
             session_dir = Path.home() / ".nanobot" / "sessions"
             session_file = session_dir / f"{session_key.replace(':', '_')}.json"
             
             if session_file.exists():
                 session_file.unlink()
-                logger.info(f"Cleared session: {session_key}")
+            
+            # 也尝试清除 .jsonl 格式的文件
+            session_jsonl = session_dir / f"{session_key.replace(':', '_')}.jsonl"
+            if session_jsonl.exists():
+                session_jsonl.unlink()
+            
+            # 清除 SessionManager 的内存缓存
+            if self.session_manager:
+                self.session_manager.delete(session_key)
+                logger.info(f"Cleared session (disk + memory cache): {session_key}")
+            else:
+                logger.info(f"Cleared session file: {session_key}")
             
             await update.message.reply_text(
                 "🗑️ <b>会话已清空</b>\n\n"
