@@ -83,6 +83,23 @@ HALLUCINATION_PATTERNS: list[tuple[str, str, float]] = [
         0.7
     ),
     
+    # === 声称执行了命令但实际没调用工具 ===
+    (
+        "claimed_execution",
+        r"(我刚刚|我已经|我刚|刚刚)(执行|运行|调用)了.*?(命令|指令|脚本)",
+        0.9  # 非常高 — 没调用工具却声称执行了命令
+    ),
+    (
+        "claimed_command_output",
+        r"(执行|运行).*?(du|df|ls|ps|top|free|cat|find|grep|docker|systemctl)\s",
+        0.85
+    ),
+    (
+        "fake_path_listing",
+        r"(\d+(\.\d+)?[KMGT]?\s+/[\w./]+\n){3,}",  # du/df 格式的路径列表
+        0.85
+    ),
+    
     # === 新增：URL/账号编造检测 ===
     (
         "fabricated_x_url",
@@ -164,16 +181,27 @@ def create_honest_response(model: str, original_intent: str = "") -> str:
     Returns:
         诚实的回复文本
     """
-    return (
-        f"⚠️ **无法执行此操作**\n\n"
-        f"当前模型 `{model}` 不支持工具调用，我无法：\n"
-        f"- 🔍 搜索网络\n"
-        f"- 💻 执行命令\n"
-        f"- 📁 读写文件\n\n"
-        f"**解决方案**：切换到支持工具的模型：\n"
-        f"`/model gemini-2.5-flash-preview`\n\n"
-        f"或者，我可以用我现有的知识来帮助你（但可能不是最新信息）。"
-    )
+    # 检查模型是否支持工具调用
+    from nanobot.config.model_capabilities import supports_function_calling
+    if supports_function_calling(model):
+        # 模型支持工具但这次没调用 — 提示重试
+        return (
+            "⚠️ **检测到异常**\n\n"
+            "我刚才试图用文字描述操作结果，而不是真正执行命令。"
+            "这是不可接受的行为。\n\n"
+            "**请重新发送你的请求**，我会正确使用工具来执行。"
+        )
+    else:
+        return (
+            f"⚠️ **无法执行此操作**\n\n"
+            f"当前模型 `{model}` 不支持工具调用，我无法：\n"
+            f"- 🔍 搜索网络\n"
+            f"- 💻 执行命令\n"
+            f"- 📁 读写文件\n\n"
+            f"**解决方案**：切换到支持工具的模型：\n"
+            f"`/model gemini-2.5-flash-preview`\n\n"
+            f"或者，我可以用我现有的知识来帮助你（但可能不是最新信息）。"
+        )
 
 
 def create_no_tools_available_response() -> str:
