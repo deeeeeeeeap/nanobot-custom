@@ -24,16 +24,32 @@ def _compute_next_run(schedule: CronSchedule, now_ms: int) -> int | None:
     if schedule.kind == "every":
         if not schedule.every_ms or schedule.every_ms <= 0:
             return None
-        # Next interval from now
+        # 从现在开始的下一个间隔
         return now_ms + schedule.every_ms
     
     if schedule.kind == "cron" and schedule.expr:
         try:
             from croniter import croniter
-            cron = croniter(schedule.expr, time.time())
-            next_time = cron.get_next()
-            return int(next_time * 1000)
-        except Exception:
+            from datetime import datetime, timezone as dt_tz
+            
+            # 支持时区：如果指定了 tz，则基于该时区计算下次运行时间
+            if schedule.tz:
+                try:
+                    import zoneinfo
+                    tz = zoneinfo.ZoneInfo(schedule.tz)
+                    now_dt = datetime.now(tz)
+                except Exception:
+                    now_dt = datetime.now(dt_tz.utc)
+            else:
+                now_dt = datetime.now(dt_tz.utc)
+            
+            cron = croniter(schedule.expr, now_dt)
+            next_time = cron.get_next(datetime)
+            # 转换回 UTC 时间戳
+            next_ts = next_time.timestamp()
+            return int(next_ts * 1000)
+        except Exception as e:
+            logger.warning(f"Cron 表达式解析失败: {schedule.expr}, error: {e}")
             return None
     
     return None
@@ -45,10 +61,12 @@ class CronService:
     def __init__(
         self,
         store_path: Path,
-        on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]] | None = None
+        on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]] | None = None,
+        on_deliver: Callable[[CronJob], Coroutine[Any, Any, None]] | None = None,
     ):
         self.store_path = store_path
-        self.on_job = on_job  # Callback to execute job, returns response text
+        self.on_job = on_job  # Agent 模式回调：完整处理并返回响应
+        self.on_deliver = on_deliver  # 提醒模式回调：直接发送静态消息
         self._store: CronStore | None = None
         self._timer_task: asyncio.Task | None = None
         self._running = False
@@ -216,26 +234,37 @@ class CronService:
     async def _execute_job(self, job: CronJob) -> None:
         """Execute a single job."""
         start_ms = _now_ms()
-        logger.info(f"Cron: executing job '{job.name}' ({job.id})")
+        mode_label = "Agent" if job.payload.kind == "agent_turn" else "Remind"
+        logger.info(f"Cron [{mode_label}]: executing job '{job.name}' ({job.id})")
         
         try:
             response = None
-            if self.on_job:
-                response = await self.on_job(job)
+            
+            if job.payload.kind == "system_event":
+                # 提醒模式：直接发送静态消息，不经过 Agent
+                if self.on_deliver:
+                    await self.on_deliver(job)
+                elif self.on_job:
+                    # 降级：如果没有 on_deliver 回调，走 on_job
+                    response = await self.on_job(job)
+            else:
+                # Agent 模式：通过 Agent 完整处理（调用工具链）
+                if self.on_job:
+                    response = await self.on_job(job)
             
             job.state.last_status = "ok"
             job.state.last_error = None
-            logger.info(f"Cron: job '{job.name}' completed")
+            logger.info(f"Cron [{mode_label}]: job '{job.name}' completed")
             
         except Exception as e:
             job.state.last_status = "error"
             job.state.last_error = str(e)
-            logger.error(f"Cron: job '{job.name}' failed: {e}")
+            logger.error(f"Cron [{mode_label}]: job '{job.name}' failed: {e}")
         
         job.state.last_run_at_ms = start_ms
         job.updated_at_ms = _now_ms()
         
-        # Handle one-shot jobs
+        # 处理一次性任务
         if job.schedule.kind == "at":
             if job.delete_after_run:
                 self._store.jobs = [j for j in self._store.jobs if j.id != job.id]
@@ -243,7 +272,7 @@ class CronService:
                 job.enabled = False
                 job.state.next_run_at_ms = None
         else:
-            # Compute next run
+            # 计算下次运行时间
             job.state.next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
     
     # ========== Public API ==========
@@ -263,8 +292,14 @@ class CronService:
         channel: str | None = None,
         to: str | None = None,
         delete_after_run: bool = False,
+        payload_kind: str = "agent_turn",
     ) -> CronJob:
-        """Add a new job."""
+        """Add a new job.
+        
+        Args:
+            payload_kind: 'agent_turn' = Agent 完整处理（调用工具链）
+                          'system_event' = 直接发送静态消息
+        """
         store = self._load_store()
         now = _now_ms()
         
@@ -274,7 +309,7 @@ class CronService:
             enabled=True,
             schedule=schedule,
             payload=CronPayload(
-                kind="agent_turn",
+                kind=payload_kind,
                 message=message,
                 deliver=deliver,
                 channel=channel,
@@ -290,7 +325,7 @@ class CronService:
         self._save_store()
         self._arm_timer()
         
-        logger.info(f"Cron: added job '{name}' ({job.id})")
+        logger.info(f"Cron: added job '{name}' ({job.id}, kind={payload_kind})")
         return job
     
     def remove_job(self, job_id: str) -> bool:

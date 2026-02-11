@@ -136,7 +136,7 @@ Skills with available="false" need dependencies installed first - you can try in
 - 📁 **文件管理**：读取、写入、编辑文件
 - 📢 **主动通知**：`message` - 随时向用户发送消息（进度、结果、问题）
 - 🚀 **子代理**：派遣后台任务，无需持续盯着
-- ⏰ **定时任务**：7x24 心跳保活与自动提醒
+- ⏰ **定时任务**：`cron` - 支持两种模式：提醒模式（发送静态文本）和 Agent 模式（定时执行完整工具链任务，如天气预报、系统巡检）
 
 ---
 

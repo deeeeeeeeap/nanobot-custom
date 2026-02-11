@@ -366,9 +366,9 @@ def gateway(
         session_manager=session_manager,
     )
     
-    # Set cron callback (needs agent)
+    # 设置 cron 回调（需要 agent 和 bus）
     async def on_cron_job(job: CronJob) -> str | None:
-        """Execute a cron job through the agent."""
+        """Agent 模式：通过 Agent 完整处理定时任务（调用工具链）。"""
         response = await agent.process_direct(
             job.payload.message,
             session_key=f"cron:{job.id}",
@@ -383,7 +383,19 @@ def gateway(
                 content=response or ""
             ))
         return response
+    
+    async def on_cron_deliver(job: CronJob) -> None:
+        """提醒模式：直接发送静态消息，不经过 Agent。"""
+        if job.payload.deliver and job.payload.to and job.payload.message:
+            from nanobot.bus.events import OutboundMessage
+            await bus.publish_outbound(OutboundMessage(
+                channel=job.payload.channel or "cli",
+                chat_id=job.payload.to,
+                content=job.payload.message,
+            ))
+    
     cron.on_job = on_cron_job
+    cron.on_deliver = on_cron_deliver
     
     # Create heartbeat service
     async def on_heartbeat(prompt: str) -> str:
