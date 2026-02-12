@@ -35,17 +35,20 @@ from nanobot.agent.status import StatusMessage, StatusReporter, NullReporter
 
 def _is_lazy_response(content: str, user_message: str = "") -> bool:
     """
-    检测"懒惰回复"：模型声称将要执行操作但没有真正调用工具。
+    检测"懒惰回复"：模型声称将要/正在执行操作但没有真正调用工具。
     
-    判断标准：内容中同时包含"意图词"和"工具名称"。
-    排除条件：如果用户的消息是规划/讨论请求，则不触发。
+    两层检测：
+    1. 行动承诺语言（广义）：不需要工具名，检测"请稍候/正在为你/需要时间"等
+    2. 意图词 + 工具引用（精确）：保留旧逻辑作为补充
+    
+    排除条件：用户消息是规划/讨论请求时不触发。
     """
     import re
     
     if not content or len(content) < 10:
         return False
     
-    # 排除：用户在征求意见/讨论方案，模型不该被强制行动
+    # 排除：用户在征求意见/讨论方案
     planning_patterns = [
         r"先.{0,4}(看看|试试|想想|聊聊|说说|分析|规划|讨论)",
         r"(能不能|可不可以|可以吗|行不行|怎么样|什么方案|怎么做)",
@@ -55,22 +58,30 @@ def _is_lazy_response(content: str, user_message: str = "") -> bool:
     if user_message and any(re.search(p, user_message) for p in planning_patterns):
         return False
     
-    # 意图词：表示"将要做"但没做的措辞
+    # === 第一层：行动承诺语言（广义，不需要工具名） ===
+    action_promise_patterns = [
+        r"请稍(候|等|后)",                          # 让用户等 → 暗示要做事
+        r"正在(努力|为你|帮你|尝试|处理|获取|抓取|查询|执行)",  # 声称正在做
+        r"(这个|这|该)过程(可能|需要|会)",             # 描述一个过程
+        r"(马上|立即|立刻|现在就|即将)(开始|执行|处理|为你)",
+        r"(需要|可能需要)(一些|一段|一点)(时间|功夫)",    # 声称需要时间
+        r"(稍等|等一下|等我)",                        # 让用户等
+    ]
+    has_action_promise = any(re.search(p, content) for p in action_promise_patterns)
+    
+    # === 第二层：意图词 + 工具引用（精确，保留旧逻辑） ===
     intent_patterns = [
         r"我(将|会|来|要|正在|准备|尝试)(使用|调用|执行|运行)",
         r"(让我|我来|我先|我去)(使用|调用|执行|运行|查|看|帮)",
         r"(立即|马上|现在)(使用|调用|执行|尝试)",
         r"我(将|会).*?(工具|命令|指令)",
     ]
-    
-    # 工具名称
     tool_names = ["exec", "cron", "weather", "web_search", "web_fetch", 
                   "message", "read_file", "write_file", "curl", "命令"]
-    
     has_intent = any(re.search(p, content) for p in intent_patterns)
     has_tool_ref = any(t in content.lower() for t in tool_names)
     
-    return has_intent and has_tool_ref
+    return has_action_promise or (has_intent and has_tool_ref)
 
 
 class AgentLoop:
