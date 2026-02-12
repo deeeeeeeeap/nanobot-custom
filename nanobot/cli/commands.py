@@ -369,18 +369,42 @@ def gateway(
     # 设置 cron 回调（需要 agent 和 bus）
     async def on_cron_job(job: CronJob) -> str | None:
         """Agent 模式：通过 Agent 完整处理定时任务（调用工具链）。"""
-        response = await agent.process_direct(
-            job.payload.message,
-            session_key=f"cron:{job.id}",
-            channel=job.payload.channel or "cli",
-            chat_id=job.payload.to or "direct",
-        )
+        from nanobot.bus.events import OutboundMessage
+        
+        response = None
+        try:
+            # 清理上次 cron session，避免失败历史污染下次执行
+            session_manager.delete(f"cron:{job.id}")
+            
+            # 带超时的 agent 处理（2 分钟）
+            response = await asyncio.wait_for(
+                agent.process_direct(
+                    job.payload.message,
+                    session_key=f"cron:{job.id}",
+                    channel=job.payload.channel or "cli",
+                    chat_id=job.payload.to or "direct",
+                ),
+                timeout=120
+            )
+            logger.info(f"Cron agent job '{job.name}' response: {len(response or '')} chars")
+        except asyncio.TimeoutError:
+            response = f"⚠️ 定时任务超时：{job.name}\n任务在 2 分钟内未完成，请检查工具调用是否正常。"
+            logger.error(f"Cron agent job '{job.name}' timed out after 120s")
+        except Exception as e:
+            response = f"⚠️ 定时任务失败：{job.name}\n错误：{str(e)}"
+            logger.error(f"Cron agent job '{job.name}' failed: {e}")
+        
+        # 确保有内容投递（空响应兜底）
+        if not response or not response.strip():
+            response = f"⚠️ 定时任务完成但无输出：{job.name}\n请检查任务指令是否明确。"
+            logger.warning(f"Cron agent job '{job.name}' produced empty response")
+        
+        # 投递结果到用户
         if job.payload.deliver and job.payload.to:
-            from nanobot.bus.events import OutboundMessage
             await bus.publish_outbound(OutboundMessage(
                 channel=job.payload.channel or "cli",
                 chat_id=job.payload.to,
-                content=response or ""
+                content=response,
             ))
         return response
     
