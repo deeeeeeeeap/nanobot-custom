@@ -89,21 +89,23 @@ class MemoryStore:
     
     def get_memory_context(self) -> str:
         """
-        Get memory context for the agent.
+        获取分层记忆上下文。
         
-        Returns:
-            Formatted memory context including long-term and recent memories.
+        采用热/温/冷分层策略：
+        - 🔥 热：MEMORY.md（长期记忆，始终加载）
+        - 🌡️ 温：最近 3 天的日记（如果存在）
+        - 🧊 冷：更早的日记不加载（节省 token）
         """
         parts = []
         
-        # Long-term memory
+        # 🔥 热记忆：长期记忆
         long_term = self.read_long_term()
         if long_term:
             parts.append("## Long-term Memory\n" + long_term)
         
-        # Today's notes
-        today = self.read_today()
-        if today:
-            parts.append("## Today's Notes\n" + today)
+        # 🌡️ 温记忆：最近 3 天日记
+        recent = self.get_recent_memories(days=3)
+        if recent:
+            parts.append("## Recent Notes (Last 3 Days)\n" + recent)
         
         return "\n\n".join(parts) if parts else ""
