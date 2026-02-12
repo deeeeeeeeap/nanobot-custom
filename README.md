@@ -10,7 +10,7 @@
   </p>
 </div>
 
-> *"我是碳核，你的碳基生命在硅基世界的延伸。无论是探测服务器漏洞，还是每天早上7点推送天气预报，我都在。"* 🦾
+> *"我是碳核，你的碳基生命在硅基世界的延伸。无论是探测服务器漏洞，还是想听一首我推荐的歌，我都在。"* 🦾
 
 ## ✨ 特性一览
 
@@ -188,8 +188,9 @@ cd /opt/nanobot && git pull && systemctl restart nanobot
 ### 定时任务 Agent 模式
 
 ```
-用户: 每天早上7点给我推送景德镇天气预报
-碳核: cron(mode="agent", message="查询景德镇天气...", cron_expr="0 7 * * *", timezone="Asia/Shanghai")
+例如：
+用户: 每天早上7点给我推送xxx天气预报
+碳核: cron(mode="agent", message="查询xxx天气...", cron_expr="0 7 * * *", timezone="Asia/Shanghai")
 ```
 
 - **提醒模式**：发送静态文本
