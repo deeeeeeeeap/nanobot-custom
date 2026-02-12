@@ -46,5 +46,9 @@ cron(action="remove", job_id="abc123")
 ## ⚠️ 注意事项
 
 - 使用 `cron_expr` 时，**务必设置 `timezone`**，否则默认 UTC
-- Agent 模式的 `message` 应当是一个完整的指令描述，Agent 会像收到用户消息一样处理
 - 提醒模式的 `message` 就是用户会收到的原文
+- Agent 模式的 `message` **必须是自然语言指令**，不能是工具调用语法：
+  - ✅ `"查询景德镇今天天气预报，温度摄氏度，详细格式"`
+  - ✅ `"检查磁盘使用情况并报告"`
+  - ❌ `"exec(command='curl wttr.in/...')"`
+  - ❌ `"weather(location='Jingdezhen')"`

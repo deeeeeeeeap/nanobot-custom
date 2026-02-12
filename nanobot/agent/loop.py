@@ -32,6 +32,36 @@ from nanobot.agent.hallucination_detector import (
 from nanobot.agent.status import StatusMessage, StatusReporter, NullReporter
 
 
+def _is_lazy_response(content: str) -> bool:
+    """
+    检测"懒惰回复"：模型声称将要执行操作但没有真正调用工具。
+    
+    判断标准：内容中同时包含"意图词"和"工具名称"。
+    例如："我将使用 exec 工具来执行..." → 懒惰回复
+    """
+    import re
+    
+    if not content or len(content) < 10:
+        return False
+    
+    # 意图词：表示"将要做"但没做的措辞
+    intent_patterns = [
+        r"我(将|会|来|要|正在|准备|尝试)(使用|调用|执行|运行)",
+        r"(让我|我来|我先|我去)(使用|调用|执行|运行|查|看|帮)",
+        r"(立即|马上|现在)(使用|调用|执行|尝试)",
+        r"我(将|会).*?(工具|命令|指令)",
+    ]
+    
+    # 工具名称
+    tool_names = ["exec", "cron", "weather", "web_search", "web_fetch", 
+                  "message", "read_file", "write_file", "curl", "命令"]
+    
+    has_intent = any(re.search(p, content) for p in intent_patterns)
+    has_tool_ref = any(t in content.lower() for t in tool_names)
+    
+    return has_intent and has_tool_ref
+
+
 class AgentLoop:
     """
     The agent loop is the core processing engine.
@@ -338,6 +368,22 @@ class AgentLoop:
                     )
                     tools_were_called = True  # 标记工具被调用
             else:
+                # 定制：懒惰检测 — 模型说了要做但没调用工具，自动催促重试
+                if (
+                    iteration == 1
+                    and model_supports_tools
+                    and response.content
+                    and _is_lazy_response(response.content)
+                ):
+                    logger.warning("检测到懒惰回复（说了要做但没调用工具），注入催促消息重试")
+                    messages = self.context.add_assistant_message(messages, response.content)
+                    messages = self.context.add_user_nudge(
+                        messages,
+                        "你刚才只是描述了你要做什么，但没有真正调用工具。"
+                        "请立即调用对应工具执行，不要再描述了。"
+                    )
+                    continue  # 不 break，再给一轮机会
+                
                 # 无工具调用，完成
                 final_content = response.content
                 break

@@ -123,6 +123,25 @@ class CronTool(Tool):
         payload_kind = "agent_turn" if mode == "agent" else "system_event"
         mode_label = "🤖 Agent 模式" if mode == "agent" else "📨 提醒模式"
         
+        # 定制：验证 agent 模式的 message 不是工具调用语法
+        if mode == "agent":
+            import re
+            # 检测 exec(...), weather(...) 等工具调用格式
+            tool_call_match = re.match(
+                r'^(exec|cron|weather|web_search|web_fetch|message)\s*\(',
+                message.strip()
+            )
+            if tool_call_match:
+                # 尝试从工具调用中提取实际命令
+                cmd_match = re.search(r"command=['\"](.+?)['\"]", message)
+                if cmd_match:
+                    extracted = cmd_match.group(1)
+                    message = f"执行命令 {extracted} 并报告结果"
+                else:
+                    message = f"请执行以下操作并报告结果: {message}"
+                from loguru import logger
+                logger.warning(f"Cron agent message 格式已纠正: {message[:60]}")
+        
         job = self._cron.add_job(
             name=message[:30],
             schedule=schedule,
