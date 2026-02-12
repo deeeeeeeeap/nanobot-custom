@@ -33,16 +33,26 @@ from nanobot.agent.hallucination_detector import (
 from nanobot.agent.status import StatusMessage, StatusReporter, NullReporter
 
 
-def _is_lazy_response(content: str) -> bool:
+def _is_lazy_response(content: str, user_message: str = "") -> bool:
     """
     检测"懒惰回复"：模型声称将要执行操作但没有真正调用工具。
     
     判断标准：内容中同时包含"意图词"和"工具名称"。
-    例如："我将使用 exec 工具来执行..." → 懒惰回复
+    排除条件：如果用户的消息是规划/讨论请求，则不触发。
     """
     import re
     
     if not content or len(content) < 10:
+        return False
+    
+    # 排除：用户在征求意见/讨论方案，模型不该被强制行动
+    planning_patterns = [
+        r"先.{0,4}(看看|试试|想想|聊聊|说说|分析|规划|讨论)",
+        r"(能不能|可不可以|可以吗|行不行|怎么样|什么方案|怎么做)",
+        r"(你觉得|你认为|你看|你说|有什么.*建议|有什么.*办法)",
+        r"(能做吗|做得到吗|可行吗|靠谱吗)",
+    ]
+    if user_message and any(re.search(p, user_message) for p in planning_patterns):
         return False
     
     # 意图词：表示"将要做"但没做的措辞
@@ -380,7 +390,7 @@ class AgentLoop:
                     iteration == 1
                     and model_supports_tools
                     and response.content
-                    and _is_lazy_response(response.content)
+                    and _is_lazy_response(response.content, msg.content)
                 ):
                     logger.warning("检测到懒惰回复（说了要做但没调用工具），注入催促消息重试")
                     messages = self.context.add_assistant_message(messages, response.content)
