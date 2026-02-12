@@ -405,8 +405,8 @@ class AgentLoop:
                 final_content = response.content
                 break
         
-        if final_content is None:
-            final_content = "处理完成，但没有生成响应。"
+        if not final_content:
+            final_content = "（任务已执行完毕，但模型未生成回复文本。）"
         
         # 定制：幻觉检测
         # 触发条件：
