@@ -269,7 +269,7 @@ def main():
     # 加载凭证：优先从 .twitter_credentials 文件读取，其次环境变量
     auth_token = None
     ct0 = None
-    cred_file = Path(__file__).parent / ".twitter_credentials"
+    cred_file = Path("/root/.nanobot/workspace/.twitter_credentials")
     if cred_file.exists():
         try:
             creds = json.loads(cred_file.read_text())
