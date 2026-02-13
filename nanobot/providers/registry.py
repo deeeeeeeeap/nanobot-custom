@@ -273,7 +273,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         is_local=False,
         detect_by_key_prefix="",
         detect_by_base_keyword="minimax",
-        default_api_base="https://api.minimaxi.chat/v1",
+        default_api_base="https://api.minimaxi.com/v1",
         strip_model_prefix=False,             # 保留 minimax/ 前缀给 litellm
         model_overrides=(),
     ),
