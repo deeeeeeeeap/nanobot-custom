@@ -98,26 +98,23 @@ def fetch_user_tweets(username: str, env: dict) -> list[dict]:
 
 
 def is_original_tweet(tweet: dict) -> bool:
-    """判断是否为原创推文（排除转推、回复、引用）。"""
-    # 转推
-    if tweet.get("retweeted_status"):
-        return False
+    """判断是否为原创推文（排除转推、回复）。"""
+    text = tweet.get("text", "")
     # 文字转推
-    text = tweet.get("full_text") or tweet.get("text", "")
     if re.match(r"^RT @\w+:", text):
         return False
-    # 回复
-    if tweet.get("in_reply_to_status_id_str"):
-        return False
+    # 回复：conversationId 不等于自身 id 说明是回复链
+    if tweet.get("conversationId") and tweet.get("id"):
+        if tweet["conversationId"] != tweet["id"]:
+            return False
     return True
 
 
 def score_tweet(tweet: dict) -> float:
     """计算推文热度分。"""
-    metrics = tweet.get("public_metrics", {})
-    likes = metrics.get("like_count", 0)
-    retweets = metrics.get("retweet_count", 0)
-    replies = metrics.get("reply_count", 0)
+    likes = tweet.get("likeCount", 0) or 0
+    retweets = tweet.get("retweetCount", 0) or 0
+    replies = tweet.get("replyCount", 0) or 0
     return likes + (retweets * 2) + (replies * 0.5)
 
 
@@ -136,20 +133,19 @@ def format_summary(ranked_tweets: list[dict]) -> str:
     ]
     
     for i, tweet in enumerate(ranked_tweets, 1):
-        user = tweet.get("user", {})
-        username = user.get("screen_name", "unknown")
-        name = user.get("name", username)
-        text = (tweet.get("full_text") or tweet.get("text", "")).replace("\n", " ").strip()
+        author = tweet.get("author", {})
+        username = author.get("username", "unknown")
+        name = author.get("name", username)
+        text = tweet.get("text", "").replace("\n", " ").strip()
         # 截断到 150 字符
         if len(text) > 150:
             text = text[:147] + "..."
         
-        metrics = tweet.get("public_metrics", {})
-        likes = metrics.get("like_count", 0)
-        rts = metrics.get("retweet_count", 0)
-        replies = metrics.get("reply_count", 0)
+        likes = tweet.get("likeCount", 0) or 0
+        rts = tweet.get("retweetCount", 0) or 0
+        replies = tweet.get("replyCount", 0) or 0
         score = tweet.get("_score", 0)
-        tweet_id = tweet.get("id_str", "")
+        tweet_id = tweet.get("id", "")
         url = f"https://twitter.com/{username}/status/{tweet_id}"
         
         lines.append(f"### {i}. @{username} ({name})")
