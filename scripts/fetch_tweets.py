@@ -266,10 +266,26 @@ def main():
     print(f"{'='*50}")
     
     # 检查环境变量
-    auth_token = os.getenv("AUTH_TOKEN")
-    ct0 = os.getenv("CT0")
+    # 加载凭证：优先从 .twitter_credentials 文件读取，其次环境变量
+    auth_token = None
+    ct0 = None
+    cred_file = Path(__file__).parent / ".twitter_credentials"
+    if cred_file.exists():
+        try:
+            creds = json.loads(cred_file.read_text())
+            auth_token = creds.get("auth_token")
+            ct0 = creds.get("ct0")
+            if auth_token and ct0:
+                print("✓ 凭证已从 .twitter_credentials 文件加载")
+        except Exception:
+            pass
+    # 环境变量后备
+    if not auth_token:
+        auth_token = os.getenv("AUTH_TOKEN")
+    if not ct0:
+        ct0 = os.getenv("CT0")
     if not auth_token or not ct0:
-        print("错误: 请设置 AUTH_TOKEN 和 CT0 环境变量")
+        print("错误: 请通过面板设置凭证或设置 AUTH_TOKEN / CT0 环境变量")
         sys.exit(1)
     
     env = os.environ.copy()
