@@ -217,11 +217,12 @@ def score_tweet(tweet: dict) -> float:
 def format_summary(ranked_tweets: list[dict]) -> str:
     """生成 Markdown 格式的摘要。"""
     now = datetime.now(timezone(timedelta(hours=8)))
+    query_count = len(load_search_queries())
     lines = [
-        f"# 🐦 推特 AI 热点日报",
+        f"# 🐦 推特热点日报",
         f"",
         f"**生成时间**: {now.strftime('%Y-%m-%d %H:%M')} (北京时间)",
-        f"**监控用户数**: {len(load_watchlist())}",
+        f"**监控用户数**: {len(load_watchlist())} | **搜索关键词**: {query_count} 组",
         f"**热门推文 Top {len(ranked_tweets)}**:",
         f"",
         f"---",
@@ -243,8 +244,9 @@ def format_summary(ranked_tweets: list[dict]) -> str:
         score = tweet.get("_score", 0)
         tweet_id = tweet.get("id", "")
         url = f"https://twitter.com/{username}/status/{tweet_id}"
+        source = "🔎" if tweet.get("_source") == "search" else "👤"
         
-        lines.append(f"### {i}. @{username} ({name})")
+        lines.append(f"### {i}. {source} @{username} ({name})")
         lines.append(f"")
         lines.append(f"> {text}")
         lines.append(f"")
