@@ -29,6 +29,7 @@ WATCHLIST_PATH = Path("/root/.nanobot/workspace/twitter_watchlist.txt")
 SUMMARY_PATH = Path("/root/.nanobot/workspace/twitter_daily_summary.md")
 FETCH_SCRIPT = Path("/root/.nanobot/workspace/scripts/fetch_tweets.py")
 QUERIES_PATH = Path("/root/.nanobot/workspace/twitter_search_queries.txt")
+CREDENTIALS_FILE = Path("/root/.nanobot/workspace/.twitter_credentials")
 DEFAULT_QUERIES = [
     "AI breakthrough OR AGI OR artificial intelligence",
     "LLM OR GPT OR Claude OR Gemini",
@@ -50,6 +51,28 @@ def set_password(new_password: str):
     """保存新密码到文件。"""
     PASSWORD_FILE.parent.mkdir(parents=True, exist_ok=True)
     PASSWORD_FILE.write_text(new_password)
+
+
+def load_credentials() -> dict:
+    """读取 Twitter 凭证，优先文件，其次环境变量。"""
+    auth_token = os.getenv("AUTH_TOKEN", "")
+    ct0 = os.getenv("CT0", "")
+    if CREDENTIALS_FILE.exists():
+        import json as _json
+        try:
+            creds = _json.loads(CREDENTIALS_FILE.read_text())
+            auth_token = creds.get("auth_token", "") or auth_token
+            ct0 = creds.get("ct0", "") or ct0
+        except Exception:
+            pass
+    return {"auth_token": auth_token, "ct0": ct0}
+
+
+def save_credentials(auth_token: str, ct0: str):
+    """保存 Twitter 凭证到文件。"""
+    import json as _json
+    CREDENTIALS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CREDENTIALS_FILE.write_text(_json.dumps({"auth_token": auth_token, "ct0": ct0}))
 
 
 # === 工具函数 ===
@@ -312,12 +335,15 @@ SETTINGS_HTML = """
                min-height: 100vh; display: flex; align-items: center; justify-content: center; }
         .settings-box { background: rgba(255,255,255,0.05); backdrop-filter: blur(20px);
                         border: 1px solid rgba(255,255,255,0.1); border-radius: 16px;
-                        padding: 40px; width: 400px; }
+                        padding: 40px; width: 460px; }
         h1 { color: #fff; text-align: center; margin-bottom: 24px; font-size: 22px; }
+        h2 { color: #ccc; font-size: 16px; margin: 20px 0 12px; padding-top: 16px; border-top: 1px solid rgba(255,255,255,0.1); }
+        h2:first-of-type { margin-top: 0; padding-top: 0; border-top: none; }
         label { color: #aaa; font-size: 13px; display: block; margin-bottom: 6px; }
         input { width: 100%%; padding: 12px 16px; border: 1px solid rgba(255,255,255,0.2);
                 border-radius: 8px; background: rgba(255,255,255,0.08); color: #fff;
-                font-size: 15px; outline: none; margin-bottom: 16px; }
+                font-size: 14px; outline: none; margin-bottom: 16px; font-family: monospace; }
+        input[type="password"] { font-family: -apple-system, sans-serif; }
         input:focus { border-color: #6c63ff; }
         .btn-row { display: flex; gap: 10px; }
         button, .back-link { flex: 1; padding: 12px; border: none; border-radius: 8px;
@@ -327,24 +353,46 @@ SETTINGS_HTML = """
         button:hover, .back-link:hover { transform: translateY(-2px); }
         .error { color: #ff6b6b; text-align: center; margin-bottom: 16px; font-size: 14px; }
         .success { color: #00b894; text-align: center; margin-bottom: 16px; font-size: 14px; }
+        .hint { color: #666; font-size: 12px; margin-top: -10px; margin-bottom: 14px; }
+        .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%%; margin-right: 6px; }
+        .dot-ok { background: #00b894; }
+        .dot-err { background: #ff6b6b; }
     </style>
 </head>
 <body>
     <div class="settings-box">
-        <h1>⚙ 修改密码</h1>
+        <h1>⚙ 系统设置</h1>
         %(message)s
+        
+        <h2>🔑 Twitter 凭证</h2>
+        <p style="color:#888;font-size:13px;margin-bottom:12px;">
+            <span class="status-dot %(cred_status)s"></span>%(cred_text)s
+        </p>
         <form method="POST">
+            <input type="hidden" name="action" value="credentials">
+            <label>AUTH_TOKEN</label>
+            <input type="text" name="auth_token" value="%(auth_token_masked)s" placeholder="从浏览器 Cookie 中获取">
+            <label>CT0</label>
+            <input type="text" name="ct0" value="%(ct0_masked)s" placeholder="从浏览器 Cookie 中获取">
+            <div class="hint">💡 登录 x.com 后从浏览器 DevTools → Application → Cookies 中复制</div>
+            <button type="submit">保存凭证</button>
+        </form>
+        
+        <h2>🔒 修改密码</h2>
+        <form method="POST">
+            <input type="hidden" name="action" value="password">
             <label>旧密码</label>
             <input type="password" name="old_password" required>
             <label>新密码</label>
             <input type="password" name="new_password" required>
             <label>确认新密码</label>
             <input type="password" name="confirm_password" required>
-            <div class="btn-row">
-                <a href="/" class="back-link">← 返回</a>
-                <button type="submit">保存密码</button>
-            </div>
+            <button type="submit">保存密码</button>
         </form>
+        
+        <div class="btn-row" style="margin-top:20px;">
+            <a href="/" class="back-link">← 返回面板</a>
+        </div>
     </div>
 </body>
 </html>
@@ -529,14 +577,13 @@ def remove_query():
 @require_login
 def trigger():
     """手动触发抓取。"""
-    auth = os.getenv("AUTH_TOKEN", "")
-    ct0 = os.getenv("CT0", "")
-    if not auth or not ct0:
-        return redirect(url_for("index", msg="未设置 AUTH_TOKEN / CT0 环境变量", type="err"))
+    creds = load_credentials()
+    if not creds["auth_token"] or not creds["ct0"]:
+        return redirect(url_for("index", msg="请先在设置页配置 Twitter 凭证（AUTH_TOKEN / CT0）", type="err"))
     
     env = os.environ.copy()
-    env["AUTH_TOKEN"] = auth
-    env["CT0"] = ct0
+    env["AUTH_TOKEN"] = creds["auth_token"]
+    env["CT0"] = creds["ct0"]
     
     try:
         subprocess.Popen(
@@ -553,23 +600,53 @@ def trigger():
 @app.route("/settings", methods=["GET", "POST"])
 @require_login
 def settings():
-    """修改密码页面。"""
+    """系统设置页：凭证 + 密码。"""
     msg = ""
     if request.method == "POST":
-        old_pw = request.form.get("old_password", "")
-        new_pw = request.form.get("new_password", "")
-        confirm_pw = request.form.get("confirm_password", "")
-        if old_pw != get_password():
-            msg = '<div class="error">旧密码错误</div>'
-        elif not new_pw or len(new_pw) < 4:
-            msg = '<div class="error">新密码不能少于 4 位</div>'
-        elif new_pw != confirm_pw:
-            msg = '<div class="error">两次输入的新密码不一致</div>'
-        else:
-            set_password(new_pw)
-            msg = '<div class="success">密码修改成功！</div>'
+        action = request.form.get("action", "")
+        
+        if action == "credentials":
+            auth_token = request.form.get("auth_token", "").strip()
+            ct0 = request.form.get("ct0", "").strip()
+            if auth_token and ct0:
+                save_credentials(auth_token, ct0)
+                msg = '<div class="success">凭证保存成功！</div>'
+            else:
+                msg = '<div class="error">AUTH_TOKEN 和 CT0 都不能为空</div>'
+        
+        elif action == "password":
+            old_pw = request.form.get("old_password", "")
+            new_pw = request.form.get("new_password", "")
+            confirm_pw = request.form.get("confirm_password", "")
+            if old_pw != get_password():
+                msg = '<div class="error">旧密码错误</div>'
+            elif not new_pw or len(new_pw) < 4:
+                msg = '<div class="error">新密码不能少于 4 位</div>'
+            elif new_pw != confirm_pw:
+                msg = '<div class="error">两次输入的新密码不一致</div>'
+            else:
+                set_password(new_pw)
+                msg = '<div class="success">密码修改成功！</div>'
     
-    return SETTINGS_HTML % {"message": msg}
+    # 凭证状态
+    creds = load_credentials()
+    has_creds = bool(creds["auth_token"] and creds["ct0"])
+    
+    # 掩码显示（只显示前6位和后4位）
+    def mask(s):
+        if not s:
+            return ""
+        if len(s) <= 10:
+            return s[:3] + "***"
+        return s[:6] + "***" + s[-4:]
+    
+    return SETTINGS_HTML % {
+        "message": msg,
+        "cred_status": "dot-ok" if has_creds else "dot-err",
+        "cred_text": "凭证已配置" if has_creds else "未配置凭证",
+        "auth_token_masked": mask(creds["auth_token"]),
+        "ct0_masked": mask(creds["ct0"]),
+    }
 
 
 @app.route("/setup", methods=["GET", "POST"])
