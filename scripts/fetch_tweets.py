@@ -29,6 +29,14 @@ BIRD_TIMEOUT = 60  # 单个 bird 命令超时
 TOP_N = 15  # 最终保留的热门推文数量
 MAX_AGE_HOURS = 48  # 只保留最近 N 小时的推文
 
+# AI 热点搜索关键词（每组执行一次 bird search）
+SEARCH_QUERIES = [
+    "AI breakthrough OR AGI OR artificial intelligence",
+    "LLM OR GPT OR Claude OR Gemini",
+    "AI agent OR AI coding OR AI model",
+    "AI 人工智能 OR 大模型 OR 深度学习",
+]
+
 
 def load_watchlist() -> list[str]:
     """从文件加载用户名列表。"""
@@ -101,6 +109,56 @@ def fetch_user_tweets(username: str, env: dict, retry_on_429: bool = True) -> li
         return []
     except Exception as e:
         print(f"  ⚠ @{username} 异常: {e}")
+        return []
+
+
+def search_tweets(query: str, env: dict) -> list[dict]:
+    """搜索推文。"""
+    try:
+        result = subprocess.run(
+            ["bird", "search", query, "--json"],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=BIRD_TIMEOUT,
+        )
+        
+        if result.returncode != 0:
+            stderr = result.stderr
+            if "429" in stderr:
+                print(f"  ⏳ 触发 rate limit，等待 30 秒...", end=" ")
+                time.sleep(30)
+                # 重试一次
+                result = subprocess.run(
+                    ["bird", "search", query, "--json"],
+                    capture_output=True, text=True, env=env, timeout=BIRD_TIMEOUT,
+                )
+                if result.returncode != 0:
+                    print(f"⚠ 重试失败")
+                    return []
+            else:
+                print(f"  ⚠ 搜索失败: {stderr[:80]}")
+                return []
+        
+        stdout = result.stdout.strip()
+        if not stdout:
+            return []
+        
+        try:
+            data = json.loads(stdout)
+            if isinstance(data, list):
+                return data
+            elif isinstance(data, dict):
+                return [data]
+            return []
+        except json.JSONDecodeError:
+            return []
+    
+    except subprocess.TimeoutExpired:
+        print(f"  ⚠ 搜索超时")
+        return []
+    except Exception as e:
+        print(f"  ⚠ 搜索异常: {e}")
         return []
 
 
@@ -238,7 +296,42 @@ def main():
         if i < len(users):
             time.sleep(DELAY_BETWEEN_USERS)
     
-    print(f"\n抓取完成: {success_count}/{len(users)} 个用户成功")
+    print(f"\n用户抓取完成: {success_count}/{len(users)} 个用户成功")
+    
+    # === 第二阶段：AI 热点搜索 ===
+    print(f"\n{'='*50}")
+    print(f"AI 热点搜索 - {len(SEARCH_QUERIES)} 组关键词")
+    print(f"{'='*50}")
+    
+    # 收集已有推文 ID，用于去重
+    existing_ids = {t.get("id") for t in all_tweets if t.get("id")}
+    search_count = 0
+    
+    for i, query in enumerate(SEARCH_QUERIES, 1):
+        print(f"[{i}/{len(SEARCH_QUERIES)}] 搜索: {query[:40]}...", end=" ")
+        
+        results = search_tweets(query, env)
+        
+        if results:
+            # 过滤原创 + 时间 + 去重
+            fresh = [
+                t for t in results
+                if is_original_tweet(t) and is_recent_tweet(t) and t.get("id") not in existing_ids
+            ]
+            for t in fresh:
+                t["_score"] = score_tweet(t)
+                t["_source"] = "search"
+                existing_ids.add(t.get("id"))
+            all_tweets.extend(fresh)
+            search_count += len(fresh)
+            print(f"✓ {len(results)} 结果, {len(fresh)} 条有效")
+        else:
+            print("✗ 无结果")
+        
+        if i < len(SEARCH_QUERIES):
+            time.sleep(DELAY_BETWEEN_USERS)
+    
+    print(f"\n搜索完成: 新增 {search_count} 条推文")
     
     # 排序取 Top N
     all_tweets.sort(key=lambda t: t.get("_score", 0), reverse=True)
@@ -247,8 +340,8 @@ def main():
     # 生成摘要
     summary = format_summary(top_tweets)
     OUTPUT_PATH.write_text(summary, encoding="utf-8")
-    print(f"摘要已写入: {OUTPUT_PATH}")
-    print(f"Top {len(top_tweets)} 推文已保存")
+    print(f"\n摘要已写入: {OUTPUT_PATH}")
+    print(f"Top {len(top_tweets)} 推文已保存（关注用户 + 全网搜索）")
 
 
 if __name__ == "__main__":
