@@ -165,8 +165,8 @@ class SubagentManager:
                     final_result = response.content
                     break
             
-            if final_result is None:
-                final_result = "Task completed but no final response was generated."
+            if not final_result:
+                final_result = "（子代理已执行完毕，但未生成回复文本。请检查工具执行日志。）"
             
             logger.info(f"Subagent [{task_id}] completed successfully")
             await self._announce_result(task_id, label, task, final_result, origin, "ok")
