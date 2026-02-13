@@ -63,7 +63,7 @@ class ExecTool(Tool):
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": f"命令超时秒数（默认 {120}，上限 {MAX_TIMEOUT}）。长时间任务请显式设置"
+                    "description": "命令超时秒数（默认 120，上限 600）。长时间任务请显式设置"
                 }
             },
             "required": ["command"]
