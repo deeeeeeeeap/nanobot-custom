@@ -71,6 +71,10 @@ class CronTool(Tool):
                     "type": "string",
                     "description": "时区，如 'Asia/Shanghai'。用于 cron_expr 的时间计算，默认 UTC"
                 },
+                "at": {
+                    "type": "string",
+                    "description": "ISO 格式的一次性执行时间（如 '2026-02-14T10:30:00'），执行后自动删除"
+                },
                 "job_id": {
                     "type": "string",
                     "description": "Job ID (for remove)"
@@ -87,11 +91,12 @@ class CronTool(Tool):
         every_seconds: int | None = None,
         cron_expr: str | None = None,
         timezone: str | None = None,
+        at: str | None = None,
         job_id: str | None = None,
         **kwargs: Any
     ) -> str:
         if action == "add":
-            return self._add_job(message, mode, every_seconds, cron_expr, timezone)
+            return self._add_job(message, mode, every_seconds, cron_expr, timezone, at)
         elif action == "list":
             return self._list_jobs()
         elif action == "remove":
@@ -105,6 +110,7 @@ class CronTool(Tool):
         every_seconds: int | None,
         cron_expr: str | None,
         timezone: str | None,
+        at: str | None = None,
     ) -> str:
         if not message:
             return "Error: message is required for add"
@@ -112,12 +118,19 @@ class CronTool(Tool):
             return "Error: no session context (channel/chat_id)"
         
         # 构建调度计划
+        delete_after = False
         if every_seconds:
             schedule = CronSchedule(kind="every", every_ms=every_seconds * 1000)
         elif cron_expr:
             schedule = CronSchedule(kind="cron", expr=cron_expr, tz=timezone)
+        elif at:
+            from datetime import datetime
+            dt = datetime.fromisoformat(at)
+            at_ms = int(dt.timestamp() * 1000)
+            schedule = CronSchedule(kind="at", at_ms=at_ms)
+            delete_after = True
         else:
-            return "Error: either every_seconds or cron_expr is required"
+            return "Error: either every_seconds, cron_expr, or at is required"
         
         # 根据 mode 决定 payload.kind
         payload_kind = "agent_turn" if mode == "agent" else "system_event"
@@ -150,8 +163,10 @@ class CronTool(Tool):
             channel=self._channel,
             to=self._chat_id,
             payload_kind=payload_kind,
+            delete_after_run=delete_after,
         )
-        return f"✅ 已创建定时任务 [{mode_label}]\n名称: {job.name}\nID: {job.id}"
+        at_info = " (一次性)" if delete_after else ""
+        return f"✅ 已创建定时任务 [{mode_label}]{at_info}\n名称: {job.name}\nID: {job.id}"
     
     def _list_jobs(self) -> str:
         jobs = self._cron.list_jobs()

@@ -128,6 +128,7 @@ class AgentLoop:
         workspace: Path,
         model: str | None = None,
         max_iterations: int = 20,
+        memory_window: int = 50,
         brave_api_key: str | None = None,
         exec_config: "ExecToolConfig | None" = None,
         cron_service: "CronService | None" = None,
@@ -143,6 +144,7 @@ class AgentLoop:
         self.workspace = workspace
         self.model = model or provider.get_default_model()
         self.max_iterations = max_iterations
+        self.memory_window = memory_window
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
@@ -334,6 +336,22 @@ class AgentLoop:
         # 获取或创建会话
         session = self.sessions.get_or_create(msg.session_key)
         
+        # 处理斜杠命令
+        cmd = msg.content.strip().lower()
+        if cmd == "/new":
+            await self._consolidate_memory(session, archive_all=True)
+            session.clear()
+            self.sessions.save(session)
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                                  content="🐈 新会话已开始，记忆已整合。")
+        if cmd == "/help":
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                                  content="🐈 nanobot 命令：\n/new — 开始新对话\n/help — 显示帮助")
+        
+        # 会话过长时自动整合记忆
+        if len(session.messages) > self.memory_window:
+            await self._consolidate_memory(session)
+        
         # 更新工具上下文
         message_tool = self.tools.get("message")
         if isinstance(message_tool, MessageTool):
@@ -359,6 +377,7 @@ class AgentLoop:
         # Agent 循环
         iteration = 0
         final_content = None
+        tools_used: list[str] = []
         tools_were_called = False  # 定制：追踪是否真正调用了工具
         
         # 定制：检查模型是否支持 Function Calling
@@ -419,7 +438,10 @@ class AgentLoop:
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
+                    tools_used.append(tool_call.name)
                     tools_were_called = True  # 标记工具被调用
+                # 交错思维链：工具执行后引导反思
+                messages.append({"role": "user", "content": "Reflect on the results and decide next steps."})
             else:
                 # 定制：懒惰检测 — 模型说了要做但没调用工具，自动催促重试
                 if (
@@ -474,9 +496,10 @@ class AgentLoop:
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
         
-        # 保存会话
+        # 保存会话（包含工具使用记录，供记忆整合参考）
         session.add_message("user", msg.content)
-        session.add_message("assistant", final_content)
+        session.add_message("assistant", final_content,
+                            tools_used=tools_used if tools_used else None)
         self.sessions.save(session)
         
         return OutboundMessage(
@@ -583,6 +606,70 @@ class AgentLoop:
             chat_id=origin_chat_id,
             content=final_content
         )
+    
+    async def _consolidate_memory(self, session, archive_all: bool = False) -> None:
+        """将旧消息整合到 MEMORY.md + HISTORY.md，然后裁剪会话。"""
+        if not session.messages:
+            return
+        memory = MemoryStore(self.workspace)
+        if archive_all:
+            old_messages = session.messages
+            keep_count = 0
+        else:
+            keep_count = min(10, max(2, self.memory_window // 2))
+            old_messages = session.messages[:-keep_count]
+        if not old_messages:
+            return
+        logger.info(f"记忆整合开始: {len(session.messages)} 条消息, 归档 {len(old_messages)}, 保留 {keep_count}")
+
+        # 格式化消息供 LLM 处理
+        lines = []
+        for m in old_messages:
+            if not m.get("content"):
+                continue
+            tools = f" [tools: {', '.join(m['tools_used'])}]" if m.get("tools_used") else ""
+            lines.append(f"[{m.get('timestamp', '?')[:16]}] {m['role'].upper()}{tools}: {m['content']}")
+        conversation = "\n".join(lines)
+        current_memory = memory.read_long_term()
+
+        prompt = f"""You are a memory consolidation agent. Process this conversation and return a JSON object with exactly two keys:
+
+1. "history_entry": A paragraph (2-5 sentences) summarizing the key events/decisions/topics. Start with a timestamp like [YYYY-MM-DD HH:MM]. Include enough detail to be useful when found by grep search later.
+
+2. "memory_update": The updated long-term memory content. Add any new facts: user location, preferences, personal info, habits, project context, technical decisions, tools/services used. If nothing new, return the existing content unchanged.
+
+## Current Long-term Memory
+{current_memory or "(empty)"}
+
+## Conversation to Process
+{conversation}
+
+Respond with ONLY valid JSON, no markdown fences."""
+
+        try:
+            response = await self.provider.chat(
+                messages=[
+                    {"role": "system", "content": "You are a memory consolidation agent. Respond only with valid JSON."},
+                    {"role": "user", "content": prompt},
+                ],
+                model=self.model,
+            )
+            text = (response.content or "").strip()
+            if text.startswith("```"):
+                text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            result = json.loads(text)
+
+            if entry := result.get("history_entry"):
+                memory.append_history(entry)
+            if update := result.get("memory_update"):
+                if update != current_memory:
+                    memory.write_long_term(update)
+
+            session.messages = session.messages[-keep_count:] if keep_count else []
+            self.sessions.save(session)
+            logger.info(f"记忆整合完成, 会话裁剪至 {len(session.messages)} 条消息")
+        except Exception as e:
+            logger.error(f"记忆整合失败: {e}")
     
     async def process_direct(
         self,
