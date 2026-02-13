@@ -260,6 +260,26 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         ),
     ),
 
+    # MiniMax: MiniMax-M2.5 等模型
+    ProviderSpec(
+        name="minimax",
+        keywords=("minimax",),
+        env_key="MINIMAX_API_KEY",
+        display_name="MiniMax",
+        litellm_prefix="openai",              # 通过 openai 兼容接口调用
+        skip_prefixes=("minimax/",),
+        env_extras=(
+            ("MINIMAX_API_BASE", "{api_base}"),
+        ),
+        is_gateway=False,
+        is_local=False,
+        detect_by_key_prefix="",
+        detect_by_base_keyword="minimax",
+        default_api_base="https://api.minimaxi.chat/v1",
+        strip_model_prefix=True,             # minimax/MiniMax-M2.5 → MiniMax-M2.5
+        model_overrides=(),
+    ),
+
     # === Local deployment (matched by config key, NOT by api_base) =========
 
     # vLLM / any OpenAI-compatible local server.
