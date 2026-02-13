@@ -27,6 +27,7 @@ RAW_DIR = Path("/root/.nanobot/workspace/twitter_raw")
 DELAY_BETWEEN_USERS = 8  # 秒，避免 HTTP 429 rate limit
 BIRD_TIMEOUT = 60  # 单个 bird 命令超时
 TOP_N = 15  # 最终保留的热门推文数量
+MAX_AGE_HOURS = 48  # 只保留最近 N 小时的推文
 
 
 def load_watchlist() -> list[str]:
@@ -114,6 +115,21 @@ def is_original_tweet(tweet: dict) -> bool:
         if tweet["conversationId"] != tweet["id"]:
             return False
     return True
+
+
+def is_recent_tweet(tweet: dict, max_hours: int = MAX_AGE_HOURS) -> bool:
+    """判断推文是否在最近 max_hours 小时内。"""
+    created_at = tweet.get("createdAt", "")
+    if not created_at:
+        return False
+    try:
+        # bird-cli 格式: "Thu Feb 12 18:15:54 +0000 2026"
+        tweet_time = datetime.strptime(created_at, "%a %b %d %H:%M:%S %z %Y")
+        now = datetime.now(timezone.utc)
+        age = now - tweet_time
+        return age.total_seconds() < max_hours * 3600
+    except (ValueError, TypeError):
+        return False
 
 
 def score_tweet(tweet: dict) -> float:
@@ -205,8 +221,8 @@ def main():
             raw_file = RAW_DIR / f"{username}.json"
             raw_file.write_text(json.dumps(tweets, ensure_ascii=False, indent=2))
             
-            # 过滤原创推文
-            original = [t for t in tweets if is_original_tweet(t)]
+            # 过滤原创推文 + 时间范围
+            original = [t for t in tweets if is_original_tweet(t) and is_recent_tweet(t)]
             
             # 打分
             for t in original:

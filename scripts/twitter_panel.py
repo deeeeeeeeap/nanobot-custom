@@ -30,11 +30,13 @@ SUMMARY_PATH = Path("/root/.nanobot/workspace/twitter_daily_summary.md")
 FETCH_SCRIPT = Path("/root/.nanobot/workspace/scripts/fetch_tweets.py")
 
 
-def get_password() -> str:
-    """从文件读取密码，不存在则用默认密码。"""
+def get_password() -> str | None:
+    """从文件读取密码，未设置返回 None。"""
     if PASSWORD_FILE.exists():
-        return PASSWORD_FILE.read_text().strip()
-    return DEFAULT_PASSWORD
+        pw = PASSWORD_FILE.read_text().strip()
+        if pw:
+            return pw
+    return None
 
 
 def set_password(new_password: str):
@@ -75,6 +77,9 @@ def require_login(f):
     """登录验证装饰器。"""
     @wraps(f)
     def decorated(*args, **kwargs):
+        # 未设置密码 → 跳转初始设置
+        if get_password() is None:
+            return redirect(url_for("setup"))
         if not session.get("logged_in"):
             return redirect(url_for("login"))
         return f(*args, **kwargs)
@@ -301,10 +306,59 @@ SETTINGS_HTML = """
 </html>
 """
 
+SETUP_HTML = """
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🐦 推特监控 - 初始设置</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+               background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+               min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+        .setup-box { background: rgba(255,255,255,0.05); backdrop-filter: blur(20px);
+                     border: 1px solid rgba(255,255,255,0.1); border-radius: 16px;
+                     padding: 40px; width: 400px; }
+        h1 { color: #fff; text-align: center; margin-bottom: 8px; font-size: 24px; }
+        .subtitle { color: #999; text-align: center; margin-bottom: 24px; font-size: 14px; }
+        label { color: #aaa; font-size: 13px; display: block; margin-bottom: 6px; }
+        input { width: 100%%; padding: 12px 16px; border: 1px solid rgba(255,255,255,0.2);
+                border-radius: 8px; background: rgba(255,255,255,0.08); color: #fff;
+                font-size: 15px; outline: none; margin-bottom: 16px; }
+        input:focus { border-color: #6c63ff; }
+        button { width: 100%%; padding: 12px; border: none; border-radius: 8px;
+                 background: linear-gradient(135deg, #6c63ff, #3f51b5); color: #fff;
+                 font-size: 16px; cursor: pointer; transition: transform 0.2s; }
+        button:hover { transform: translateY(-2px); }
+        .error { color: #ff6b6b; text-align: center; margin-bottom: 16px; font-size: 14px; }
+    </style>
+</head>
+<body>
+    <div class="setup-box">
+        <h1>🐦 欢迎使用</h1>
+        <div class="subtitle">首次使用，请设置管理密码</div>
+        %(message)s
+        <form method="POST">
+            <label>设置密码</label>
+            <input type="password" name="new_password" placeholder="至少 4 位" required autofocus>
+            <label>确认密码</label>
+            <input type="password" name="confirm_password" placeholder="再输入一次" required>
+            <button type="submit">开始使用</button>
+        </form>
+    </div>
+</body>
+</html>
+"""
+
 # === 路由 ===
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
+    # 未设置密码 → 跳转初始设置
+    if get_password() is None:
+        return redirect(url_for("setup"))
     error = ""
     if request.method == "POST":
         if request.form.get("password") == get_password():
@@ -430,6 +484,29 @@ def settings():
             msg = '<div class="success">密码修改成功！</div>'
     
     return SETTINGS_HTML % {"message": msg}
+
+
+@app.route("/setup", methods=["GET", "POST"])
+def setup():
+    """首次设置密码（无需旧密码）。"""
+    # 已设过密码 → 跳转登录
+    if get_password() is not None:
+        return redirect(url_for("login"))
+    
+    msg = ""
+    if request.method == "POST":
+        new_pw = request.form.get("new_password", "")
+        confirm_pw = request.form.get("confirm_password", "")
+        if not new_pw or len(new_pw) < 4:
+            msg = '<div class="error">密码不能少于 4 位</div>'
+        elif new_pw != confirm_pw:
+            msg = '<div class="error">两次输入的密码不一致</div>'
+        else:
+            set_password(new_pw)
+            session["logged_in"] = True
+            return redirect(url_for("index"))
+    
+    return SETUP_HTML % {"message": msg}
 
 
 @app.route("/logout")
