@@ -37,18 +37,23 @@ def _is_lazy_response(content: str, user_message: str = "") -> bool:
     """
     检测"懒惰回复"：模型声称将要/正在执行操作但没有真正调用工具。
     
-    两层检测：
-    1. 行动承诺语言（广义）：不需要工具名，检测"请稍候/正在为你/需要时间"等
-    2. 意图词 + 工具引用（精确）：保留旧逻辑作为补充
-    
-    排除条件：用户消息是规划/讨论请求时不触发。
+    使用加权评分系统而非精确 regex 匹配：
+    - 累计多个信号的分数，score >= 4 判定懒惰
+    - 正向信号：等待语言、行动承诺、步骤列表、正在做声称等
+    - 负向信号：规划请求、短回复、问句等
     """
     import re
     
     if not content or len(content) < 10:
         return False
     
-    # 排除：用户在征求意见/讨论方案
+    # === 直接跳过条件 ===
+    
+    # 短回复不可能是懒惰（"好的"、"你好！"）
+    if len(content) < 50:
+        return False
+    
+    # 用户在征求意见/讨论方案
     planning_patterns = [
         r"先.{0,4}(看看|试试|想想|聊聊|说说|分析|规划|讨论)",
         r"(能不能|可不可以|可以吗|行不行|怎么样|什么方案|怎么做)",
@@ -58,30 +63,50 @@ def _is_lazy_response(content: str, user_message: str = "") -> bool:
     if user_message and any(re.search(p, user_message) for p in planning_patterns):
         return False
     
-    # === 第一层：行动承诺语言（广义，不需要工具名） ===
-    action_promise_patterns = [
-        r"请稍(候|等|后)",                          # 让用户等 → 暗示要做事
-        r"正在(努力|为你|帮你|尝试|处理|获取|抓取|查询|执行)",  # 声称正在做
-        r"(这个|这|该)过程(可能|需要|会)",             # 描述一个过程
-        r"(马上|立即|立刻|现在就|即将)(开始|执行|处理|为你)",
-        r"(需要|可能需要)(一些|一段|一点)(时间|功夫)",    # 声称需要时间
-        r"(稍等|等一下|等我)",                        # 让用户等
-    ]
-    has_action_promise = any(re.search(p, content) for p in action_promise_patterns)
+    # === 评分 ===
+    score = 0
     
-    # === 第二层：意图词 + 工具引用（精确，保留旧逻辑） ===
-    intent_patterns = [
-        r"我(将|会|来|要|正在|准备|尝试)(使用|调用|执行|运行)",
-        r"(让我|我来|我先|我去)(使用|调用|执行|运行|查|看|帮)",
-        r"(立即|马上|现在)(使用|调用|执行|尝试)",
-        r"我(将|会).*?(工具|命令|指令)",
-    ]
-    tool_names = ["exec", "cron", "weather", "web_search", "web_fetch", 
-                  "message", "read_file", "write_file", "curl", "命令"]
-    has_intent = any(re.search(p, content) for p in intent_patterns)
-    has_tool_ref = any(t in content.lower() for t in tool_names)
+    # +3: 等待语言（让用户等 → 暗示要做事但没做）
+    wait_patterns = [r"请稍(候|等|后)", r"请(耐心|你)等", r"(稍等|等一下|等我)", r"需要一(些|段|点)(时间|功夫)"]
+    if any(re.search(p, content) for p in wait_patterns):
+        score += 3
     
-    return has_action_promise or (has_intent and has_tool_ref)
+    # +2: 行动承诺（将要做但没做）
+    promise_patterns = [
+        r"我(将|会|要|准备)(立即|马上|现在)?(重新|开始|继续)?(执行|处理|调用|启动|运行|获取|抓取|搜索|查询|发送)",
+        r"(立即|马上|立刻|现在就|即将)(开始|执行|处理|为你|重新)",
+    ]
+    if any(re.search(p, content) for p in promise_patterns):
+        score += 2
+    
+    # +2: 步骤计划（列了 1. 2. 3. 的计划但没执行）
+    if re.search(r"\n\s*[1-9][.、]\s+", content):
+        score += 2
+    
+    # +2: 正在做声称（说正在做但实际没调工具）
+    doing_patterns = [r"正在(努力|为你|帮你|尝试|处理|获取|抓取|查询|执行|搜索)"]
+    if any(re.search(p, content) for p in doing_patterns):
+        score += 2
+    
+    # +1: 保证语言
+    if re.search(r"(这次我(会|将)|我(保证|确保|一定会))", content):
+        score += 1
+    
+    # +1: 长回复（不调工具的纯文字 > 200 字符）
+    if len(content) > 200:
+        score += 1
+    
+    # === 负向调整 ===
+    
+    # -2: 回复是问句（在询问用户意见，不是懒惰）
+    if re.search(r"[？?]\s*$", content.strip()):
+        score -= 2
+    
+    lazy = score >= 4
+    if lazy:
+        logger.info(f"懒惰评分: {score} (>= 4), 触发重试")
+    
+    return lazy
 
 
 class AgentLoop:
