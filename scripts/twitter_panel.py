@@ -22,11 +22,25 @@ app.secret_key = secrets.token_hex(32)
 
 # === 配置 ===
 PORT = 8088
-PASSWORD = os.getenv("PANEL_PASSWORD", "nanobot2026")  # 可通过环境变量覆盖
-API_TOKEN = os.getenv("API_TOKEN", "nbt_" + hashlib.md5(PASSWORD.encode()).hexdigest()[:16])
+DEFAULT_PASSWORD = os.getenv("PANEL_PASSWORD", "nanobot2026")
+PASSWORD_FILE = Path("/root/.nanobot/workspace/.panel_password")
+API_TOKEN = os.getenv("API_TOKEN", "nbt_" + hashlib.md5(DEFAULT_PASSWORD.encode()).hexdigest()[:16])
 WATCHLIST_PATH = Path("/root/.nanobot/workspace/twitter_watchlist.txt")
 SUMMARY_PATH = Path("/root/.nanobot/workspace/twitter_daily_summary.md")
 FETCH_SCRIPT = Path("/root/.nanobot/workspace/scripts/fetch_tweets.py")
+
+
+def get_password() -> str:
+    """从文件读取密码，不存在则用默认密码。"""
+    if PASSWORD_FILE.exists():
+        return PASSWORD_FILE.read_text().strip()
+    return DEFAULT_PASSWORD
+
+
+def set_password(new_password: str):
+    """保存新密码到文件。"""
+    PASSWORD_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PASSWORD_FILE.write_text(new_password)
 
 
 # === 工具函数 ===
@@ -194,6 +208,7 @@ MAIN_HTML = """
                         ▶ 手动抓取
                     </button>
                 </form>
+                <a href="/settings" class="btn btn-primary">⚙ 设置</a>
                 <a href="/logout" class="btn btn-danger">退出</a>
             </div>
         </header>
@@ -234,6 +249,57 @@ MAIN_HTML = """
 </html>
 """
 
+SETTINGS_HTML = """
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>⚙ 设置 - 推特监控</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+               background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+               min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+        .settings-box { background: rgba(255,255,255,0.05); backdrop-filter: blur(20px);
+                        border: 1px solid rgba(255,255,255,0.1); border-radius: 16px;
+                        padding: 40px; width: 400px; }
+        h1 { color: #fff; text-align: center; margin-bottom: 24px; font-size: 22px; }
+        label { color: #aaa; font-size: 13px; display: block; margin-bottom: 6px; }
+        input { width: 100%%; padding: 12px 16px; border: 1px solid rgba(255,255,255,0.2);
+                border-radius: 8px; background: rgba(255,255,255,0.08); color: #fff;
+                font-size: 15px; outline: none; margin-bottom: 16px; }
+        input:focus { border-color: #6c63ff; }
+        .btn-row { display: flex; gap: 10px; }
+        button, .back-link { flex: 1; padding: 12px; border: none; border-radius: 8px;
+                 font-size: 15px; cursor: pointer; transition: transform 0.2s; text-align: center; text-decoration: none; display: inline-block; }
+        button { background: linear-gradient(135deg, #6c63ff, #3f51b5); color: #fff; }
+        .back-link { background: rgba(255,255,255,0.1); color: #ccc; line-height: 1.2; display: flex; align-items: center; justify-content: center; }
+        button:hover, .back-link:hover { transform: translateY(-2px); }
+        .error { color: #ff6b6b; text-align: center; margin-bottom: 16px; font-size: 14px; }
+        .success { color: #00b894; text-align: center; margin-bottom: 16px; font-size: 14px; }
+    </style>
+</head>
+<body>
+    <div class="settings-box">
+        <h1>⚙ 修改密码</h1>
+        %(message)s
+        <form method="POST">
+            <label>旧密码</label>
+            <input type="password" name="old_password" required>
+            <label>新密码</label>
+            <input type="password" name="new_password" required>
+            <label>确认新密码</label>
+            <input type="password" name="confirm_password" required>
+            <div class="btn-row">
+                <a href="/" class="back-link">← 返回</a>
+                <button type="submit">保存密码</button>
+            </div>
+        </form>
+    </div>
+</body>
+</html>
+"""
 
 # === 路由 ===
 
@@ -241,7 +307,7 @@ MAIN_HTML = """
 def login():
     error = ""
     if request.method == "POST":
-        if request.form.get("password") == PASSWORD:
+        if request.form.get("password") == get_password():
             session["logged_in"] = True
             return redirect(url_for("index"))
         error = '<div class="error">密码错误</div>'
@@ -342,6 +408,28 @@ def trigger():
         return redirect(url_for("index", msg="抓取任务已启动（后台运行中）", type="ok"))
     except Exception as e:
         return redirect(url_for("index", msg=f"启动失败: {e}", type="err"))
+
+
+@app.route("/settings", methods=["GET", "POST"])
+@require_login
+def settings():
+    """修改密码页面。"""
+    msg = ""
+    if request.method == "POST":
+        old_pw = request.form.get("old_password", "")
+        new_pw = request.form.get("new_password", "")
+        confirm_pw = request.form.get("confirm_password", "")
+        if old_pw != get_password():
+            msg = '<div class="error">旧密码错误</div>'
+        elif not new_pw or len(new_pw) < 4:
+            msg = '<div class="error">新密码不能少于 4 位</div>'
+        elif new_pw != confirm_pw:
+            msg = '<div class="error">两次输入的新密码不一致</div>'
+        else:
+            set_password(new_pw)
+            msg = '<div class="success">密码修改成功！</div>'
+    
+    return SETTINGS_HTML % {"message": msg}
 
 
 @app.route("/logout")
