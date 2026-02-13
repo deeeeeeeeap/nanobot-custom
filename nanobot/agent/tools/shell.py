@@ -12,9 +12,12 @@ from nanobot.agent.tools.base import Tool
 class ExecTool(Tool):
     """Tool to execute shell commands."""
     
+    # 单次调用允许的最大超时（秒）
+    MAX_TIMEOUT = 600
+    
     def __init__(
         self,
-        timeout: int = 60,
+        timeout: int = 120,
         working_dir: str | None = None,
         deny_patterns: list[str] | None = None,
         allow_patterns: list[str] | None = None,
@@ -52,21 +55,28 @@ class ExecTool(Tool):
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "The shell command to execute"
+                    "description": "要执行的 shell 命令"
                 },
                 "working_dir": {
                     "type": "string",
-                    "description": "Optional working directory for the command"
+                    "description": "可选的工作目录"
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": f"命令超时秒数（默认 {120}，上限 {MAX_TIMEOUT}）。长时间任务请显式设置"
                 }
             },
             "required": ["command"]
         }
     
-    async def execute(self, command: str, working_dir: str | None = None, **kwargs: Any) -> str:
+    async def execute(self, command: str, working_dir: str | None = None, timeout: int | None = None, **kwargs: Any) -> str:
         cwd = working_dir or self.working_dir or os.getcwd()
         guard_error = self._guard_command(command, cwd)
         if guard_error:
             return guard_error
+        
+        # 使用调用级别的 timeout，限制在 MAX_TIMEOUT 以内
+        effective_timeout = min(timeout or self.timeout, self.MAX_TIMEOUT)
         
         try:
             process = await asyncio.create_subprocess_shell(
@@ -79,11 +89,11 @@ class ExecTool(Tool):
             try:
                 stdout, stderr = await asyncio.wait_for(
                     process.communicate(),
-                    timeout=self.timeout
+                    timeout=effective_timeout
                 )
             except asyncio.TimeoutError:
                 process.kill()
-                return f"Error: Command timed out after {self.timeout} seconds"
+                return f"Error: 命令超时（{effective_timeout} 秒）。如需更长时间，请传 timeout 参数（上限 {self.MAX_TIMEOUT}）"
             
             output_parts = []
             

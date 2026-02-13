@@ -211,7 +211,7 @@ class WebToolsConfig(BaseModel):
 
 class ExecToolConfig(BaseModel):
     """Shell exec tool configuration."""
-    timeout: int = 60
+    timeout: int = 120
 
 
 class ToolsConfig(BaseModel):
