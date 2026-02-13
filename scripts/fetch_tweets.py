@@ -24,7 +24,7 @@ from pathlib import Path
 WATCHLIST_PATH = Path("/root/.nanobot/workspace/twitter_watchlist.txt")
 OUTPUT_PATH = Path("/root/.nanobot/workspace/twitter_daily_summary.md")
 RAW_DIR = Path("/root/.nanobot/workspace/twitter_raw")
-DELAY_BETWEEN_USERS = 3  # 秒，bird-cli 自带 rate limit
+DELAY_BETWEEN_USERS = 8  # 秒，避免 HTTP 429 rate limit
 BIRD_TIMEOUT = 60  # 单个 bird 命令超时
 TOP_N = 15  # 最终保留的热门推文数量
 
@@ -50,8 +50,8 @@ def load_watchlist() -> list[str]:
     return users
 
 
-def fetch_user_tweets(username: str, env: dict) -> list[dict]:
-    """调用 bird-cli 获取用户推文。"""
+def fetch_user_tweets(username: str, env: dict, retry_on_429: bool = True) -> list[dict]:
+    """调用 bird-cli 获取用户推文。遇到 429 rate limit 等 30 秒重试一次。"""
     try:
         result = subprocess.run(
             ["bird", "user-tweets", username, "--json"],
@@ -62,7 +62,13 @@ def fetch_user_tweets(username: str, env: dict) -> list[dict]:
         )
         
         if result.returncode != 0:
-            print(f"  ⚠ @{username} 获取失败: {result.stderr[:100]}")
+            stderr = result.stderr
+            # 遇到 429 rate limit，等 30 秒重试一次
+            if "429" in stderr and retry_on_429:
+                print(f"  ⏳ @{username} 触发 rate limit，等待 30 秒重试...", end=" ")
+                time.sleep(30)
+                return fetch_user_tweets(username, env, retry_on_429=False)
+            print(f"  ⚠ @{username} 获取失败: {stderr[:100]}")
             return []
         
         stdout = result.stdout.strip()
