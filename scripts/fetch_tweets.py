@@ -65,14 +65,29 @@ def fetch_user_tweets(username: str, env: dict) -> list[dict]:
             print(f"  ⚠ @{username} 获取失败: {result.stderr[:100]}")
             return []
         
-        tweets = []
-        for line in result.stdout.strip().split("\n"):
-            if line:
-                try:
-                    tweets.append(json.loads(line))
-                except json.JSONDecodeError:
-                    pass
-        return tweets
+        stdout = result.stdout.strip()
+        if not stdout:
+            return []
+        
+        # bird-cli 输出完整 JSON 数组
+        try:
+            data = json.loads(stdout)
+            if isinstance(data, list):
+                return data
+            elif isinstance(data, dict):
+                return [data]
+            return []
+        except json.JSONDecodeError:
+            # 兼容逐行 JSON 格式
+            tweets = []
+            for line in stdout.split("\n"):
+                line = line.strip()
+                if line and line.startswith("{"):
+                    try:
+                        tweets.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+            return tweets
     
     except subprocess.TimeoutExpired:
         print(f"  ⚠ @{username} 超时 ({BIRD_TIMEOUT}s)")
