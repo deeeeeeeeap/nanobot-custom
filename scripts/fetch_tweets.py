@@ -29,13 +29,29 @@ BIRD_TIMEOUT = 60  # 单个 bird 命令超时
 TOP_N = 15  # 最终保留的热门推文数量
 MAX_AGE_HOURS = 48  # 只保留最近 N 小时的推文
 
-# AI 热点搜索关键词（每组执行一次 bird search）
-SEARCH_QUERIES = [
+# 搜索关键词文件（通过 Web 面板管理）
+SEARCH_QUERIES_PATH = Path("/root/.nanobot/workspace/twitter_search_queries.txt")
+DEFAULT_SEARCH_QUERIES = [
     "AI breakthrough OR AGI OR artificial intelligence",
     "LLM OR GPT OR Claude OR Gemini",
     "AI agent OR AI coding OR AI model",
     "AI 人工智能 OR 大模型 OR 深度学习",
 ]
+
+
+def load_search_queries() -> list[str]:
+    """从文件加载搜索关键词，不存在则初始化默认值。"""
+    if not SEARCH_QUERIES_PATH.exists():
+        SEARCH_QUERIES_PATH.parent.mkdir(parents=True, exist_ok=True)
+        SEARCH_QUERIES_PATH.write_text("\n".join(DEFAULT_SEARCH_QUERIES) + "\n")
+        return DEFAULT_SEARCH_QUERIES[:]
+    
+    queries = []
+    for line in SEARCH_QUERIES_PATH.read_text().strip().split("\n"):
+        line = line.strip()
+        if line and not line.startswith("#"):
+            queries.append(line)
+    return queries
 
 
 def load_watchlist() -> list[str]:
@@ -298,17 +314,18 @@ def main():
     
     print(f"\n用户抓取完成: {success_count}/{len(users)} 个用户成功")
     
-    # === 第二阶段：AI 热点搜索 ===
+    # === 第二阶段：热点搜索 ===
+    search_queries = load_search_queries()
     print(f"\n{'='*50}")
-    print(f"AI 热点搜索 - {len(SEARCH_QUERIES)} 组关键词")
+    print(f"热点搜索 - {len(search_queries)} 组关键词")
     print(f"{'='*50}")
     
     # 收集已有推文 ID，用于去重
     existing_ids = {t.get("id") for t in all_tweets if t.get("id")}
     search_count = 0
     
-    for i, query in enumerate(SEARCH_QUERIES, 1):
-        print(f"[{i}/{len(SEARCH_QUERIES)}] 搜索: {query[:40]}...", end=" ")
+    for i, query in enumerate(search_queries, 1):
+        print(f"[{i}/{len(search_queries)}] 搜索: {query[:40]}...", end=" ")
         
         results = search_tweets(query, env)
         
@@ -328,7 +345,7 @@ def main():
         else:
             print("✗ 无结果")
         
-        if i < len(SEARCH_QUERIES):
+        if i < len(search_queries):
             time.sleep(DELAY_BETWEEN_USERS)
     
     print(f"\n搜索完成: 新增 {search_count} 条推文")

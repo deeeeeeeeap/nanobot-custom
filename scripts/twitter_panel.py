@@ -28,6 +28,13 @@ API_TOKEN = os.getenv("API_TOKEN", "nbt_" + hashlib.md5(DEFAULT_PASSWORD.encode(
 WATCHLIST_PATH = Path("/root/.nanobot/workspace/twitter_watchlist.txt")
 SUMMARY_PATH = Path("/root/.nanobot/workspace/twitter_daily_summary.md")
 FETCH_SCRIPT = Path("/root/.nanobot/workspace/scripts/fetch_tweets.py")
+QUERIES_PATH = Path("/root/.nanobot/workspace/twitter_search_queries.txt")
+DEFAULT_QUERIES = [
+    "AI breakthrough OR AGI OR artificial intelligence",
+    "LLM OR GPT OR Claude OR Gemini",
+    "AI agent OR AI coding OR AI model",
+    "AI 人工智能 OR 大模型 OR 深度学习",
+]
 
 
 def get_password() -> str | None:
@@ -71,6 +78,25 @@ def load_summary() -> str:
     if SUMMARY_PATH.exists():
         return SUMMARY_PATH.read_text()
     return "暂无摘要，等待首次抓取..."
+
+
+def load_queries() -> list[str]:
+    """加载搜索关键词，不存在则初始化默认值。"""
+    if not QUERIES_PATH.exists():
+        save_queries(DEFAULT_QUERIES)
+        return DEFAULT_QUERIES[:]
+    queries = []
+    for line in QUERIES_PATH.read_text().strip().split("\n"):
+        line = line.strip()
+        if line and not line.startswith("#"):
+            queries.append(line)
+    return queries
+
+
+def save_queries(queries: list[str]):
+    """保存搜索关键词。"""
+    QUERIES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    QUERIES_PATH.write_text("\n".join(queries) + "\n")
 
 
 def require_login(f):
@@ -226,6 +252,10 @@ MAIN_HTML = """
                 <div class="stat-label">监控用户</div>
             </div>
             <div class="stat-box">
+                <div class="stat-num">%(query_count)s</div>
+                <div class="stat-label">搜索关键词</div>
+            </div>
+            <div class="stat-box">
                 <div class="stat-num">%(summary_time)s</div>
                 <div class="stat-label">最近更新</div>
             </div>
@@ -242,6 +272,20 @@ MAIN_HTML = """
             </form>
             <div class="api-info">
                 🤖 Bot API: <code>POST /api/users</code> Header: <code>Authorization: Bearer %(api_token)s</code>
+            </div>
+        </div>
+        
+        <div class="card">
+            <h2>🔍 搜索关键词</h2>
+            <ul class="user-list">
+                %(query_list)s
+            </ul>
+            <form class="add-form" method="POST" action="/add_query">
+                <input type="text" name="query" placeholder="输入搜索关键词，如: AI safety OR alignment" required>
+                <button class="btn btn-primary" type="submit">+ 添加</button>
+            </form>
+            <div class="api-info">
+                💡 支持 OR 运算符串联多个关键词，拓取时自动搜索全网热门推文
             </div>
         </div>
         
@@ -372,6 +416,7 @@ def login():
 @require_login
 def index():
     users = load_users()
+    queries = load_queries()
     summary = load_summary()
     
     # 用户列表 HTML
@@ -388,6 +433,21 @@ def index():
     
     if not user_html:
         user_html = '<li class="user-item"><span class="user-name" style="color:#666;">暂无用户</span></li>'
+    
+    # 搜索关键词列表 HTML
+    query_html = ""
+    for i, q in enumerate(queries):
+        query_html += f'''
+        <li class="user-item">
+            <span class="user-name">{i+1}. <span>{q}</span></span>
+            <form method="POST" action="/remove_query" style="display:inline;">
+                <input type="hidden" name="index" value="{i}">
+                <button class="btn btn-danger btn-sm" type="submit">删除</button>
+            </form>
+        </li>'''
+    
+    if not query_html:
+        query_html = '<li class="user-item"><span class="user-name" style="color:#666;">暂无关键词</span></li>'
     
     # 摘要时间
     summary_time = "未知"
@@ -407,8 +467,10 @@ def index():
     
     return MAIN_HTML % {
         "user_count": len(users),
+        "query_count": len(queries),
         "summary_time": summary_time,
         "user_list": user_html,
+        "query_list": query_html,
         "summary": summary.replace("<", "&lt;").replace(">", "&gt;"),
         "message": msg_html,
         "api_token": API_TOKEN,
@@ -436,6 +498,30 @@ def remove_user():
         removed = users.pop(idx)
         save_users(users)
         return redirect(url_for("index", msg=f"已删除: {removed}", type="ok"))
+    return redirect(url_for("index", msg="无效的索引", type="err"))
+
+
+@app.route("/add_query", methods=["POST"])
+@require_login
+def add_query():
+    query = request.form.get("query", "").strip()
+    if query:
+        queries = load_queries()
+        queries.append(query)
+        save_queries(queries)
+        return redirect(url_for("index", msg=f"已添加关键词: {query}", type="ok"))
+    return redirect(url_for("index", msg="关键词不能为空", type="err"))
+
+
+@app.route("/remove_query", methods=["POST"])
+@require_login
+def remove_query():
+    idx = int(request.form.get("index", -1))
+    queries = load_queries()
+    if 0 <= idx < len(queries):
+        removed = queries.pop(idx)
+        save_queries(queries)
+        return redirect(url_for("index", msg=f"已删除关键词: {removed}", type="ok"))
     return redirect(url_for("index", msg="无效的索引", type="err"))
 
 
