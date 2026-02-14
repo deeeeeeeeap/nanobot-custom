@@ -26,7 +26,10 @@ OUTPUT_PATH = Path("/root/.nanobot/workspace/twitter_daily_summary.md")
 RAW_DIR = Path("/root/.nanobot/workspace/twitter_raw")
 DELAY_BETWEEN_USERS = 8  # 秒，避免 HTTP 429 rate limit
 BIRD_TIMEOUT = 60  # 单个 bird 命令超时
-TOP_N = 15  # 最终保留的热门推文数量
+TOP_N = 20  # 最终保留的热门推文总量
+USER_TOP_N = 10  # 关注用户推文展示数量
+SEARCH_TOP_N = 5  # 搜索推文展示数量
+SEARCH_SCORE_BOOST = 1.5  # 搜索推文热度加权系数
 MAX_AGE_HOURS = 48  # 只保留最近 N 小时的推文
 
 # 搜索关键词文件（通过 Web 面板管理）
@@ -214,48 +217,74 @@ def score_tweet(tweet: dict) -> float:
     return likes + (retweets * 2) + (replies * 0.5)
 
 
-def format_summary(ranked_tweets: list[dict]) -> str:
-    """生成 Markdown 格式的摘要。"""
+def _format_tweet_block(tweet: dict, index: int) -> list[str]:
+    """格式化单条推文为 Markdown 行列表。"""
+    author = tweet.get("author", {})
+    username = author.get("username", "unknown")
+    name = author.get("name", username)
+    text = tweet.get("text", "").replace("\n", " ").strip()
+    # 截断到 150 字符
+    if len(text) > 150:
+        text = text[:147] + "..."
+    
+    likes = tweet.get("likeCount", 0) or 0
+    rts = tweet.get("retweetCount", 0) or 0
+    replies = tweet.get("replyCount", 0) or 0
+    score = tweet.get("_score", 0)
+    tweet_id = tweet.get("id", "")
+    url = f"https://twitter.com/{username}/status/{tweet_id}"
+    source = "🔎" if tweet.get("_source") == "search" else "👤"
+    
+    return [
+        f"### {index}. {source} @{username} ({name})",
+        f"",
+        f"> {text}",
+        f"",
+        f"❤️ {likes} | 🔁 {rts} | 💬 {replies} | 🔥 热度: {score:.0f}",
+        f"🔗 {url}",
+        f"",
+    ]
+
+
+def format_summary(user_tweets: list[dict], search_tweets: list[dict]) -> str:
+    """生成分区 Markdown 摘要：关注用户 + 热点搜索两个独立区块。"""
     now = datetime.now(timezone(timedelta(hours=8)))
     query_count = len(load_search_queries())
+    total = len(user_tweets) + len(search_tweets)
     lines = [
         f"# 🐦 推特热点日报",
         f"",
         f"**生成时间**: {now.strftime('%Y-%m-%d %H:%M')} (北京时间)",
         f"**监控用户数**: {len(load_watchlist())} | **搜索关键词**: {query_count} 组",
-        f"**热门推文 Top {len(ranked_tweets)}**:",
-        f"",
-        f"---",
+        f"**收录推文**: {total} 条（关注用户 {len(user_tweets)} + 热点搜索 {len(search_tweets)}）",
         f"",
     ]
     
-    for i, tweet in enumerate(ranked_tweets, 1):
-        author = tweet.get("author", {})
-        username = author.get("username", "unknown")
-        name = author.get("name", username)
-        text = tweet.get("text", "").replace("\n", " ").strip()
-        # 截断到 150 字符
-        if len(text) > 150:
-            text = text[:147] + "..."
-        
-        likes = tweet.get("likeCount", 0) or 0
-        rts = tweet.get("retweetCount", 0) or 0
-        replies = tweet.get("replyCount", 0) or 0
-        score = tweet.get("_score", 0)
-        tweet_id = tweet.get("id", "")
-        url = f"https://twitter.com/{username}/status/{tweet_id}"
-        source = "🔎" if tweet.get("_source") == "search" else "👤"
-        
-        lines.append(f"### {i}. {source} @{username} ({name})")
-        lines.append(f"")
-        lines.append(f"> {text}")
-        lines.append(f"")
-        lines.append(f"❤️ {likes} | 🔁 {rts} | 💬 {replies} | 🔥 热度: {score:.0f}")
-        lines.append(f"🔗 {url}")
+    # === 第一区块：关注用户 ===
+    lines.append(f"---")
+    lines.append(f"")
+    lines.append(f"## 👤 关注用户 Top {len(user_tweets)}")
+    lines.append(f"")
+    
+    if user_tweets:
+        for i, tweet in enumerate(user_tweets, 1):
+            lines.extend(_format_tweet_block(tweet, i))
+    else:
+        lines.append("今日未抓取到关注用户的有效原创推文。")
         lines.append(f"")
     
-    if not ranked_tweets:
-        lines.append("今日未抓取到有效的原创推文。")
+    # === 第二区块：热点搜索 ===
+    lines.append(f"---")
+    lines.append(f"")
+    lines.append(f"## 🔎 热点搜索 Top {len(search_tweets)}")
+    lines.append(f"")
+    
+    if search_tweets:
+        for i, tweet in enumerate(search_tweets, 1):
+            lines.extend(_format_tweet_block(tweet, i))
+    else:
+        lines.append("今日热点搜索未返回有效结果。")
+        lines.append(f"")
     
     return "\n".join(lines)
 
@@ -354,7 +383,7 @@ def main():
                 if is_original_tweet(t) and is_recent_tweet(t) and t.get("id") not in existing_ids
             ]
             for t in fresh:
-                t["_score"] = score_tweet(t)
+                t["_score"] = score_tweet(t) * SEARCH_SCORE_BOOST  # 搜索加权
                 t["_source"] = "search"
                 existing_ids.add(t.get("id"))
             all_tweets.extend(fresh)
@@ -368,15 +397,21 @@ def main():
     
     print(f"\n搜索完成: 新增 {search_count} 条推文")
     
-    # 排序取 Top N
-    all_tweets.sort(key=lambda t: t.get("_score", 0), reverse=True)
-    top_tweets = all_tweets[:TOP_N]
+    # 分开排序：用户推文 Top N 和搜索推文 Top N
+    user_tweets = [t for t in all_tweets if t.get("_source") != "search"]
+    search_results = [t for t in all_tweets if t.get("_source") == "search"]
     
-    # 生成摘要
-    summary = format_summary(top_tweets)
+    user_tweets.sort(key=lambda t: t.get("_score", 0), reverse=True)
+    search_results.sort(key=lambda t: t.get("_score", 0), reverse=True)
+    
+    top_user = user_tweets[:USER_TOP_N]
+    top_search = search_results[:SEARCH_TOP_N]
+    
+    # 生成分区摘要
+    summary = format_summary(top_user, top_search)
     OUTPUT_PATH.write_text(summary, encoding="utf-8")
     print(f"\n摘要已写入: {OUTPUT_PATH}")
-    print(f"Top {len(top_tweets)} 推文已保存（关注用户 + 全网搜索）")
+    print(f"关注用户 Top {len(top_user)} + 热点搜索 Top {len(top_search)} 推文已保存")
 
 
 if __name__ == "__main__":
