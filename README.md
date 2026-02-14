@@ -18,20 +18,22 @@
 <tr>
 <td width="50%">
 
-### � 智能核心
-- �🤖 **多模型热切换** — Claude / Gemini / GPT / DeepSeek / MiniMax / Kimi
+### 🧠 智能核心
+- 🤖 **多模型热切换** — Claude / Gemini / GPT / DeepSeek / MiniMax / Kimi
 - 🌐 **Antigravity 网关** — 多 Google 账号轮换，免费用 Claude & Gemini
 - 🧬 **思维链支持** — DeepSeek-R1、Claude Thinking 推理过程可视化
+- 🔄 **交错思维链** — 工具执行后自动反思，提升多步推理质量
 - ⚡ **懒惰检测** — 模型说了"我将要做"但没调工具？自动催促重试
 
 </td>
 <td width="50%">
 
-### �️ 安全可靠
+### 🛡️ 安全可靠
 - 🛡️ **防幻觉机制** — 自动拦截编造的命令输出、虚假搜索结果
 - 🔒 **命令安全护栏** — 智能拦截 `rm -rf`、`format` 等危险操作
 - 🔗 **URL 真实性验证** — 模型给出的链接也要查验
 - 📊 **实时状态反馈** — 🤔→🔧→✅ 执行进度一目了然
+- 🧠 **双层记忆** — 长期事实 + 事件日志，跨会话永久记忆
 
 </td>
 </tr>
@@ -39,8 +41,9 @@
 <td>
 
 ### ⏰ 自动化
-- � **提醒模式** — 定时发送静态提醒
+- ⏰ **提醒模式** — 定时发送静态提醒
 - 🤖 **Agent 模式** — 定时执行完整工具链任务（天气预报、系统巡检）
+- 🎯 **一次性定时 `at`** — 指定时间执行一次，完成自动删除
 - 🚀 **子代理** — 后台派遣长任务，无需持续盯着
 - 💓 **心跳保活** — 7×24 在线，崩溃自动重启
 
@@ -160,6 +163,8 @@ cd /opt/nanobot && git pull && systemctl restart nanobot
 | `/model` | 查看当前模型 & 可用 providers |
 | `/model <模型名>` | 热切换模型 |
 | `/status` | 系统状态 |
+| `/new` | 整合记忆后开始新对话 |
+| `/help` | 显示可用命令 |
 | `/clear` | 清除会话历史（磁盘 + 内存缓存） |
 
 ## 🤖 碳核定制功能
@@ -195,6 +200,7 @@ cd /opt/nanobot && git pull && systemctl restart nanobot
 
 - **提醒模式**：发送静态文本
 - **Agent 模式**：定时触发完整 Agent 处理（可调用所有工具）
+- **一次性定时 `at`**：`cron(at="2026-02-14T10:30:00")`，到时执行，完成自动删除
 - 120 秒超时 + 错误兜底通知 + session 隔离
 
 ### 实时状态反馈
@@ -209,6 +215,24 @@ cd /opt/nanobot && git pull && systemctl restart nanobot
 ### Antigravity 网关兼容
 
 自动解析 Antigravity 的 `{"raw": "..."}` 工具参数格式为标准格式，确保所有工具调用正常工作。
+
+### 双层记忆系统
+
+```
+MEMORY.md  — 长期事实，始终加载到上下文（用户偏好、项目信息、习惯）
+HISTORY.md — 事件日志，通过 grep 按关键词搜索历史
+```
+
+- 会话超过 50 条消息时自动整合（LLM 分析对话 → 提取事实 → 归档事件）
+- `/new` 命令主动触发整合后清空会话
+- 跨会话持久记忆，重启不丢失
+
+### 推特智能监控
+
+- 📋 **Web 管理面板** — 关注名单管理、凭证配置、摘要查看
+- 🕷️ **自动抓取** — 系统 cron 定时抓取关注用户推文
+- 🤖 **AI 总结推送** — Agent 定时读取摘要、智能总结、推送到 Telegram
+- 🔍 **关键词搜索** — 主题搜索 AI/科技领域热点
 
 ## 📦 支持的模型
 
@@ -226,7 +250,7 @@ cd /opt/nanobot && git pull && systemctl restart nanobot
 
 ## 🙏 致谢
 
-本项目 fork 自 [HKUDS/nanobot](https://github.com/HKUDS/nanobot) v0.1.3.post6，在其基础上进行了大量定制开发。
+本项目 fork 自 [HKUDS/nanobot](https://github.com/HKUDS/nanobot) v0.1.3.post7，在其基础上进行了大量定制开发。
 
 ---
 
