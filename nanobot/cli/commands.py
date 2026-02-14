@@ -336,6 +336,7 @@ def gateway(
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronJob
     from nanobot.heartbeat.service import HeartbeatService
+    from loguru import logger
     
     if verbose:
         import logging
