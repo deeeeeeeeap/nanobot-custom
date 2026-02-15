@@ -351,14 +351,36 @@ class AgentLoop:
         # 处理斜杠命令
         cmd = msg.content.strip().lower()
         if cmd == "/new":
-            await self._consolidate_memory(session, archive_all=True)
+            msg_count = len(session.messages)
+            result = await self._consolidate_memory(session, archive_all=True)
             session.clear()
             self.sessions.save(session)
-            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content="🐈 新会话已开始，记忆已整合。")
+            # 构建详细反馈
+            if result and result.get("success"):
+                parts = ["📝 **新会话已开始**"]
+                parts.append(f"• 归档消息: {result.get('archived', 0)} 条")
+                if result.get("memory_updated"):
+                    parts.append("• 长期记忆: ✅ 已更新")
+                else:
+                    parts.append("• 长期记忆: 无新增内容")
+                if result.get("history_added"):
+                    parts.append("• 历史归档: ✅ 已追加到 HISTORY.md")
+                feedback = "\n".join(parts)
+            elif msg_count == 0:
+                feedback = "📝 新会话已开始（无需整合，会话为空）。"
+            else:
+                feedback = "📝 新会话已开始（记忆整合失败，对话历史已清空但未归档）。"
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=feedback)
         if cmd == "/help":
-            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content="🐈 nanobot 命令：\n/new — 开始新对话\n/help — 显示帮助")
+            help_text = (
+                "🐈 **nanobot 命令**\n\n"
+                "/new — 📝 新会话（先整合记忆再清空，对话摘要会保存到 MEMORY.md）\n"
+                "/clear — 🗑️ 清空会话（直接清空，不保存对话历史）\n"
+                "/model <名称> — 🔄 切换模型\n"
+                "/status — 📊 查看系统状态\n"
+                "/help — ❓ 显示帮助"
+            )
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=help_text)
         
         # 会话过长时自动整合记忆
         if len(session.messages) > self.memory_window:
@@ -618,10 +640,16 @@ class AgentLoop:
             content=final_content
         )
     
-    async def _consolidate_memory(self, session, archive_all: bool = False) -> None:
-        """将旧消息整合到 MEMORY.md + HISTORY.md，然后裁剪会话。"""
+    async def _consolidate_memory(self, session, archive_all: bool = False) -> dict | None:
+        """
+        将旧消息整合到 MEMORY.md + HISTORY.md，然后裁剪会话。
+        
+        Returns:
+            整合结果字典 {success, archived, memory_updated, history_added}，
+            无消息时返回 None。
+        """
         if not session.messages:
-            return
+            return None
         memory = MemoryStore(self.workspace)
         if archive_all:
             old_messages = session.messages
@@ -630,8 +658,9 @@ class AgentLoop:
             keep_count = min(10, max(2, self.memory_window // 2))
             old_messages = session.messages[:-keep_count]
         if not old_messages:
-            return
-        logger.info(f"记忆整合开始: {len(session.messages)} 条消息, 归档 {len(old_messages)}, 保留 {keep_count}")
+            return None
+        archived_count = len(old_messages)
+        logger.info(f"记忆整合开始: {len(session.messages)} 条消息, 归档 {archived_count}, 保留 {keep_count}")
 
         # 格式化消息供 LLM 处理
         lines = []
@@ -670,17 +699,28 @@ Respond with ONLY valid JSON, no markdown fences."""
                 text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
             result = json.loads(text)
 
+            history_added = False
+            memory_updated = False
             if entry := result.get("history_entry"):
                 memory.append_history(entry)
+                history_added = True
             if update := result.get("memory_update"):
                 if update != current_memory:
                     memory.write_long_term(update)
+                    memory_updated = True
 
             session.messages = session.messages[-keep_count:] if keep_count else []
             self.sessions.save(session)
             logger.info(f"记忆整合完成, 会话裁剪至 {len(session.messages)} 条消息")
+            return {
+                "success": True,
+                "archived": archived_count,
+                "memory_updated": memory_updated,
+                "history_added": history_added,
+            }
         except Exception as e:
             logger.error(f"记忆整合失败: {e}")
+            return {"success": False, "archived": archived_count, "error": str(e)}
     
     async def process_direct(
         self,

@@ -453,7 +453,8 @@ class TelegramChannel(BaseChannel):
             
             await update.message.reply_text(
                 "🗑️ <b>会话已清空</b>\n\n"
-                "对话历史已重置，让我们重新开始！",
+                "对话历史已直接清除（未保存到记忆）。\n"
+                "💡 如需保留对话摘要，请使用 /new。",
                 parse_mode="HTML"
             )
         except Exception as e:
