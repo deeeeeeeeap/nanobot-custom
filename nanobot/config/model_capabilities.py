@@ -84,14 +84,14 @@ MODEL_CAPABILITIES: dict[str, ModelCapability] = {
         "streaming": True,
     },
     
-    # ===== GPT-5 Codex 系列 - 通过 Codex CLI/反代访问，不支持 Function Calling =====
+    # ===== GPT-5 Codex 系列 - 通过 codex_bridge.py 调 Responses API =====
     "gpt-5.3-codex": {
-        "function_calling": False,  # Codex 不支持外部工具调用
+        "function_calling": True,   # 通过 codex_bridge.py v2 转换支持
         "vision": False,
         "streaming": True,
     },
     "gpt-5-codex": {
-        "function_calling": False,  # Codex 不支持外部工具调用
+        "function_calling": True,   # 通过 codex_bridge.py v2 转换支持
         "vision": False,
         "streaming": True,
     },

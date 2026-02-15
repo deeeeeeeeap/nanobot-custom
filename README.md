@@ -241,7 +241,7 @@ HISTORY.md — 事件日志，通过 grep 按关键词搜索历史
 | Antigravity | `antigravity/claude-opus-4-6-thinking` | ✅ |
 | Antigravity | `antigravity/gemini-3-flash-preview` | ✅ |
 | Antigravity | `antigravity/gemini-3-pro` | ✅ |
-| OpenAI | `openai/gpt-5.3-codex` | ❌ (自主执行) |
+| OpenAI | `openai/gpt-5.3-codex` | ✅ (via codex_bridge) |
 | MiniMax | `minimax/MiniMax-M2.1` | ✅ |
 | Gemini | `gemini-2.5-flash-preview` | ✅ |
 | Claude | `anthropic/claude-sonnet-4-5` | ✅ |
