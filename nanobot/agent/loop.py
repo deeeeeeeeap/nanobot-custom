@@ -75,9 +75,21 @@ def _is_lazy_response(content: str, user_message: str = "") -> bool:
     promise_patterns = [
         r"我(将|会|要|准备)(立即|马上|现在)?(重新|开始|继续)?(执行|处理|调用|启动|运行|获取|抓取|搜索|查询|发送)",
         r"(立即|马上|立刻|现在就|即将)(开始|执行|处理|为你|重新)",
+        r"(下一步|接下来)(我|碳核)?(将|会|要|准备)?(直接|立即|马上)?",
+        r"(直接|马上)(动手|开干|改|做|执行|落盘|替换)",
     ]
     if any(re.search(p, content) for p in promise_patterns):
         score += 2
+    
+    # +3: 空转承诺（反复确认/询问授权而不行动）
+    stall_patterns = [
+        r"如果你(确认|同意|授权).*我(就|将|会|马上)",
+        r"回我一句.*我就",
+        r"(这次|这波|下一条).*不再.*(空话|空转|口头|嘴硬)",
+        r"给你.*(可核验|可验证|证据|回执)",
+    ]
+    if any(re.search(p, content) for p in stall_patterns):
+        score += 3
     
     # +2: 步骤计划（列了 1. 2. 3. 的计划但没执行）
     if re.search(r"\n\s*[1-9][.、]\s+", content):
@@ -88,9 +100,9 @@ def _is_lazy_response(content: str, user_message: str = "") -> bool:
     if any(re.search(p, content) for p in doing_patterns):
         score += 2
     
-    # +1: 保证语言
-    if re.search(r"(这次我(会|将)|我(保证|确保|一定会))", content):
-        score += 1
+    # +2: 保证语言（提高权重）
+    if re.search(r"(这次我(会|将)|我(保证|确保|一定会)|不再.*(口头|空话|空转|废话))", content):
+        score += 2
     
     # +1: 长回复（不调工具的纯文字 > 200 字符）
     if len(content) > 200:
@@ -444,19 +456,21 @@ class AgentLoop:
                 messages.append({"role": "user", "content": "Reflect on the results and decide next steps."})
             else:
                 # 定制：懒惰检测 — 模型说了要做但没调用工具，自动催促重试
+                # 允许最多催促 2 次（iteration 1 和 2）
                 if (
-                    iteration == 1
+                    iteration <= 2
                     and model_supports_tools
                     and response.content
                     and _is_lazy_response(response.content, msg.content)
                 ):
-                    logger.warning("检测到懒惰回复（说了要做但没调用工具），注入催促消息重试")
+                    logger.warning(f"检测到懒惰回复 (第{iteration}次)，注入催促消息重试")
                     messages = self.context.add_assistant_message(messages, response.content)
-                    messages = self.context.add_user_nudge(
-                        messages,
-                        "你刚才只是描述了你要做什么，但没有真正调用工具。"
-                        "请立即调用对应工具执行，不要再描述了。"
+                    nudge = (
+                        "【系统强制指令】你前面的回复没有调用任何工具，只是在描述计划。"
+                        "这是不可接受的。你必须在下一条回复中调用工具（如 exec、read_file、write_file）。"
+                        "规则：先调用工具，再说话。不允许只说不做。"
                     )
+                    messages = self.context.add_user_nudge(messages, nudge)
                     continue  # 不 break，再给一轮机会
                 
                 # 无工具调用，完成
