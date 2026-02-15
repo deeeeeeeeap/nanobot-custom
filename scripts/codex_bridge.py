@@ -86,7 +86,6 @@ class AuthManager:
             "Accept": "text/event-stream",
             # 浏览器指纹头（绕过 Cloudflare）
             "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
             "Referer": "https://chatgpt.com/",
             "Origin": "https://chatgpt.com",
             "User-Agent": (
@@ -261,7 +260,13 @@ def parse_sse_response(response) -> tuple[str, list[dict]]:
     # 追踪正在流式传输的 function_call 参数
     pending_calls: dict[str, dict] = {}  # item_id → {call_id, name, arguments}
 
-    for line in response.iter_lines(decode_unicode=True):
+    for raw_line in response.iter_lines():
+        # 兼容 bytes 和 str（压缩响应可能返回 bytes）
+        if isinstance(raw_line, bytes):
+            line = raw_line.decode("utf-8", errors="replace")
+        else:
+            line = raw_line
+
         if not line or not line.startswith("data: "):
             continue
 
