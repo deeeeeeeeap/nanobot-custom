@@ -360,7 +360,11 @@ def find_gateway(
             return spec
 
     # 2. Auto-detect by api_key prefix / api_base keyword
+    #    只匹配 gateway 和 local 类型，避免普通 provider（如 minimax）
+    #    因 detect_by_base_keyword 被误识别为 gateway
     for spec in PROVIDERS:
+        if not (spec.is_gateway or spec.is_local):
+            continue
         if spec.detect_by_key_prefix and api_key and api_key.startswith(spec.detect_by_key_prefix):
             return spec
         if spec.detect_by_base_keyword and api_base and spec.detect_by_base_keyword in api_base:
