@@ -219,10 +219,26 @@ def convert_to_responses_api(data: dict) -> dict:
         "store": False,
     }
 
-    # tools 透传（格式与 Chat Completions 相同）
+    # tools 格式转换：Chat Completions 嵌套格式 → Responses API 扁平格式
+    # Chat Completions: {"type": "function", "function": {"name": ..., "parameters": ...}}
+    # Responses API:    {"type": "function", "name": ..., "parameters": ...}
     tools = data.get("tools")
     if tools:
-        result["tools"] = tools
+        converted_tools = []
+        for tool in tools:
+            if tool.get("type") == "function" and "function" in tool:
+                func = tool["function"]
+                converted_tool = {"type": "function"}
+                converted_tool["name"] = func.get("name", "")
+                if "description" in func:
+                    converted_tool["description"] = func["description"]
+                if "parameters" in func:
+                    converted_tool["parameters"] = func["parameters"]
+                converted_tools.append(converted_tool)
+            else:
+                # 非 function 类型或已经是扁平格式，直接透传
+                converted_tools.append(tool)
+        result["tools"] = converted_tools
         result["tool_choice"] = data.get("tool_choice", "auto")
 
     return result
