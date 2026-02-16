@@ -1,15 +1,16 @@
 from pathlib import Path
 from typing import Any
 
-from nanobot.agent.loop import AgentLoop
+from nanobot.agent.loop import AgentLoop, _is_lazy_response
 from nanobot.bus.queue import MessageBus
 from nanobot.exceptions import ConfigError
 from nanobot.providers.base import LLMProvider, LLMResponse
 
 
 class DummyProvider(LLMProvider):
-    def __init__(self):
+    def __init__(self, reply: str = "ok"):
         super().__init__(api_key=None, api_base=None)
+        self.reply = reply
 
     async def chat(
         self,
@@ -19,30 +20,99 @@ class DummyProvider(LLMProvider):
         max_tokens: int = 4096,
         temperature: float = 0.7,
     ) -> LLMResponse:
-        return LLMResponse(content="ok", finish_reason="stop")
+        return LLMResponse(content=self.reply, finish_reason="stop")
 
     def get_default_model(self) -> str:
         return "openai/gpt-4o-mini"
 
 
-async def test_agent_loop_process_direct_tolerates_config_reload_errors(monkeypatch, tmp_path: Path) -> None:
-    def _bad_load_config():
-        raise ConfigError("broken config")
+class _NoHallucination:
+    is_hallucination = False
+    pattern_name = ""
+    confidence = 0.0
 
-    class _Hallucination:
-        is_hallucination = False
-        pattern_name = ""
-        confidence = 0.0
 
-    monkeypatch.setattr("nanobot.config.loader.load_config", _bad_load_config)
-    monkeypatch.setattr("nanobot.agent.loop.detect_hallucination", lambda *a, **k: _Hallucination())
+def _make_loop(monkeypatch, tmp_path: Path) -> AgentLoop:
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-
-    loop = AgentLoop(
+    monkeypatch.setattr(
+        "nanobot.agent.loop.load_config",
+        lambda: (_ for _ in ()).throw(ConfigError("test config missing")),
+    )
+    monkeypatch.setattr("nanobot.agent.loop.detect_hallucination", lambda *a, **k: _NoHallucination())
+    return AgentLoop(
         bus=MessageBus(),
         provider=DummyProvider(),
         workspace=tmp_path,
     )
 
-    result = await loop.process_direct("hello")
-    assert result
+
+def test_lazy_detects_empty_promises() -> None:
+    content = (
+        "Please wait while I prepare everything for execution. "
+        "I will continue once you confirm, and I will keep the plan explicit.\n"
+        "1. Next step: inspect files.\n"
+        "2. Next step: run commands.\n"
+        "3. Next step: summarize results.\n"
+        + " details" * 40
+    )
+    assert _is_lazy_response(content) is True
+
+
+def test_lazy_detects_planning_language() -> None:
+    content = (
+        "Please wait. Next step is collecting the repository context before any final answer.\n"
+        "1. Next step: scan modules.\n"
+        "2. Next step: inspect tests.\n"
+        "3. Next step: produce a plan."
+    )
+    assert _is_lazy_response(content) is True
+
+
+def test_lazy_ignores_normal_response() -> None:
+    content = "Implemented the change and verified tests are now passing."
+    assert _is_lazy_response(content) is False
+
+
+def test_lazy_score_threshold() -> None:
+    content = (
+        "I will provide a detailed explanation of what changed and why. "
+        + "long_context " * 80
+    )
+    assert _is_lazy_response(content) is False
+
+
+async def test_new_command_returns_feedback(monkeypatch, tmp_path: Path) -> None:
+    loop = _make_loop(monkeypatch, tmp_path)
+    session = loop.sessions.get_or_create("telegram:42")
+    session.add_message("user", "hello")
+    session.add_message("assistant", "world")
+    loop.sessions.save(session)
+
+    async def _ok_consolidate(session_obj, archive_all: bool = False):
+        assert archive_all is True
+        return {
+            "success": True,
+            "archived": len(session_obj.messages),
+            "memory_updated": True,
+            "history_added": True,
+        }
+
+    monkeypatch.setattr(loop, "_consolidate_memory", _ok_consolidate)
+
+    reply = await loop.process_direct("/new", channel="telegram", chat_id="42")
+    assert "已开始新会话。" in reply
+    assert "- 已归档消息数: 2" in reply
+    assert "- 长期记忆: 已更新" in reply
+    assert "- 历史记录: 已写入 HISTORY.md" in reply
+
+
+async def test_new_empty_session_feedback(monkeypatch, tmp_path: Path) -> None:
+    loop = _make_loop(monkeypatch, tmp_path)
+
+    async def _no_consolidation(session_obj, archive_all: bool = False):
+        return None
+
+    monkeypatch.setattr(loop, "_consolidate_memory", _no_consolidation)
+
+    reply = await loop.process_direct("/new", channel="telegram", chat_id="empty")
+    assert reply == "已开始新会话（原会话本来就是空的）。"

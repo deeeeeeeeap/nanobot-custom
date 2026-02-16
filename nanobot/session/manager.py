@@ -1,6 +1,8 @@
 """Session management for conversation history."""
 
 import json
+import os
+import threading
 from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -69,6 +71,7 @@ class SessionManager:
         self.workspace = workspace
         self.sessions_dir = ensure_dir(Path.home() / ".nanobot" / "sessions")
         self._cache: dict[str, Session] = {}
+        self._lock = threading.RLock()
     
     def _get_session_path(self, key: str) -> Path:
         """Get the file path for a session."""
@@ -136,22 +139,31 @@ class SessionManager:
     def save(self, session: Session) -> None:
         """Save a session to disk."""
         path = self._get_session_path(session.key)
-        
-        with open(path, "w") as f:
-            # Write metadata first
-            metadata_line = {
-                "_type": "metadata",
-                "created_at": session.created_at.isoformat(),
-                "updated_at": session.updated_at.isoformat(),
-                "metadata": session.metadata
-            }
-            f.write(json.dumps(metadata_line) + "\n")
-            
-            # Write messages
-            for msg in session.messages:
-                f.write(json.dumps(msg) + "\n")
-        
-        self._cache[session.key] = session
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+
+        metadata_line = {
+            "_type": "metadata",
+            "created_at": session.created_at.isoformat(),
+            "updated_at": session.updated_at.isoformat(),
+            "metadata": session.metadata,
+        }
+        lines = [json.dumps(metadata_line)]
+        lines.extend(json.dumps(msg) for msg in session.messages)
+        payload = "\n".join(lines) + "\n"
+
+        with self._lock:
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with open(tmp_path, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(payload)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, path)
+                self._cache[session.key] = session
+            except Exception:
+                if tmp_path.exists():
+                    tmp_path.unlink(missing_ok=True)
+                raise
     
     def delete(self, key: str) -> bool:
         """

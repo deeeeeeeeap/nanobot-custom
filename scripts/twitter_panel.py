@@ -500,7 +500,6 @@ def index():
     # 摘要时间
     summary_time = "未知"
     if SUMMARY_PATH.exists():
-        import time
         mtime = SUMMARY_PATH.stat().st_mtime
         from datetime import datetime, timezone, timedelta
         dt = datetime.fromtimestamp(mtime, tz=timezone(timedelta(hours=8)))

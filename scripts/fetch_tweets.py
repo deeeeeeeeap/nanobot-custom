@@ -145,7 +145,7 @@ def search_tweets(query: str, env: dict) -> list[dict]:
         if result.returncode != 0:
             stderr = result.stderr
             if "429" in stderr:
-                print(f"  ⏳ 触发 rate limit，等待 30 秒...", end=" ")
+                print("  ⏳ 触发 rate limit，等待 30 秒...", end=" ")
                 time.sleep(30)
                 # 重试一次
                 result = subprocess.run(
@@ -153,7 +153,7 @@ def search_tweets(query: str, env: dict) -> list[dict]:
                     capture_output=True, text=True, env=env, timeout=BIRD_TIMEOUT,
                 )
                 if result.returncode != 0:
-                    print(f"⚠ 重试失败")
+                    print("⚠ 重试失败")
                     return []
             else:
                 print(f"  ⚠ 搜索失败: {stderr[:80]}")
@@ -174,7 +174,7 @@ def search_tweets(query: str, env: dict) -> list[dict]:
             return []
     
     except subprocess.TimeoutExpired:
-        print(f"  ⚠ 搜索超时")
+        print("  ⚠ 搜索超时")
         return []
     except Exception as e:
         print(f"  ⚠ 搜索异常: {e}")
@@ -237,12 +237,12 @@ def _format_tweet_block(tweet: dict, index: int) -> list[str]:
     
     return [
         f"### {index}. {source} @{username} ({name})",
-        f"",
+        "",
         f"> {text}",
-        f"",
+        "",
         f"❤️ {likes} | 🔁 {rts} | 💬 {replies} | 🔥 热度: {score:.0f}",
         f"🔗 {url}",
-        f"",
+        "",
     ]
 
 
@@ -252,39 +252,39 @@ def format_summary(user_tweets: list[dict], search_tweets: list[dict]) -> str:
     query_count = len(load_search_queries())
     total = len(user_tweets) + len(search_tweets)
     lines = [
-        f"# 🐦 推特热点日报",
-        f"",
+        "# 🐦 推特热点日报",
+        "",
         f"**生成时间**: {now.strftime('%Y-%m-%d %H:%M')} (北京时间)",
         f"**监控用户数**: {len(load_watchlist())} | **搜索关键词**: {query_count} 组",
         f"**收录推文**: {total} 条（关注用户 {len(user_tweets)} + 热点搜索 {len(search_tweets)}）",
-        f"",
+        "",
     ]
     
     # === 第一区块：关注用户 ===
-    lines.append(f"---")
-    lines.append(f"")
+    lines.append("---")
+    lines.append("")
     lines.append(f"## 👤 关注用户 Top {len(user_tweets)}")
-    lines.append(f"")
+    lines.append("")
     
     if user_tweets:
         for i, tweet in enumerate(user_tweets, 1):
             lines.extend(_format_tweet_block(tweet, i))
     else:
         lines.append("今日未抓取到关注用户的有效原创推文。")
-        lines.append(f"")
+        lines.append("")
     
     # === 第二区块：热点搜索 ===
-    lines.append(f"---")
-    lines.append(f"")
+    lines.append("---")
+    lines.append("")
     lines.append(f"## 🔎 热点搜索 Top {len(search_tweets)}")
-    lines.append(f"")
+    lines.append("")
     
     if search_tweets:
         for i, tweet in enumerate(search_tweets, 1):
             lines.extend(_format_tweet_block(tweet, i))
     else:
         lines.append("今日热点搜索未返回有效结果。")
-        lines.append(f"")
+        lines.append("")
     
     return "\n".join(lines)
 

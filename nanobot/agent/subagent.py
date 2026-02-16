@@ -1,5 +1,7 @@
 """Subagent manager for background task execution."""
 
+from __future__ import annotations
+
 import asyncio
 import json
 import uuid
@@ -10,6 +12,7 @@ from loguru import logger
 
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
+from nanobot.config.schema import ExecToolConfig
 from nanobot.providers.base import LLMProvider
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool
@@ -33,10 +36,9 @@ class SubagentManager:
         bus: MessageBus,
         model: str | None = None,
         brave_api_key: str | None = None,
-        exec_config: "ExecToolConfig | None" = None,
+        exec_config: ExecToolConfig | None = None,
         restrict_to_workspace: bool = False,
     ):
-        from nanobot.config.schema import ExecToolConfig
         self.provider = provider
         self.workspace = workspace
         self.bus = bus
@@ -167,7 +169,7 @@ class SubagentManager:
                     break
             
             if not final_result:
-                final_result = "（子代理已执行完毕，但未生成回复文本。请检查工具执行日志。）"
+                final_result = "锛堝瓙浠ｇ悊宸叉墽琛屽畬姣曪紝浣嗘湭鐢熸垚鍥炲鏂囨湰銆傝妫€鏌ュ伐鍏锋墽琛屾棩蹇椼€傦級"
             
             logger.info(f"Subagent [{task_id}] completed successfully")
             await self._announce_result(task_id, label, task, final_result, origin, "ok")

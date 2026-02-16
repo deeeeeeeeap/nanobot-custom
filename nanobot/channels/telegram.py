@@ -13,7 +13,7 @@ from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.exceptions import ConfigError
 from nanobot.config.schema import TelegramConfig
-from nanobot.config.loader import load_config, save_config, get_config_path
+from nanobot.config.loader import load_config, save_config
 
 
 def _markdown_to_telegram_html(text: str) -> str:

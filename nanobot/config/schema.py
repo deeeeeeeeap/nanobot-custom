@@ -4,7 +4,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, field_validator, model_validator
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 def _validate_url(value: str, field_name: str, schemes: set[str]) -> str:
@@ -202,8 +202,8 @@ class SlackConfig(BaseModel):
 class QQConfig(BaseModel):
     """QQ channel configuration using botpy SDK."""
     enabled: bool = False
-    app_id: str = ""  # 机器人 ID (AppID) from q.qq.com
-    secret: str = ""  # 机器人密钥 (AppSecret) from q.qq.com
+    app_id: str = ""  # 鏈哄櫒浜?ID (AppID) from q.qq.com
+    secret: str = ""  # 鏈哄櫒浜哄瘑閽?(AppSecret) from q.qq.com
     allow_from: list[str] = Field(default_factory=list)  # Allowed user openids (empty = public access)
 
 
@@ -272,14 +272,13 @@ class ProvidersConfig(BaseModel):
     deepseek: ProviderConfig = Field(default_factory=ProviderConfig)
     groq: ProviderConfig = Field(default_factory=ProviderConfig)
     zhipu: ProviderConfig = Field(default_factory=ProviderConfig)
-    dashscope: ProviderConfig = Field(default_factory=ProviderConfig)  # 阿里云通义千问
+    dashscope: ProviderConfig = Field(default_factory=ProviderConfig)  # 闃块噷浜戦€氫箟鍗冮棶
     vllm: ProviderConfig = Field(default_factory=ProviderConfig)
     gemini: ProviderConfig = Field(default_factory=ProviderConfig)
     moonshot: ProviderConfig = Field(default_factory=ProviderConfig)
     minimax: ProviderConfig = Field(default_factory=ProviderConfig)  # MiniMax
     aihubmix: ProviderConfig = Field(default_factory=ProviderConfig)  # AiHubMix API gateway
-    antigravity: ProviderConfig = Field(default_factory=ProviderConfig)  # Antigravity 网关（多账号轮换）
-
+    antigravity: ProviderConfig = Field(default_factory=ProviderConfig)  # Antigravity 缃戝叧锛堝璐﹀彿杞崲锛?
 
 class GatewayConfig(BaseModel):
     """Gateway/server configuration."""
@@ -312,6 +311,11 @@ class ToolsConfig(BaseModel):
 
 class Config(BaseSettings):
     """Root configuration for nanobot."""
+    model_config = SettingsConfigDict(
+        env_prefix="NANOBOT_",
+        env_nested_delimiter="__",
+    )
+
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
@@ -370,7 +374,3 @@ class Config(BaseSettings):
             if spec and spec.is_gateway and spec.default_api_base:
                 return spec.default_api_base
         return None
-    
-    class Config:
-        env_prefix = "NANOBOT_"
-        env_nested_delimiter = "__"

@@ -163,5 +163,5 @@ class MemoryTool(Tool):
         entry = f"- [{timestamp}] {content}"
         self._memory.append_today(entry)
         
-        logger.info(f"Memory: 今日日记追加")
-        return f"✅ 已记录到今日日记"
+        logger.info("Memory: 今日日记追加")
+        return "✅ 已记录到今日日记"

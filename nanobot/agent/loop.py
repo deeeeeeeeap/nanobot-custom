@@ -1,9 +1,10 @@
 ﻿"""Agent loop: the core processing engine."""
+from __future__ import annotations
 
 import asyncio
 import json
 from pathlib import Path
-from typing import Any
+from typing import Callable
 
 from loguru import logger
 
@@ -11,6 +12,7 @@ from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
 from nanobot.agent.context import ContextBuilder
+from nanobot.agent.memory import MemoryStore
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool
 from nanobot.agent.tools.shell import ExecTool
@@ -20,6 +22,9 @@ from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.memory_tool import MemoryTool
 from nanobot.agent.subagent import SubagentManager
+from nanobot.config.loader import load_config, save_config
+from nanobot.config.schema import ExecToolConfig
+from nanobot.cron.service import CronService
 from nanobot.exceptions import ConfigError, NanobotError
 from nanobot.session.manager import SessionManager
 # 瀹氬埗锛氭ā鍨嬭兘鍔涙娴?
@@ -28,7 +33,6 @@ from nanobot.config.model_capabilities import supports_function_calling
 from nanobot.agent.hallucination_detector import (
     detect_hallucination,
     create_honest_response,
-    create_no_tools_available_response
 )
 # 瀹氬埗锛氱姸鎬佹姤鍛?
 from nanobot.agent.status import StatusMessage, StatusReporter, NullReporter
@@ -94,15 +98,12 @@ class AgentLoop:
         max_iterations: int = 20,
         memory_window: int = 50,
         brave_api_key: str | None = None,
-        exec_config: "ExecToolConfig | None" = None,
-        cron_service: "CronService | None" = None,
+        exec_config: ExecToolConfig | None = None,
+        cron_service: CronService | None = None,
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
-        reporter_factory: "Callable[[str, str], StatusReporter] | None" = None,
+        reporter_factory: Callable[[str, str], StatusReporter] | None = None,
     ):
-        from nanobot.config.schema import ExecToolConfig
-        from nanobot.cron.service import CronService
-        from typing import Callable
         self.bus = bus
         self.provider = provider
         self.workspace = workspace
@@ -188,7 +189,7 @@ class AgentLoop:
                     try:
                         reporter = self.reporter_factory(msg.channel, msg.chat_id)
                     except (TypeError, ValueError, RuntimeError) as e:
-                        logger.warning(f"鍒涘缓鐘舵€佹姤鍛婂櫒澶辫触: {e}")
+                        logger.warning(f"创建状态报告器失败: {e}")
 
                 # 澶勭悊娑堟伅
                 try:
@@ -201,7 +202,7 @@ class AgentLoop:
                     if response:
                         await self.bus.publish_outbound(response)
                 except (NanobotError, RuntimeError, ValueError, OSError) as e:
-                    logger.error(f"澶勭悊娑堟伅鏃跺嚭閿? {e}")
+                    logger.error(f"处理消息时出错: {e}")
                     # 鍑洪敊鏃朵篃瑕佹竻鐞嗙姸鎬佹秷鎭?
                     if reporter:
                         await reporter.finalize(delete_status=True)
@@ -209,7 +210,7 @@ class AgentLoop:
                     await self.bus.publish_outbound(OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
-                        content=f"鎶辨瓑锛屽鐞嗘椂閬囧埌閿欒: {str(e)}"
+                        content=f"抱歉，处理时遇到错误: {str(e)}"
                     ))
                 except Exception:
                     logger.exception("Unexpected message-processing failure")
@@ -292,7 +293,6 @@ class AgentLoop:
 
         # 瀹氬埗锛氬姩鎬佽鍙栨渶鏂扮殑妯″瀷閰嶇疆锛岃 /model 鍛戒护鍒囨崲绔嬪嵆鐢熸晥
         current_model = self.model
-        from nanobot.config.loader import load_config
         try:
             current_config = load_config()
             current_model = current_config.agents.defaults.model
@@ -310,43 +310,66 @@ class AgentLoop:
         session = self.sessions.get_or_create(msg.session_key)
 
         # 澶勭悊鏂滄潬鍛戒护
-        cmd = msg.content.strip().lower()
+        raw_cmd = msg.content.strip()
+        cmd = raw_cmd.lower()
         if cmd == "/new":
             msg_count = len(session.messages)
             result = await self._consolidate_memory(session, archive_all=True)
             session.clear()
             self.sessions.save(session)
             if result and result.get("success"):
-                parts = ["New session started."]
-                parts.append(f"- Archived messages: {result.get('archived', 0)}")
+                parts = ["已开始新会话。"]
+                parts.append(f"- 已归档消息数: {result.get('archived', 0)}")
                 if result.get("memory_updated"):
-                    parts.append("- Long-term memory: updated")
+                    parts.append("- 长期记忆: 已更新")
                 else:
-                    parts.append("- Long-term memory: no changes")
+                    parts.append("- 长期记忆: 无变化")
                 if result.get("history_added"):
-                    parts.append("- History entry: added to HISTORY.md")
+                    parts.append("- 历史记录: 已写入 HISTORY.md")
                 feedback = "\n".join(parts)
             elif msg_count == 0:
-                feedback = "New session started (session was already empty)."
+                feedback = "已开始新会话（原会话本来就是空的）。"
             else:
-                feedback = "New session started (memory consolidation failed)."
+                feedback = "已开始新会话（记忆整合失败）。"
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=feedback)
+        if cmd == "/clear":
+            removed = len(session.messages)
+            session.clear()
+            self.sessions.save(session)
+            feedback = (
+                f"会话已清空（删除 {removed} 条消息）。"
+                if removed
+                else "会话本来就是空的。"
+            )
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=feedback)
+        if cmd == "/status":
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=self._build_status_text(session),
+            )
+        if cmd == "/model" or cmd.startswith("/model "):
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=self._handle_model_command(raw_cmd),
+            )
         if cmd == "/help":
             help_text = (
-                "nanobot commands:\n\n"
-                "/new - start a new session and consolidate memory\n"
-                "/clear - clear current session history\n"
-                "/model <name> - switch model\n"
-                "/status - show runtime status\n"
-                "/help - show this help"
+                "nanobot 命令：\n\n"
+                "/new - 开始新会话并整合记忆\n"
+                "/clear - 清空当前会话历史\n"
+                "/model <name> - 切换模型\n"
+                "/status - 查看运行状态\n"
+                "/help - 显示帮助"
             )
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=help_text)
 
-        # 浼氳瘽杩囬暱鏃惰嚜鍔ㄦ暣鍚堣蹇?
+        # Auto-consolidate memory when the session grows beyond the window.
         if len(session.messages) > self.memory_window:
             await self._consolidate_memory(session)
 
-        # 鏇存柊宸ュ叿涓婁笅鏂?
+        # Refresh per-channel tool context for this message.
         message_tool = self.tools.get("message")
         if isinstance(message_tool, MessageTool):
             message_tool.set_context(msg.channel, msg.chat_id)
@@ -359,7 +382,7 @@ class AgentLoop:
         if isinstance(cron_tool, CronTool):
             cron_tool.set_context(msg.channel, msg.chat_id)
 
-        # 鏋勫缓娑堟伅涓婁笅鏂?
+        # Build LLM context with history + current message.
         messages = self.context.build_messages(
             history=session.get_history(),
             current_message=msg.content,
@@ -368,13 +391,13 @@ class AgentLoop:
             chat_id=msg.chat_id,
         )
 
-        # Agent 寰幆
+        # Main agent loop.
         iteration = 0
         final_content = None
         tools_used: list[str] = []
-        tools_were_called = False  # 瀹氬埗锛氳拷韪槸鍚︾湡姝ｈ皟鐢ㄤ簡宸ュ叿
+        tools_were_called = False  # Track whether any tool was actually called.
 
-        # 瀹氬埗锛氭鏌ユā鍨嬫槸鍚︽敮鎸?Function Calling
+        # Check whether the current model supports function-calling.
         model_supports_tools = supports_function_calling(self.model)
         if not model_supports_tools:
             logger.warning(f"Model {self.model} does not support function calling, tools disabled")
@@ -462,7 +485,7 @@ class AgentLoop:
                 break
 
         if not final_content:
-            final_content = "锛堜换鍔″凡鎵ц瀹屾瘯锛屼絾妯″瀷鏈敓鎴愬洖澶嶆枃鏈€傦級"
+            final_content = "（任务已执行完毕，但模型未生成回复文本。）"
 
         # 瀹氬埗锛氬够瑙夋娴?
         # 瑙﹀彂鏉′欢锛?
@@ -602,6 +625,66 @@ class AgentLoop:
             content=final_content
         )
 
+    def _build_status_text(self, session) -> str:
+        """Build a concise runtime status message."""
+        model = self.model
+        fc = "已启用" if supports_function_calling(model) else "未启用"
+        tools = ", ".join(self.tools.tool_names) if self.tools.tool_names else "（无）"
+        return (
+            "运行状态：\n\n"
+            f"- 模型: {model}\n"
+            f"- Function calling: {fc}\n"
+            f"- 已注册工具: {tools}\n"
+            f"- 会话消息数: {len(session.messages)}"
+        )
+
+    def _handle_model_command(self, raw_cmd: str) -> str:
+        """Handle /model command for querying or switching model."""
+        parts = raw_cmd.split(maxsplit=1)
+
+        try:
+            config = load_config()
+        except (ConfigError, ValueError, OSError) as e:
+            return f"读取配置失败: {e}"
+
+        if len(parts) == 1:
+            model = config.agents.defaults.model
+            provider = config.get_provider_name(model) or "未匹配"
+            fc = "已启用" if supports_function_calling(model) else "受限"
+            return (
+                "当前模型配置：\n\n"
+                f"- 模型: {model}\n"
+                f"- 匹配 provider: {provider}\n"
+                f"- Function calling: {fc}\n\n"
+                "切换模型命令: /model <provider/model>"
+            )
+
+        new_model = parts[1].strip()
+        if not new_model:
+            return "错误：模型名不能为空。用法: /model <provider/model>"
+
+        old_model = config.agents.defaults.model
+        config.agents.defaults.model = new_model
+
+        try:
+            save_config(config)
+        except (ConfigError, ValueError, OSError) as e:
+            return f"保存配置失败: {e}"
+
+        self.model = new_model
+        self._update_provider_env(
+            new_model,
+            config.get_api_key(new_model),
+            config.get_api_base(new_model),
+        )
+        fc = "已启用" if supports_function_calling(new_model) else "受限"
+        return (
+            "模型切换成功。\n\n"
+            f"- 旧模型: {old_model}\n"
+            f"- 新模型: {new_model}\n"
+            f"- Function calling: {fc}"
+        )
+
     async def _consolidate_memory(self, session, archive_all: bool = False) -> dict | None:
         """
         灏嗘棫娑堟伅鏁村悎鍒?MEMORY.md + HISTORY.md锛岀劧鍚庤鍓細璇濄€?
@@ -714,3 +797,4 @@ Respond with ONLY valid JSON, no markdown fences."""
 
         response = await self._process_message(msg)
         return response.content if response else ""
+
