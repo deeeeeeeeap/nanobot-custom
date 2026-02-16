@@ -1,4 +1,4 @@
-"""Subagent manager for background task execution."""
+﻿"""Subagent manager for background task execution."""
 
 from __future__ import annotations
 
@@ -169,7 +169,7 @@ class SubagentManager:
                     break
             
             if not final_result:
-                final_result = "锛堝瓙浠ｇ悊宸叉墽琛屽畬姣曪紝浣嗘湭鐢熸垚鍥炲鏂囨湰銆傝妫€鏌ュ伐鍏锋墽琛屾棩蹇椼€傦級"
+                final_result = "（子代理已完成执行，但未返回文本结果。请检查工具执行日志。）"
             
             logger.info(f"Subagent [{task_id}] completed successfully")
             await self._announce_result(task_id, label, task, final_result, origin, "ok")
@@ -248,3 +248,4 @@ When you have completed the task, provide a clear summary of your findings or ac
     def get_running_count(self) -> int:
         """Return the number of currently running subagents."""
         return len(self._running_tasks)
+

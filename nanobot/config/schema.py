@@ -278,7 +278,7 @@ class ProvidersConfig(BaseModel):
     moonshot: ProviderConfig = Field(default_factory=ProviderConfig)
     minimax: ProviderConfig = Field(default_factory=ProviderConfig)  # MiniMax
     aihubmix: ProviderConfig = Field(default_factory=ProviderConfig)  # AiHubMix API gateway
-    antigravity: ProviderConfig = Field(default_factory=ProviderConfig)  # Antigravity 缃戝叧锛堝璐﹀彿杞崲锛?
+    antigravity: ProviderConfig = Field(default_factory=ProviderConfig)  # Antigravity gateway (multi-account routing)
 
 class GatewayConfig(BaseModel):
     """Gateway/server configuration."""

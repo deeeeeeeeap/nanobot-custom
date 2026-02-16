@@ -248,11 +248,11 @@ def onboard():
     # Create default config
     config = Config()
     save_config(config)
-    console.print(f"[green]鉁揫/green] Created config at {config_path}")
+    console.print(f"[green]OK[/green] Created config at {config_path}")
     
     # Create workspace
     workspace = get_workspace_path()
-    console.print(f"[green]鉁揫/green] Created workspace at {workspace}")
+    console.print(f"[green]OK[/green] Created workspace at {workspace}")
     
     # Create default bootstrap files
     _create_workspace_templates(workspace)
@@ -474,7 +474,7 @@ def gateway(
     # Create channel manager
     channels = ChannelManager(config, bus, session_manager=session_manager)
     
-    # 瀹氬埗锛氳繛鎺?Telegram 鐘舵€佹姤鍛婂櫒锛堝疄鏃惰繘搴﹀弽棣?馃鈫掟煍р啋鉁咃級
+    # Optional: connect Telegram status reporter for real-time progress updates.
     if "telegram" in channels.channels:
         from nanobot.channels.telegram_reporter import TelegramStatusReporter
         tg_channel = channels.channels["telegram"]
@@ -491,15 +491,15 @@ def gateway(
         agent.reporter_factory = _telegram_reporter_factory
     
     if channels.enabled_channels:
-        console.print(f"[green]鉁揫/green] Channels enabled: {', '.join(channels.enabled_channels)}")
+        console.print(f"[green]OK[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
     else:
         console.print("[yellow]Warning: No channels enabled[/yellow]")
     
     cron_status = cron.status()
     if cron_status["jobs"] > 0:
-        console.print(f"[green]鉁揫/green] Cron: {cron_status['jobs']} scheduled jobs")
+        console.print(f"[green]OK[/green] Cron: {cron_status['jobs']} scheduled jobs")
     
-    console.print("[green]鉁揫/green] Heartbeat: every 30m")
+    console.print("[green]OK[/green] Heartbeat: every 30m")
     
     async def run():
         try:
@@ -743,7 +743,7 @@ def _get_bridge_dir() -> Path:
         console.print("  Building...")
         subprocess.run(["npm", "run", "build"], cwd=user_bridge, check=True, capture_output=True)
         
-        console.print("[green]鉁揫/green] Bridge ready\n")
+        console.print("[green]OK[/green] Bridge ready\n")
     except subprocess.CalledProcessError as e:
         console.print(f"[red]Build failed: {e}[/red]")
         if e.stderr:
@@ -875,7 +875,7 @@ def cron_add(
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
     
-    console.print(f"[green]鉁揫/green] Added job '{job.name}' ({job.id})")
+    console.print(f"[green]OK[/green] Added job '{job.name}' ({job.id})")
 
 
 @cron_app.command("remove")
@@ -890,7 +890,7 @@ def cron_remove(
     service = CronService(store_path)
     
     if service.remove_job(job_id):
-        console.print(f"[green]鉁揫/green] Removed job {job_id}")
+        console.print(f"[green]OK[/green] Removed job {job_id}")
     else:
         console.print(f"[red]Job {job_id} not found[/red]")
 
@@ -910,7 +910,7 @@ def cron_enable(
     job = service.enable_job(job_id, enabled=not disable)
     if job:
         status = "disabled" if disable else "enabled"
-        console.print(f"[green]鉁揫/green] Job '{job.name}' {status}")
+        console.print(f"[green]OK[/green] Job '{job.name}' {status}")
     else:
         console.print(f"[red]Job {job_id} not found[/red]")
 
@@ -931,7 +931,7 @@ def cron_run(
         return await service.run_job(job_id, force=force)
     
     if _run_async(run()):
-        console.print("[green]鉁揫/green] Job executed")
+        console.print("[green]OK[/green] Job executed")
     else:
         console.print(f"[red]Failed to run job {job_id}[/red]")
 
@@ -952,8 +952,8 @@ def status():
 
     console.print(f"{__logo__} nanobot Status\n")
 
-    console.print(f"Config: {config_path} {'[green]鉁揫/green]' if config_path.exists() else '[red]鉁梉/red]'}")
-    console.print(f"Workspace: {workspace} {'[green]鉁揫/green]' if workspace.exists() else '[red]鉁梉/red]'}")
+    console.print(f"Config: {config_path} {'[green]OK[/green]' if config_path.exists() else '[red]X[/red]'}")
+    console.print(f"Workspace: {workspace} {'[green]OK[/green]' if workspace.exists() else '[red]X[/red]'}")
 
     if config_path.exists():
         from nanobot.providers.registry import PROVIDERS
@@ -968,12 +968,12 @@ def status():
             if spec.is_local:
                 # Local deployments show api_base instead of api_key
                 if p.api_base:
-                    console.print(f"{spec.label}: [green]鉁?{p.api_base}[/green]")
+                    console.print(f"{spec.label}: [green]OK {p.api_base}[/green]")
                 else:
                     console.print(f"{spec.label}: [dim]not set[/dim]")
             else:
                 has_key = bool(p.api_key)
-                console.print(f"{spec.label}: {'[green]鉁揫/green]' if has_key else '[dim]not set[/dim]'}")
+                console.print(f"{spec.label}: {'[green]OK[/green]' if has_key else '[dim]not set[/dim]'}")
 
 
 if __name__ == "__main__":

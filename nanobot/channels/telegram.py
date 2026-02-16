@@ -61,8 +61,8 @@ def _markdown_to_telegram_html(text: str) -> str:
     # 9. Strikethrough ~~text~~
     text = re.sub(r'~~(.+?)~~', r'<s>\1</s>', text)
     
-    # 10. Bullet lists - item -> 鈥?item
-    text = re.sub(r'^[-*]\s+', '鈥?', text, flags=re.MULTILINE)
+    # 10. Bullet lists - item -> "- item" (ASCII-safe prefix to avoid mojibake)
+    text = re.sub(r'^[-*]\s+', '- ', text, flags=re.MULTILINE)
     
     # 11. Restore inline code with HTML tags
     for i, code in enumerate(inline_codes):
@@ -222,7 +222,8 @@ class TelegramChannel(BaseChannel):
             else:
                 if current:
                     chunks.append(current.rstrip())
-                # 濡傛灉鍗曡瓒呴暱锛屽己鍒舵埅鏂?                while len(line) > max_length:
+                # If a single line is too long, force split by max_length.
+                while len(line) > max_length:
                     chunks.append(line[:max_length])
                     line = line[max_length:]
                 current = line + '\n'

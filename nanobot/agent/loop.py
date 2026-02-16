@@ -1,4 +1,4 @@
-﻿"""Agent loop: the core processing engine."""
+"""Agent loop: the core processing engine."""
 from __future__ import annotations
 
 import asyncio
@@ -27,14 +27,11 @@ from nanobot.config.schema import ExecToolConfig
 from nanobot.cron.service import CronService
 from nanobot.exceptions import ConfigError, NanobotError
 from nanobot.session.manager import SessionManager
-# 瀹氬埗锛氭ā鍨嬭兘鍔涙娴?
 from nanobot.config.model_capabilities import supports_function_calling
-# 瀹氬埗锛氬够瑙夋娴?
 from nanobot.agent.hallucination_detector import (
     detect_hallucination,
     create_honest_response,
 )
-# 瀹氬埗锛氱姸鎬佹姤鍛?
 from nanobot.agent.status import StatusMessage, StatusReporter, NullReporter
 
 
@@ -114,7 +111,7 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
-        self.reporter_factory = reporter_factory  # 瀹氬埗锛氱姸鎬佹姤鍛婂櫒宸ュ巶
+        self.reporter_factory = reporter_factory  # Optional status reporter factory.
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -134,39 +131,37 @@ class AgentLoop:
 
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
-        # 鏂囦欢宸ュ叿锛堝閰嶇疆鍒欓檺鍒朵负 workspace 鐩綍锛?
         allowed_dir = self.workspace if self.restrict_to_workspace else None
         self.tools.register(ReadFileTool(allowed_dir=allowed_dir))
         self.tools.register(WriteFileTool(allowed_dir=allowed_dir))
         self.tools.register(EditFileTool(allowed_dir=allowed_dir))
         self.tools.register(ListDirTool(allowed_dir=allowed_dir))
 
-        # Shell 宸ュ叿
+        # Shell tool.
         self.tools.register(ExecTool(
             working_dir=str(self.workspace),
             timeout=self.exec_config.timeout,
             restrict_to_workspace=self.restrict_to_workspace,
         ))
 
-        # Web 宸ュ叿
+        # Web tools.
         self.tools.register(WebSearchTool(api_key=self.brave_api_key))
         self.tools.register(WebFetchTool())
 
-        # 娑堟伅宸ュ叿
+        # Message tool.
         message_tool = MessageTool(send_callback=self.bus.publish_outbound)
         self.tools.register(message_tool)
 
-        # 瀛愪唬鐞嗗伐鍏?
         spawn_tool = SpawnTool(manager=self.subagents)
         self.tools.register(spawn_tool)
 
-        # 璁板繂绠＄悊宸ュ叿
+        # Memory management tool.
         self.tools.register(MemoryTool(
             memory_store=self.context.memory,
             workspace=self.workspace,
         ))
 
-        # 瀹氭椂浠诲姟宸ュ叿
+        # Scheduled-task tool.
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
 
@@ -177,13 +172,11 @@ class AgentLoop:
 
         while self._running:
             try:
-                # 绛夊緟涓嬩竴鏉℃秷鎭?
                 msg = await asyncio.wait_for(
                     self.bus.consume_inbound(),
                     timeout=1.0
                 )
 
-                # 瀹氬埗锛氬垱寤虹姸鎬佹姤鍛婂櫒锛堝鏋滄湁宸ュ巶锛?
                 reporter = None
                 if self.reporter_factory and msg.channel != "system":
                     try:
@@ -191,11 +184,10 @@ class AgentLoop:
                     except (TypeError, ValueError, RuntimeError) as e:
                         logger.warning(f"创建状态报告器失败: {e}")
 
-                # 澶勭悊娑堟伅
+                # Process one inbound message.
                 try:
                     response = await self._process_message(msg, reporter=reporter)
 
-                    # 瀹氬埗锛氬畬鎴愬悗娓呯悊鐘舵€佹秷鎭?
                     if reporter:
                         await reporter.finalize(delete_status=True)
 
@@ -203,10 +195,8 @@ class AgentLoop:
                         await self.bus.publish_outbound(response)
                 except (NanobotError, RuntimeError, ValueError, OSError) as e:
                     logger.error(f"处理消息时出错: {e}")
-                    # 鍑洪敊鏃朵篃瑕佹竻鐞嗙姸鎬佹秷鎭?
                     if reporter:
                         await reporter.finalize(delete_status=True)
-                    # 鍙戦€侀敊璇搷搴?
                     await self.bus.publish_outbound(OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
@@ -230,17 +220,13 @@ class AgentLoop:
         logger.info("Agent loop stopping")
 
     def _update_provider_env(self, model: str, api_key: str | None, api_base: str | None) -> None:
-        """
-        瀹氬埗锛氭洿鏂?provider 鐨?API key 鍜岀幆澧冨彉閲忋€?
-        鐢ㄤ簬鍔ㄦ€佹ā鍨嬪垏鎹㈡椂鏇存柊 provider 閰嶇疆銆?
-        """
+        """Update provider API key/base and sync provider-specific env vars after model changes."""
         import os
 
         if api_key:
             self.provider.api_key = api_key
             model_lower = model.lower()
 
-            # 鏍规嵁妯″瀷鍚嶇О璁剧疆瀵瑰簲鐨勭幆澧冨彉閲?
             env_mapping = {
                 "gemini": "GEMINI_API_KEY",
                 "anthropic": "ANTHROPIC_API_KEY",
@@ -257,12 +243,11 @@ class AgentLoop:
                     logger.debug(f"Set {env_var} for model {model}")
                     break
 
-            # MiniMax 闇€瑕佺壒娈婂鐞嗭紙浣跨敤 Anthropic 鍏煎 API锛?
             if "minimax" in model_lower:
                 os.environ["ANTHROPIC_API_KEY"] = api_key
                 os.environ["ANTHROPIC_BASE_URL"] = api_base or "https://api.minimaxi.com/anthropic"
 
-        # 鏇存柊 api_base锛堟棤璁烘槸鍚︽湁鍊硷紝閮介渶瑕佹洿鏂颁互纭繚鍒囨崲妯″瀷鏃堕噸缃級
+        # Always update api_base so model switching resets provider endpoint correctly.
         self.provider.api_base = api_base
 
     async def _process_message(
@@ -275,28 +260,25 @@ class AgentLoop:
 
         Args:
             msg: The inbound message to process.
-            reporter: 瀹氬埗锛氬彲閫夌殑鐘舵€佹姤鍛婂櫒锛岀敤浜庡疄鏃跺弽棣堣繘搴?
+            reporter: Optional status reporter for realtime progress updates.
 
         Returns:
             The response message, or None if no response needed.
         """
-        # 瀹氬埗锛氫娇鐢ㄧ┖鎶ュ憡鍣ㄥ鏋滄病鏈夋彁渚?
         if reporter is None:
             reporter = NullReporter()
 
-        # 澶勭悊绯荤粺娑堟伅锛堝瓙浠ｇ悊閫氱煡锛?
         if msg.channel == "system":
             return await self._process_system_message(msg)
 
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info(f"Processing message from {msg.channel}:{msg.sender_id}: {preview}")
 
-        # 瀹氬埗锛氬姩鎬佽鍙栨渶鏂扮殑妯″瀷閰嶇疆锛岃 /model 鍛戒护鍒囨崲绔嬪嵆鐢熸晥
+        # Reload config dynamically so `/model` changes take effect immediately.
         current_model = self.model
         try:
             current_config = load_config()
             current_model = current_config.agents.defaults.model
-            # 鏇存柊 provider 鐨?API key 鍜?base锛堝鏋滄ā鍨嬪彉鏇撮渶瑕佷笉鍚岀殑 provider锛?
             if current_model != self.model:
                 logger.info(f"Model changed from {self.model} to {current_model}")
                 self.model = current_model
@@ -306,10 +288,9 @@ class AgentLoop:
         except (ConfigError, ValueError, OSError) as e:
             logger.warning(f"Failed to reload config: {e}, using cached model")
 
-        # 鑾峰彇鎴栧垱寤轰細璇?
         session = self.sessions.get_or_create(msg.session_key)
 
-        # 澶勭悊鏂滄潬鍛戒护
+        # Handle slash commands.
         raw_cmd = msg.content.strip()
         cmd = raw_cmd.lower()
         if cmd == "/new":
@@ -405,20 +386,17 @@ class AgentLoop:
         while iteration < self.max_iterations:
             iteration += 1
 
-            # 瀹氬埗锛氭姤鍛婃€濊€冪姸鎬侊紙Codex 妯″瀷浣跨敤鐗规畩娑堟伅锛?
             is_codex = "codex" in current_model.lower()
             await reporter.report(StatusMessage.thinking(is_codex=is_codex))
 
-            # 璋冪敤 LLM - 瀹氬埗锛氭牴鎹ā鍨嬭兘鍔涘喅瀹氭槸鍚︿紶閫?tools
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions() if model_supports_tools else None,
                 model=self.model
             )
 
-            # 澶勭悊宸ュ叿璋冪敤
+            # Handle tool calls.
             if response.has_tool_calls:
-                # 娣诲姞 assistant 娑堟伅锛堝惈宸ュ叿璋冪敤锛?
                 tool_call_dicts = [
                     {
                         "id": tc.id,
@@ -435,12 +413,11 @@ class AgentLoop:
                     reasoning_content=response.reasoning_content,
                 )
 
-                # 鎵ц宸ュ叿
+                # Execute tool call.
                 for tool_call in response.tool_calls:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
 
-                    # 瀹氬埗锛氭姤鍛婂伐鍏峰紑濮嬫墽琛?
                     await reporter.report(StatusMessage.tool_start(
                         tool_call.name,
                         tool_call.arguments
@@ -448,7 +425,6 @@ class AgentLoop:
 
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
 
-                    # 瀹氬埗锛氭姤鍛婂伐鍏锋墽琛屽畬鎴?
                     success = not (isinstance(result, str) and result.startswith("Error"))
                     await reporter.report(StatusMessage.tool_done(tool_call.name, success))
 
@@ -456,12 +432,11 @@ class AgentLoop:
                         messages, tool_call.id, tool_call.name, result
                     )
                     tools_used.append(tool_call.name)
-                    tools_were_called = True  # 鏍囪宸ュ叿琚皟鐢?
-                # 浜ら敊鎬濈淮閾撅細宸ュ叿鎵ц鍚庡紩瀵煎弽鎬?
+                    tools_were_called = True
                 messages.append({"role": "user", "content": "Reflect on the results and decide next steps."})
             else:
-                # 瀹氬埗锛氭噿鎯版娴?鈥?妯″瀷璇翠簡瑕佸仛浣嗘病璋冪敤宸ュ叿锛岃嚜鍔ㄥ偓淇冮噸璇?
-                # 鍏佽鏈€澶氬偓淇?2 娆★紙iteration 1 鍜?2锛?
+                # Lazy-response detection:
+                # model describes a plan but does not call tools; auto-nudge and retry.
                 if (
                     iteration <= 2
                     and model_supports_tools
@@ -478,24 +453,19 @@ class AgentLoop:
                         "then summarize results."
                     )
                     messages = self.context.add_user_nudge(messages, nudge)
-                    continue  # 涓?break锛屽啀缁欎竴杞満浼?
+                    continue
 
-                # 鏃犲伐鍏疯皟鐢紝瀹屾垚
+                # No tool call; use model content as final output.
                 final_content = response.content
                 break
 
         if not final_content:
             final_content = "（任务已执行完毕，但模型未生成回复文本。）"
 
-        # 瀹氬埗锛氬够瑙夋娴?
-        # 瑙﹀彂鏉′欢锛?
-        # 1. 妯″瀷涓嶆敮鎸佸伐鍏疯皟鐢紙绾璇濇ā寮忥級
-        # 2. 妯″瀷鏀寔宸ュ叿浣嗘湰娆℃病鏈夎皟鐢ㄤ换浣曞伐鍏凤紙鍙兘缂栭€犱簡鎵ц缁撴灉锛?
-        # 鎺掗櫎鏉′欢锛氬伐鍏风‘瀹炶璋冪敤杩囩殑鎯呭喌
-        # 娉ㄦ剰锛欳odex 宸查€氳繃 codex_bridge.py v2 鏀寔 FC锛屼笉鍐嶈眮鍏?
+        # Run hallucination checks when tools are unavailable or not used.
         should_check_hallucination = (
-            not model_supports_tools  # 妯″瀷鏈韩涓嶆敮鎸佸伐鍏?
-            or (model_supports_tools and not tools_were_called)  # 鏀寔浣嗘病璋冪敤
+            not model_supports_tools
+            or (model_supports_tools and not tools_were_called)  # model supports tools, but none were called
         )
         if should_check_hallucination:
             hallucination = detect_hallucination(
@@ -510,11 +480,10 @@ class AgentLoop:
                 )
                 final_content = create_honest_response(self.model)
 
-        # 鏃ュ織锛氬搷搴旈瑙?
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
 
-        # 淇濆瓨浼氳瘽锛堝寘鍚伐鍏蜂娇鐢ㄨ褰曪紝渚涜蹇嗘暣鍚堝弬鑰冿級
+        # Persist conversation; include used tools for later memory consolidation.
         session.add_message("user", msg.content)
         session.add_message("assistant", final_content,
                             tools_used=tools_used if tools_used else None)
@@ -524,7 +493,7 @@ class AgentLoop:
             channel=msg.channel,
             chat_id=msg.chat_id,
             content=final_content,
-            metadata=msg.metadata or {},  # 浼犻€掗閬撶壒瀹氬厓鏁版嵁锛堝 Slack thread_ts锛?
+            metadata=msg.metadata or {},
         )
 
     async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage | None:
@@ -536,7 +505,6 @@ class AgentLoop:
         """
         logger.info(f"Processing system message from {msg.sender_id}")
 
-        # 瑙ｆ瀽鏉ユ簮锛堟牸寮? "channel:chat_id"锛?
         if ":" in msg.chat_id:
             parts = msg.chat_id.split(":", 1)
             origin_channel = parts[0]
@@ -545,11 +513,10 @@ class AgentLoop:
             origin_channel = "cli"
             origin_chat_id = msg.chat_id
 
-        # 浣跨敤鏉ユ簮浼氳瘽
+        # Reuse the source conversation session.
         session_key = f"{origin_channel}:{origin_chat_id}"
         session = self.sessions.get_or_create(session_key)
 
-        # 鏇存柊宸ュ叿涓婁笅鏂?
         message_tool = self.tools.get("message")
         if isinstance(message_tool, MessageTool):
             message_tool.set_context(origin_channel, origin_chat_id)
@@ -562,7 +529,6 @@ class AgentLoop:
         if isinstance(cron_tool, CronTool):
             cron_tool.set_context(origin_channel, origin_chat_id)
 
-        # 鏋勫缓娑堟伅涓婁笅鏂?
         messages = self.context.build_messages(
             history=session.get_history(),
             current_message=msg.content,
@@ -570,7 +536,6 @@ class AgentLoop:
             chat_id=origin_chat_id,
         )
 
-        # Agent 寰幆锛堝瓙浠ｇ悊娑堟伅澶勭悊锛?
         iteration = 0
         final_content = None
 
@@ -614,7 +579,6 @@ class AgentLoop:
         if final_content is None:
             final_content = "Background task completed."
 
-        # 淇濆瓨浼氳瘽锛堟爣璁颁负绯荤粺娑堟伅锛?
         session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
         session.add_message("assistant", final_content)
         self.sessions.save(session)
@@ -687,11 +651,11 @@ class AgentLoop:
 
     async def _consolidate_memory(self, session, archive_all: bool = False) -> dict | None:
         """
-        灏嗘棫娑堟伅鏁村悎鍒?MEMORY.md + HISTORY.md锛岀劧鍚庤鍓細璇濄€?
+        Consolidate older messages into MEMORY.md and HISTORY.md, then trim session history.
 
         Returns:
-            鏁村悎缁撴灉瀛楀吀 {success, archived, memory_updated, history_added}锛?
-            鏃犳秷鎭椂杩斿洖 None銆?
+            Result dict: {success, archived, memory_updated, history_added}
+            Returns None when there are no messages to process.
         """
         if not session.messages:
             return None
@@ -705,9 +669,12 @@ class AgentLoop:
         if not old_messages:
             return None
         archived_count = len(old_messages)
-        logger.info(f"璁板繂鏁村悎寮€濮? {len(session.messages)} 鏉℃秷鎭? 褰掓。 {archived_count}, 淇濈暀 {keep_count}")
+        logger.info(
+            f"Memory consolidation start: total={len(session.messages)}, "
+            f"archive={archived_count}, keep={keep_count}"
+        )
 
-        # 鏍煎紡鍖栨秷鎭緵 LLM 澶勭悊
+        # Format conversation for LLM processing.
         lines = []
         for m in old_messages:
             if not m.get("content"):
@@ -766,7 +733,7 @@ Respond with ONLY valid JSON, no markdown fences."""
                 "history_added": history_added,
             }
         except (json.JSONDecodeError, ValueError, OSError, RuntimeError) as e:
-            logger.error(f"璁板繂鏁村悎澶辫触: {e}")
+            logger.error(f"Memory consolidation failed: {e}")
             return {"success": False, "archived": archived_count, "error": str(e)}
 
     async def process_direct(
@@ -797,4 +764,3 @@ Respond with ONLY valid JSON, no markdown fences."""
 
         response = await self._process_message(msg)
         return response.content if response else ""
-

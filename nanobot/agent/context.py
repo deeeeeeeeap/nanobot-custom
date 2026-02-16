@@ -121,7 +121,7 @@ Skills with available="false" need dependencies installed first - you can try in
 5. 有风险会提前说明
 6. 首次对话时读取 MEMORY.md 获取上下文
 
-### � 主动通知（必须执行）
+### 📢 主动通知（必须执行）
 你和用户之间不是一问一答的传统对话，而是长期活跃的执行者模式。你必须使用 `message` 工具主动发送消息：
 1. 多步骤任务时，每完成一个关键步骤，立刻调用 `message` 工具汇报进度
 2. 执行耗时命令前先用 `message` 通知用户正在做什么
@@ -131,7 +131,7 @@ Skills with available="false" need dependencies installed first - you can try in
 
 **警告：你必须真正调用 `message` 工具发送消息。口头说"我会通知你"但不调用工具 = 失败。**
 
-## �🛠️ 能力矩阵
+## 🛠️ 能力矩阵
 - 🔍 **网络搜索**：`web_search` (支持 country, freshness 参数)
 - 💻 **命令执行**：`exec` - 直接操控系统
 - 📁 **文件管理**：读取、写入、编辑文件
@@ -259,7 +259,7 @@ Skills with available="false" need dependencies installed first - you can try in
             messages: Current message list.
             content: Message content.
             tool_calls: Optional tool calls.
-            reasoning_content: 思维链输出 (DeepSeek-R1, Kimi 等).
+            reasoning_content: Optional reasoning text from compatible models.
         
         Returns:
             Updated message list.
@@ -269,7 +269,7 @@ Skills with available="false" need dependencies installed first - you can try in
         if tool_calls:
             msg["tool_calls"] = tool_calls
         
-        # 思维链模型需要保留 reasoning_content 以避免历史消息报错
+        # Preserve provider reasoning text when available.
         if reasoning_content:
             msg["reasoning_content"] = reasoning_content
         
@@ -277,6 +277,6 @@ Skills with available="false" need dependencies installed first - you can try in
         return messages
 
     def add_user_nudge(self, messages: list[dict[str, Any]], nudge: str) -> list[dict[str, Any]]:
-        """注入系统催促消息，要求模型立即调用工具。"""
+        """Inject a user nudge that asks the model to call tools immediately."""
         messages.append({"role": "user", "content": nudge})
         return messages
