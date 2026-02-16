@@ -1,4 +1,4 @@
-"""Agent loop: the core processing engine."""
+﻿"""Agent loop: the core processing engine."""
 
 import asyncio
 import json
@@ -20,111 +20,63 @@ from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.memory_tool import MemoryTool
 from nanobot.agent.subagent import SubagentManager
+from nanobot.exceptions import ConfigError, NanobotError
 from nanobot.session.manager import SessionManager
-# 定制：模型能力检测
+# 瀹氬埗锛氭ā鍨嬭兘鍔涙娴?
 from nanobot.config.model_capabilities import supports_function_calling
-# 定制：幻觉检测
+# 瀹氬埗锛氬够瑙夋娴?
 from nanobot.agent.hallucination_detector import (
-    detect_hallucination, 
+    detect_hallucination,
     create_honest_response,
     create_no_tools_available_response
 )
-# 定制：状态报告
+# 瀹氬埗锛氱姸鎬佹姤鍛?
 from nanobot.agent.status import StatusMessage, StatusReporter, NullReporter
 
 
 def _is_lazy_response(content: str, user_message: str = "") -> bool:
-    """
-    检测"懒惰回复"：模型声称将要/正在执行操作但没有真正调用工具。
-    
-    使用加权评分系统而非精确 regex 匹配：
-    - 累计多个信号的分数，score >= 4 判定懒惰
-    - 正向信号：等待语言、行动承诺、步骤列表、正在做声称等
-    - 负向信号：规划请求、短回复、问句等
-    """
+    """Heuristic check for stalled/non-actionable assistant replies."""
     import re
-    
-    if not content or len(content) < 10:
+
+    if not content or len(content.strip()) < 50:
         return False
-    
-    # === 直接跳过条件 ===
-    
-    # 短回复不可能是懒惰（"好的"、"你好！"）
-    if len(content) < 50:
+
+    # If user is explicitly asking for planning/discussion, do not treat as lazy.
+    planning_keywords = (
+        "plan",
+        "方案",
+        "讨论",
+        "建议",
+        "怎么看",
+        "can you",
+    )
+    if user_message and any(k in user_message.lower() for k in planning_keywords):
         return False
-    
-    # 用户在征求意见/讨论方案
-    planning_patterns = [
-        r"先.{0,4}(看看|试试|想想|聊聊|说说|分析|规划|讨论)",
-        r"(能不能|可不可以|可以吗|行不行|怎么样|什么方案|怎么做)",
-        r"(你觉得|你认为|你看|你说|有什么.*建议|有什么.*办法)",
-        r"(能做吗|做得到吗|可行吗|靠谱吗)",
-    ]
-    if user_message and any(re.search(p, user_message) for p in planning_patterns):
-        return False
-    
-    # === 评分 ===
+
     score = 0
-    
-    # +3: 等待语言（让用户等 → 暗示要做事但没做）
-    wait_patterns = [r"请稍(候|等|后)", r"请(耐心|你)等", r"(稍等|等一下|等我)", r"需要一(些|段|点)(时间|功夫)"]
-    if any(re.search(p, content) for p in wait_patterns):
-        score += 3
-    
-    # +2: 行动承诺（将要做但没做）
-    promise_patterns = [
-        r"我(将|会|要|准备)(立即|马上|现在)?(重新|开始|继续)?(执行|处理|调用|启动|运行|获取|抓取|搜索|查询|发送)",
-        r"(立即|马上|立刻|现在就|即将)(开始|执行|处理|为你|重新)",
-        r"(下一步|接下来)(我|碳核)?(将|会|要|准备)?(直接|立即|马上)?",
-        r"(直接|马上)(动手|开干|改|做|执行|落盘|替换)",
-    ]
-    if any(re.search(p, content) for p in promise_patterns):
+    lower = content.lower()
+
+    if any(k in lower for k in ["马上", "立即", "正在", "稍等", "please wait"]):
         score += 2
-    
-    # +3: 空转承诺（反复确认/询问授权而不行动）
-    stall_patterns = [
-        r"如果你(确认|同意|授权).*我(就|将|会|马上)",
-        r"回我一句.*我就",
-        r"(这次|这波|下一条).*不再.*(空话|空转|口头|嘴硬)",
-        r"给你.*(可核验|可验证|证据|回执)",
-    ]
-    if any(re.search(p, content) for p in stall_patterns):
-        score += 3
-    
-    # +2: 步骤计划（列了 1. 2. 3. 的计划但没执行）
-    if re.search(r"\n\s*[1-9][.、]\s+", content):
+    if any(k in lower for k in ["我会", "i will", "接下来", "next step"]):
         score += 2
-    
-    # +2: 正在做声称（说正在做但实际没调工具）
-    doing_patterns = [r"正在(努力|为你|帮你|尝试|处理|获取|抓取|查询|执行|搜索)"]
-    if any(re.search(p, content) for p in doing_patterns):
-        score += 2
-    
-    # +2: 保证语言（提高权重）
-    if re.search(r"(这次我(会|将)|我(保证|确保|一定会)|不再.*(口头|空话|空转|废话))", content):
-        score += 2
-    
-    # +1: 长回复（不调工具的纯文字 > 200 字符）
+    if re.search(r"\n\s*[1-9]\.\s+", content):
+        score += 1
     if len(content) > 200:
         score += 1
-    
-    # === 负向调整 ===
-    
-    # -2: 回复是问句（在询问用户意见，不是懒惰）
-    if re.search(r"[？?]\s*$", content.strip()):
-        score -= 2
-    
+    if re.search(r"[?？]\s*$", content.strip()):
+        score -= 1
+
     lazy = score >= 4
     if lazy:
-        logger.info(f"懒惰评分: {score} (>= 4), 触发重试")
-    
+        logger.info(f"Lazy response detected, score={score}")
     return lazy
 
 
 class AgentLoop:
     """
     The agent loop is the core processing engine.
-    
+
     It:
     1. Receives messages from the bus
     2. Builds context with history, memory, skills
@@ -132,7 +84,7 @@ class AgentLoop:
     4. Executes tool calls
     5. Sends responses back
     """
-    
+
     def __init__(
         self,
         bus: MessageBus,
@@ -161,8 +113,8 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
-        self.reporter_factory = reporter_factory  # 定制：状态报告器工厂
-        
+        self.reporter_factory = reporter_factory  # 瀹氬埗锛氱姸鎬佹姤鍛婂櫒宸ュ巶
+
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
@@ -175,110 +127,119 @@ class AgentLoop:
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
         )
-        
+
         self._running = False
         self._register_default_tools()
-    
+
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
-        # 文件工具（如配置则限制为 workspace 目录）
+        # 鏂囦欢宸ュ叿锛堝閰嶇疆鍒欓檺鍒朵负 workspace 鐩綍锛?
         allowed_dir = self.workspace if self.restrict_to_workspace else None
         self.tools.register(ReadFileTool(allowed_dir=allowed_dir))
         self.tools.register(WriteFileTool(allowed_dir=allowed_dir))
         self.tools.register(EditFileTool(allowed_dir=allowed_dir))
         self.tools.register(ListDirTool(allowed_dir=allowed_dir))
-        
-        # Shell 工具
+
+        # Shell 宸ュ叿
         self.tools.register(ExecTool(
             working_dir=str(self.workspace),
             timeout=self.exec_config.timeout,
             restrict_to_workspace=self.restrict_to_workspace,
         ))
-        
-        # Web 工具
+
+        # Web 宸ュ叿
         self.tools.register(WebSearchTool(api_key=self.brave_api_key))
         self.tools.register(WebFetchTool())
-        
-        # 消息工具
+
+        # 娑堟伅宸ュ叿
         message_tool = MessageTool(send_callback=self.bus.publish_outbound)
         self.tools.register(message_tool)
-        
-        # 子代理工具
+
+        # 瀛愪唬鐞嗗伐鍏?
         spawn_tool = SpawnTool(manager=self.subagents)
         self.tools.register(spawn_tool)
-        
-        # 记忆管理工具
+
+        # 璁板繂绠＄悊宸ュ叿
         self.tools.register(MemoryTool(
             memory_store=self.context.memory,
             workspace=self.workspace,
         ))
-        
-        # 定时任务工具
+
+        # 瀹氭椂浠诲姟宸ュ叿
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
-    
+
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
         self._running = True
         logger.info("Agent loop started")
-        
+
         while self._running:
             try:
-                # 等待下一条消息
+                # 绛夊緟涓嬩竴鏉℃秷鎭?
                 msg = await asyncio.wait_for(
                     self.bus.consume_inbound(),
                     timeout=1.0
                 )
-                
-                # 定制：创建状态报告器（如果有工厂）
+
+                # 瀹氬埗锛氬垱寤虹姸鎬佹姤鍛婂櫒锛堝鏋滄湁宸ュ巶锛?
                 reporter = None
                 if self.reporter_factory and msg.channel != "system":
                     try:
                         reporter = self.reporter_factory(msg.channel, msg.chat_id)
-                    except Exception as e:
-                        logger.warning(f"创建状态报告器失败: {e}")
-                
-                # 处理消息
+                    except (TypeError, ValueError, RuntimeError) as e:
+                        logger.warning(f"鍒涘缓鐘舵€佹姤鍛婂櫒澶辫触: {e}")
+
+                # 澶勭悊娑堟伅
                 try:
                     response = await self._process_message(msg, reporter=reporter)
-                    
-                    # 定制：完成后清理状态消息
+
+                    # 瀹氬埗锛氬畬鎴愬悗娓呯悊鐘舵€佹秷鎭?
                     if reporter:
                         await reporter.finalize(delete_status=True)
-                    
+
                     if response:
                         await self.bus.publish_outbound(response)
-                except Exception as e:
-                    logger.error(f"处理消息时出错: {e}")
-                    # 出错时也要清理状态消息
+                except (NanobotError, RuntimeError, ValueError, OSError) as e:
+                    logger.error(f"澶勭悊娑堟伅鏃跺嚭閿? {e}")
+                    # 鍑洪敊鏃朵篃瑕佹竻鐞嗙姸鎬佹秷鎭?
                     if reporter:
                         await reporter.finalize(delete_status=True)
-                    # 发送错误响应
+                    # 鍙戦€侀敊璇搷搴?
                     await self.bus.publish_outbound(OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
-                        content=f"抱歉，处理时遇到错误: {str(e)}"
+                        content=f"鎶辨瓑锛屽鐞嗘椂閬囧埌閿欒: {str(e)}"
+                    ))
+                except Exception:
+                    logger.exception("Unexpected message-processing failure")
+                    if reporter:
+                        await reporter.finalize(delete_status=True)
+                    await self.bus.publish_outbound(OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content="抱歉，处理时发生了未预期错误。"
                     ))
             except asyncio.TimeoutError:
                 continue
-    
+
     def stop(self) -> None:
         """Stop the agent loop."""
         self._running = False
         logger.info("Agent loop stopping")
-    
+
     def _update_provider_env(self, model: str, api_key: str | None, api_base: str | None) -> None:
         """
-        定制：更新 provider 的 API key 和环境变量。
-        用于动态模型切换时更新 provider 配置。
+        瀹氬埗锛氭洿鏂?provider 鐨?API key 鍜岀幆澧冨彉閲忋€?
+        鐢ㄤ簬鍔ㄦ€佹ā鍨嬪垏鎹㈡椂鏇存柊 provider 閰嶇疆銆?
         """
         import os
-        
+
         if api_key:
             self.provider.api_key = api_key
             model_lower = model.lower()
-            
-            # 根据模型名称设置对应的环境变量
+
+            # 鏍规嵁妯″瀷鍚嶇О璁剧疆瀵瑰簲鐨勭幆澧冨彉閲?
             env_mapping = {
                 "gemini": "GEMINI_API_KEY",
                 "anthropic": "ANTHROPIC_API_KEY",
@@ -288,118 +249,117 @@ class AgentLoop:
                 "deepseek": "DEEPSEEK_API_KEY",
                 "groq": "GROQ_API_KEY",
             }
-            
+
             for keyword, env_var in env_mapping.items():
                 if keyword in model_lower:
                     os.environ[env_var] = api_key
                     logger.debug(f"Set {env_var} for model {model}")
                     break
-            
-            # MiniMax 需要特殊处理（使用 Anthropic 兼容 API）
+
+            # MiniMax 闇€瑕佺壒娈婂鐞嗭紙浣跨敤 Anthropic 鍏煎 API锛?
             if "minimax" in model_lower:
                 os.environ["ANTHROPIC_API_KEY"] = api_key
                 os.environ["ANTHROPIC_BASE_URL"] = api_base or "https://api.minimaxi.com/anthropic"
-        
-        # 更新 api_base（无论是否有值，都需要更新以确保切换模型时重置）
+
+        # 鏇存柊 api_base锛堟棤璁烘槸鍚︽湁鍊硷紝閮介渶瑕佹洿鏂颁互纭繚鍒囨崲妯″瀷鏃堕噸缃級
         self.provider.api_base = api_base
-    
+
     async def _process_message(
-        self, 
+        self,
         msg: InboundMessage,
         reporter: StatusReporter | None = None
     ) -> OutboundMessage | None:
         """
         Process a single inbound message.
-        
+
         Args:
             msg: The inbound message to process.
-            reporter: 定制：可选的状态报告器，用于实时反馈进度
-        
+            reporter: 瀹氬埗锛氬彲閫夌殑鐘舵€佹姤鍛婂櫒锛岀敤浜庡疄鏃跺弽棣堣繘搴?
+
         Returns:
             The response message, or None if no response needed.
         """
-        # 定制：使用空报告器如果没有提供
+        # 瀹氬埗锛氫娇鐢ㄧ┖鎶ュ憡鍣ㄥ鏋滄病鏈夋彁渚?
         if reporter is None:
             reporter = NullReporter()
-        
-        # 处理系统消息（子代理通知）
+
+        # 澶勭悊绯荤粺娑堟伅锛堝瓙浠ｇ悊閫氱煡锛?
         if msg.channel == "system":
             return await self._process_system_message(msg)
-        
+
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info(f"Processing message from {msg.channel}:{msg.sender_id}: {preview}")
-        
-        # 定制：动态读取最新的模型配置，让 /model 命令切换立即生效
+
+        # 瀹氬埗锛氬姩鎬佽鍙栨渶鏂扮殑妯″瀷閰嶇疆锛岃 /model 鍛戒护鍒囨崲绔嬪嵆鐢熸晥
         current_model = self.model
         from nanobot.config.loader import load_config
         try:
             current_config = load_config()
             current_model = current_config.agents.defaults.model
-            # 更新 provider 的 API key 和 base（如果模型变更需要不同的 provider）
+            # 鏇存柊 provider 鐨?API key 鍜?base锛堝鏋滄ā鍨嬪彉鏇撮渶瑕佷笉鍚岀殑 provider锛?
             if current_model != self.model:
                 logger.info(f"Model changed from {self.model} to {current_model}")
                 self.model = current_model
                 api_key = current_config.get_api_key(current_model)
                 api_base = current_config.get_api_base(current_model)
                 self._update_provider_env(current_model, api_key, api_base)
-        except Exception as e:
+        except (ConfigError, ValueError, OSError) as e:
             logger.warning(f"Failed to reload config: {e}, using cached model")
-        
-        # 获取或创建会话
+
+        # 鑾峰彇鎴栧垱寤轰細璇?
         session = self.sessions.get_or_create(msg.session_key)
-        
-        # 处理斜杠命令
+
+        # 澶勭悊鏂滄潬鍛戒护
         cmd = msg.content.strip().lower()
         if cmd == "/new":
             msg_count = len(session.messages)
             result = await self._consolidate_memory(session, archive_all=True)
             session.clear()
             self.sessions.save(session)
-            # 构建详细反馈
             if result and result.get("success"):
-                parts = ["📝 **新会话已开始**"]
-                parts.append(f"• 归档消息: {result.get('archived', 0)} 条")
+                parts = ["New session started."]
+                parts.append(f"- Archived messages: {result.get('archived', 0)}")
                 if result.get("memory_updated"):
-                    parts.append("• 长期记忆: ✅ 已更新")
+                    parts.append("- Long-term memory: updated")
                 else:
-                    parts.append("• 长期记忆: 无新增内容")
+                    parts.append("- Long-term memory: no changes")
                 if result.get("history_added"):
-                    parts.append("• 历史归档: ✅ 已追加到 HISTORY.md")
+                    parts.append("- History entry: added to HISTORY.md")
                 feedback = "\n".join(parts)
             elif msg_count == 0:
-                feedback = "📝 新会话已开始（无需整合，会话为空）。"
+                feedback = "New session started (session was already empty)."
             else:
-                feedback = "📝 新会话已开始（记忆整合失败，对话历史已清空但未归档）。"
+                feedback = "New session started (memory consolidation failed)."
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=feedback)
         if cmd == "/help":
             help_text = (
-                "🐈 **nanobot 命令**\n\n"
-                "/new — 📝 新会话（先整合记忆再清空，对话摘要会保存到 MEMORY.md）\n"
-                "/clear — 🗑️ 清空会话（直接清空，不保存对话历史）\n"
-                "/model <名称> — 🔄 切换模型\n"
-                "/status — 📊 查看系统状态\n"
-                "/help — ❓ 显示帮助"
+                "nanobot commands:\n\n"
+                "/new - start a new session and consolidate memory\n"
+                "/clear - clear current session history\n"
+                "/model <name> - switch model\n"
+                "/status - show runtime status\n"
+                "/help - show this help"
             )
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=help_text)
-        
-        # 会话过长时自动整合记忆
+
+        # 浼氳瘽杩囬暱鏃惰嚜鍔ㄦ暣鍚堣蹇?
         if len(session.messages) > self.memory_window:
             await self._consolidate_memory(session)
-        
-        # 更新工具上下文
+
+        # 鏇存柊宸ュ叿涓婁笅鏂?
         message_tool = self.tools.get("message")
         if isinstance(message_tool, MessageTool):
             message_tool.set_context(msg.channel, msg.chat_id)
-        
+
         spawn_tool = self.tools.get("spawn")
         if isinstance(spawn_tool, SpawnTool):
             spawn_tool.set_context(msg.channel, msg.chat_id)
-        
+
         cron_tool = self.tools.get("cron")
         if isinstance(cron_tool, CronTool):
             cron_tool.set_context(msg.channel, msg.chat_id)
-        
-        # 构建消息上下文
+
+        # 鏋勫缓娑堟伅涓婁笅鏂?
         messages = self.context.build_messages(
             history=session.get_history(),
             current_message=msg.content,
@@ -407,35 +367,35 @@ class AgentLoop:
             channel=msg.channel,
             chat_id=msg.chat_id,
         )
-        
-        # Agent 循环
+
+        # Agent 寰幆
         iteration = 0
         final_content = None
         tools_used: list[str] = []
-        tools_were_called = False  # 定制：追踪是否真正调用了工具
-        
-        # 定制：检查模型是否支持 Function Calling
+        tools_were_called = False  # 瀹氬埗锛氳拷韪槸鍚︾湡姝ｈ皟鐢ㄤ簡宸ュ叿
+
+        # 瀹氬埗锛氭鏌ユā鍨嬫槸鍚︽敮鎸?Function Calling
         model_supports_tools = supports_function_calling(self.model)
         if not model_supports_tools:
             logger.warning(f"Model {self.model} does not support function calling, tools disabled")
-        
+
         while iteration < self.max_iterations:
             iteration += 1
-            
-            # 定制：报告思考状态（Codex 模型使用特殊消息）
+
+            # 瀹氬埗锛氭姤鍛婃€濊€冪姸鎬侊紙Codex 妯″瀷浣跨敤鐗规畩娑堟伅锛?
             is_codex = "codex" in current_model.lower()
             await reporter.report(StatusMessage.thinking(is_codex=is_codex))
-            
-            # 调用 LLM - 定制：根据模型能力决定是否传递 tools
+
+            # 璋冪敤 LLM - 瀹氬埗锛氭牴鎹ā鍨嬭兘鍔涘喅瀹氭槸鍚︿紶閫?tools
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions() if model_supports_tools else None,
                 model=self.model
             )
-            
-            # 处理工具调用
+
+            # 澶勭悊宸ュ叿璋冪敤
             if response.has_tool_calls:
-                # 添加 assistant 消息（含工具调用）
+                # 娣诲姞 assistant 娑堟伅锛堝惈宸ュ叿璋冪敤锛?
                 tool_call_dicts = [
                     {
                         "id": tc.id,
@@ -451,70 +411,72 @@ class AgentLoop:
                     messages, response.content, tool_call_dicts,
                     reasoning_content=response.reasoning_content,
                 )
-                
-                # 执行工具
+
+                # 鎵ц宸ュ叿
                 for tool_call in response.tool_calls:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
-                    
-                    # 定制：报告工具开始执行
+
+                    # 瀹氬埗锛氭姤鍛婂伐鍏峰紑濮嬫墽琛?
                     await reporter.report(StatusMessage.tool_start(
-                        tool_call.name, 
+                        tool_call.name,
                         tool_call.arguments
                     ))
-                    
+
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
-                    
-                    # 定制：报告工具执行完成
+
+                    # 瀹氬埗锛氭姤鍛婂伐鍏锋墽琛屽畬鎴?
                     success = not (isinstance(result, str) and result.startswith("Error"))
                     await reporter.report(StatusMessage.tool_done(tool_call.name, success))
-                    
+
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
                     tools_used.append(tool_call.name)
-                    tools_were_called = True  # 标记工具被调用
-                # 交错思维链：工具执行后引导反思
+                    tools_were_called = True  # 鏍囪宸ュ叿琚皟鐢?
+                # 浜ら敊鎬濈淮閾撅細宸ュ叿鎵ц鍚庡紩瀵煎弽鎬?
                 messages.append({"role": "user", "content": "Reflect on the results and decide next steps."})
             else:
-                # 定制：懒惰检测 — 模型说了要做但没调用工具，自动催促重试
-                # 允许最多催促 2 次（iteration 1 和 2）
+                # 瀹氬埗锛氭噿鎯版娴?鈥?妯″瀷璇翠簡瑕佸仛浣嗘病璋冪敤宸ュ叿锛岃嚜鍔ㄥ偓淇冮噸璇?
+                # 鍏佽鏈€澶氬偓淇?2 娆★紙iteration 1 鍜?2锛?
                 if (
                     iteration <= 2
                     and model_supports_tools
                     and response.content
                     and _is_lazy_response(response.content, msg.content)
                 ):
-                    logger.warning(f"检测到懒惰回复 (第{iteration}次)，注入催促消息重试")
+                    logger.warning(
+                        f"Detected lazy response (iteration {iteration}), injecting tool-use nudge"
+                    )
                     messages = self.context.add_assistant_message(messages, response.content)
                     nudge = (
-                        "【系统强制指令】你前面的回复没有调用任何工具，只是在描述计划。"
-                        "这是不可接受的。你必须在下一条回复中调用工具（如 exec、read_file、write_file）。"
-                        "规则：先调用工具，再说话。不允许只说不做。"
+                        "[System directive] Your previous reply described a plan but did not call tools. "
+                        "In the next reply, you must use tools first (e.g., exec/read_file/write_file), "
+                        "then summarize results."
                     )
                     messages = self.context.add_user_nudge(messages, nudge)
-                    continue  # 不 break，再给一轮机会
-                
-                # 无工具调用，完成
+                    continue  # 涓?break锛屽啀缁欎竴杞満浼?
+
+                # 鏃犲伐鍏疯皟鐢紝瀹屾垚
                 final_content = response.content
                 break
-        
+
         if not final_content:
-            final_content = "（任务已执行完毕，但模型未生成回复文本。）"
-        
-        # 定制：幻觉检测
-        # 触发条件：
-        # 1. 模型不支持工具调用（纯对话模式）
-        # 2. 模型支持工具但本次没有调用任何工具（可能编造了执行结果）
-        # 排除条件：工具确实被调用过的情况
-        # 注意：Codex 已通过 codex_bridge.py v2 支持 FC，不再豁免
+            final_content = "锛堜换鍔″凡鎵ц瀹屾瘯锛屼絾妯″瀷鏈敓鎴愬洖澶嶆枃鏈€傦級"
+
+        # 瀹氬埗锛氬够瑙夋娴?
+        # 瑙﹀彂鏉′欢锛?
+        # 1. 妯″瀷涓嶆敮鎸佸伐鍏疯皟鐢紙绾璇濇ā寮忥級
+        # 2. 妯″瀷鏀寔宸ュ叿浣嗘湰娆℃病鏈夎皟鐢ㄤ换浣曞伐鍏凤紙鍙兘缂栭€犱簡鎵ц缁撴灉锛?
+        # 鎺掗櫎鏉′欢锛氬伐鍏风‘瀹炶璋冪敤杩囩殑鎯呭喌
+        # 娉ㄦ剰锛欳odex 宸查€氳繃 codex_bridge.py v2 鏀寔 FC锛屼笉鍐嶈眮鍏?
         should_check_hallucination = (
-            not model_supports_tools  # 模型本身不支持工具
-            or (model_supports_tools and not tools_were_called)  # 支持但没调用
+            not model_supports_tools  # 妯″瀷鏈韩涓嶆敮鎸佸伐鍏?
+            or (model_supports_tools and not tools_were_called)  # 鏀寔浣嗘病璋冪敤
         )
         if should_check_hallucination:
             hallucination = detect_hallucination(
-                final_content, 
+                final_content,
                 tools_were_called=tools_were_called,
                 model_supports_tools=model_supports_tools
             )
@@ -524,34 +486,34 @@ class AgentLoop:
                     f"(confidence: {hallucination.confidence:.2f})"
                 )
                 final_content = create_honest_response(self.model)
-        
-        # 日志：响应预览
+
+        # 鏃ュ織锛氬搷搴旈瑙?
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
-        
-        # 保存会话（包含工具使用记录，供记忆整合参考）
+
+        # 淇濆瓨浼氳瘽锛堝寘鍚伐鍏蜂娇鐢ㄨ褰曪紝渚涜蹇嗘暣鍚堝弬鑰冿級
         session.add_message("user", msg.content)
         session.add_message("assistant", final_content,
                             tools_used=tools_used if tools_used else None)
         self.sessions.save(session)
-        
+
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
             content=final_content,
-            metadata=msg.metadata or {},  # 传递频道特定元数据（如 Slack thread_ts）
+            metadata=msg.metadata or {},  # 浼犻€掗閬撶壒瀹氬厓鏁版嵁锛堝 Slack thread_ts锛?
         )
-    
+
     async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage | None:
         """
         Process a system message (e.g., subagent announce).
-        
+
         The chat_id field contains "original_channel:original_chat_id" to route
         the response back to the correct destination.
         """
         logger.info(f"Processing system message from {msg.sender_id}")
-        
-        # 解析来源（格式: "channel:chat_id"）
+
+        # 瑙ｆ瀽鏉ユ簮锛堟牸寮? "channel:chat_id"锛?
         if ":" in msg.chat_id:
             parts = msg.chat_id.split(":", 1)
             origin_channel = parts[0]
@@ -559,45 +521,45 @@ class AgentLoop:
         else:
             origin_channel = "cli"
             origin_chat_id = msg.chat_id
-        
-        # 使用来源会话
+
+        # 浣跨敤鏉ユ簮浼氳瘽
         session_key = f"{origin_channel}:{origin_chat_id}"
         session = self.sessions.get_or_create(session_key)
-        
-        # 更新工具上下文
+
+        # 鏇存柊宸ュ叿涓婁笅鏂?
         message_tool = self.tools.get("message")
         if isinstance(message_tool, MessageTool):
             message_tool.set_context(origin_channel, origin_chat_id)
-        
+
         spawn_tool = self.tools.get("spawn")
         if isinstance(spawn_tool, SpawnTool):
             spawn_tool.set_context(origin_channel, origin_chat_id)
-        
+
         cron_tool = self.tools.get("cron")
         if isinstance(cron_tool, CronTool):
             cron_tool.set_context(origin_channel, origin_chat_id)
-        
-        # 构建消息上下文
+
+        # 鏋勫缓娑堟伅涓婁笅鏂?
         messages = self.context.build_messages(
             history=session.get_history(),
             current_message=msg.content,
             channel=origin_channel,
             chat_id=origin_chat_id,
         )
-        
-        # Agent 循环（子代理消息处理）
+
+        # Agent 寰幆锛堝瓙浠ｇ悊娑堟伅澶勭悊锛?
         iteration = 0
         final_content = None
-        
+
         while iteration < self.max_iterations:
             iteration += 1
-            
+
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
                 model=self.model
             )
-            
+
             if response.has_tool_calls:
                 tool_call_dicts = [
                     {
@@ -614,7 +576,7 @@ class AgentLoop:
                     messages, response.content, tool_call_dicts,
                     reasoning_content=response.reasoning_content,
                 )
-                
+
                 for tool_call in response.tool_calls:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
@@ -625,28 +587,28 @@ class AgentLoop:
             else:
                 final_content = response.content
                 break
-        
+
         if final_content is None:
             final_content = "Background task completed."
-        
-        # 保存会话（标记为系统消息）
+
+        # 淇濆瓨浼氳瘽锛堟爣璁颁负绯荤粺娑堟伅锛?
         session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
         session.add_message("assistant", final_content)
         self.sessions.save(session)
-        
+
         return OutboundMessage(
             channel=origin_channel,
             chat_id=origin_chat_id,
             content=final_content
         )
-    
+
     async def _consolidate_memory(self, session, archive_all: bool = False) -> dict | None:
         """
-        将旧消息整合到 MEMORY.md + HISTORY.md，然后裁剪会话。
-        
+        灏嗘棫娑堟伅鏁村悎鍒?MEMORY.md + HISTORY.md锛岀劧鍚庤鍓細璇濄€?
+
         Returns:
-            整合结果字典 {success, archived, memory_updated, history_added}，
-            无消息时返回 None。
+            鏁村悎缁撴灉瀛楀吀 {success, archived, memory_updated, history_added}锛?
+            鏃犳秷鎭椂杩斿洖 None銆?
         """
         if not session.messages:
             return None
@@ -660,9 +622,9 @@ class AgentLoop:
         if not old_messages:
             return None
         archived_count = len(old_messages)
-        logger.info(f"记忆整合开始: {len(session.messages)} 条消息, 归档 {archived_count}, 保留 {keep_count}")
+        logger.info(f"璁板繂鏁村悎寮€濮? {len(session.messages)} 鏉℃秷鎭? 褰掓。 {archived_count}, 淇濈暀 {keep_count}")
 
-        # 格式化消息供 LLM 处理
+        # 鏍煎紡鍖栨秷鎭緵 LLM 澶勭悊
         lines = []
         for m in old_messages:
             if not m.get("content"):
@@ -711,17 +673,19 @@ Respond with ONLY valid JSON, no markdown fences."""
 
             session.messages = session.messages[-keep_count:] if keep_count else []
             self.sessions.save(session)
-            logger.info(f"记忆整合完成, 会话裁剪至 {len(session.messages)} 条消息")
+            logger.info(
+                f"Memory consolidation completed, session trimmed to {len(session.messages)} messages"
+            )
             return {
                 "success": True,
                 "archived": archived_count,
                 "memory_updated": memory_updated,
                 "history_added": history_added,
             }
-        except Exception as e:
-            logger.error(f"记忆整合失败: {e}")
+        except (json.JSONDecodeError, ValueError, OSError, RuntimeError) as e:
+            logger.error(f"璁板繂鏁村悎澶辫触: {e}")
             return {"success": False, "archived": archived_count, "error": str(e)}
-    
+
     async def process_direct(
         self,
         content: str,
@@ -731,13 +695,13 @@ Respond with ONLY valid JSON, no markdown fences."""
     ) -> str:
         """
         Process a message directly (for CLI or cron usage).
-        
+
         Args:
             content: The message content.
             session_key: Session identifier.
             channel: Source channel (for context).
             chat_id: Source chat ID (for context).
-        
+
         Returns:
             The agent's response.
         """
@@ -747,6 +711,6 @@ Respond with ONLY valid JSON, no markdown fences."""
             chat_id=chat_id,
             content=content
         )
-        
+
         response = await self._process_message(msg)
         return response.content if response else ""

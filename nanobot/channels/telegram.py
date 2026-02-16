@@ -1,15 +1,17 @@
-"""Telegram channel implementation using python-telegram-bot."""
+﻿"""Telegram channel implementation using python-telegram-bot."""
 
 import asyncio
 import re
 
 from loguru import logger
 from telegram import Update
+from telegram.error import BadRequest, Forbidden, NetworkError, TelegramError, TimedOut
 from telegram.ext import Application, MessageHandler, filters, ContextTypes, CommandHandler
 
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
+from nanobot.exceptions import ConfigError
 from nanobot.config.schema import TelegramConfig
 from nanobot.config.loader import load_config, save_config, get_config_path
 
@@ -59,8 +61,8 @@ def _markdown_to_telegram_html(text: str) -> str:
     # 9. Strikethrough ~~text~~
     text = re.sub(r'~~(.+?)~~', r'<s>\1</s>', text)
     
-    # 10. Bullet lists - item -> • item
-    text = re.sub(r'^[-*]\s+', '• ', text, flags=re.MULTILINE)
+    # 10. Bullet lists - item -> 鈥?item
+    text = re.sub(r'^[-*]\s+', '鈥?', text, flags=re.MULTILINE)
     
     # 11. Restore inline code with HTML tags
     for i, code in enumerate(inline_codes):
@@ -85,6 +87,18 @@ class TelegramChannel(BaseChannel):
     """
     
     name = "telegram"
+    MAX_OUTBOUND_TEXT_LENGTH = 4000
+    MAX_INBOUND_TEXT_LENGTH = 8000
+    MAX_MEDIA_PER_MESSAGE = 3
+    ALLOWED_MEDIA_MIME_PREFIXES = {
+        "image/": {"image/jpeg", "image/png", "image/gif", "image/webp"},
+        "audio/": {"audio/ogg", "audio/mpeg", "audio/mp4", "audio/wav"},
+    }
+    ALLOWED_DOCUMENT_MIME_TYPES = {
+        "text/plain",
+        "application/pdf",
+        "application/json",
+    }
     
     def __init__(self, config: TelegramConfig, bus: MessageBus, groq_api_key: str = "", session_manager=None):
         super().__init__(config, bus)
@@ -169,62 +183,33 @@ class TelegramChannel(BaseChannel):
         if not self._app:
             logger.warning("Telegram bot not running")
             return
-        
+
         try:
-            # chat_id should be the Telegram chat ID (integer)
             chat_id = int(msg.chat_id)
-            # Convert markdown to Telegram HTML
-            html_content = _markdown_to_telegram_html(msg.content)
-            
-            # Telegram 消息限制 4096 字符，需要分片发送
-            MAX_LENGTH = 4000  # 留一些余量
-            if len(html_content) <= MAX_LENGTH:
-                await self._app.bot.send_message(
-                    chat_id=chat_id,
-                    text=html_content,
-                    parse_mode="HTML"
-                )
-            else:
-                # 分片发送长消息
-                chunks = self._split_message(html_content, MAX_LENGTH)
-                for i, chunk in enumerate(chunks):
-                    try:
-                        await self._app.bot.send_message(
-                            chat_id=chat_id,
-                            text=chunk,
-                            parse_mode="HTML"
-                        )
-                    except Exception:
-                        # HTML 解析失败时用纯文本
-                        plain_chunk = self._split_message(msg.content, MAX_LENGTH)[i] if i < len(self._split_message(msg.content, MAX_LENGTH)) else chunk
-                        await self._app.bot.send_message(
-                            chat_id=chat_id,
-                            text=plain_chunk
-                        )
         except ValueError:
             logger.error(f"Invalid chat_id: {msg.chat_id}")
-        except Exception as e:
-            # Fallback to plain text if HTML parsing fails
-            logger.warning(f"HTML parse failed, falling back to plain text: {e}")
-            try:
-                # 分片发送纯文本
-                MAX_LENGTH = 4000
-                if len(msg.content) <= MAX_LENGTH:
+            return
+
+        html_content = _markdown_to_telegram_html(msg.content)
+        html_chunks = self._split_message(html_content, self.MAX_OUTBOUND_TEXT_LENGTH)
+        plain_chunks = self._split_message(msg.content, self.MAX_OUTBOUND_TEXT_LENGTH)
+
+        try:
+            for idx, chunk in enumerate(html_chunks):
+                try:
                     await self._app.bot.send_message(
-                        chat_id=int(msg.chat_id),
-                        text=msg.content
+                        chat_id=chat_id,
+                        text=chunk,
+                        parse_mode="HTML",
                     )
-                else:
-                    for chunk in self._split_message(msg.content, MAX_LENGTH):
-                        await self._app.bot.send_message(
-                            chat_id=int(msg.chat_id),
-                            text=chunk
-                        )
-            except Exception as e2:
-                logger.error(f"Error sending Telegram message: {e2}")
-    
+                except BadRequest:
+                    fallback = plain_chunks[idx] if idx < len(plain_chunks) else chunk
+                    await self._app.bot.send_message(chat_id=chat_id, text=fallback)
+        except (TimedOut, NetworkError, Forbidden, TelegramError) as e:
+            logger.error(f"Error sending Telegram message: {e}")
+
     def _split_message(self, text: str, max_length: int) -> list[str]:
-        """将长消息分割成多个片段，尽量在换行处分割。"""
+        """Split long messages into chunks, preferring newline boundaries."""
         if len(text) <= max_length:
             return [text]
         
@@ -237,8 +222,7 @@ class TelegramChannel(BaseChannel):
             else:
                 if current:
                     chunks.append(current.rstrip())
-                # 如果单行超长，强制截断
-                while len(line) > max_length:
+                # 濡傛灉鍗曡瓒呴暱锛屽己鍒舵埅鏂?                while len(line) > max_length:
                     chunks.append(line[:max_length])
                     line = line[max_length:]
                 current = line + '\n'
@@ -252,215 +236,137 @@ class TelegramChannel(BaseChannel):
         """Handle /start command."""
         if not update.message or not update.effective_user:
             return
-        
+
         user = update.effective_user
         await update.message.reply_text(
-            f"👋 Hi {user.first_name}! I'm nanobot.\n\n"
-            "Send me a message and I'll respond!\n\n"
-            "ℹ️ /help - 查看所有可用命令"
+            f"Hi {user.first_name}! I'm nanobot.\n\n"
+            "Send me a message and I'll respond.\n\n"
+            "Use /help to see available commands."
         )
-    
+
     async def _on_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /help command - 显示所有可用命令。"""
+        """Handle /help command."""
         if not update.message:
             return
-        
+
         await update.message.reply_text(
-            "🤖 <b>碳核 - 可用命令</b>\n\n"
-            "📩 <b>基本命令</b>\n"
-            "/start - 开始使用\n"
-            "/help - 显示此帮助信息\n"
-            "/clear - 清除当前会话历史\n\n"
-            "🔧 <b>模型管理</b>\n"
-            "/model - 查看当前模型和可用 providers\n"
-            "/model &lt;模型名&gt; - 切换模型\n\n"
-            "📊 <b>系统信息</b>\n"
-            "/status - 查看当前运行状态\n\n"
-            "💡 <b>使用示例</b>\n"
-            "<code>/model antigravity/claude-opus-4-6-thinking</code>\n"
-            "<code>/model antigravity/gemini-3-flash-preview</code>\n"
-            "<code>/model openai/gpt-5.3-codex</code>",
+            "<b>nanobot commands</b>\n\n"
+            "<b>Basic</b>\n"
+            "/start - start using bot\n"
+            "/help - show this help\n"
+            "/clear - clear current session\n\n"
+            "<b>Model</b>\n"
+            "/model - show current model/providers\n"
+            "/model &lt;name&gt; - switch model\n\n"
+            "<b>Status</b>\n"
+            "/status - show runtime status",
             parse_mode="HTML"
         )
-    
+
     async def _on_model(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /model command for dynamic model switching.
-        
-        Usage:
-            /model - Show current model and available providers
-            /model <model_name> - Switch to a different model
-        
-        Examples:
-            /model minimax/MiniMax-M2.1
-            /model gemini-3-flash-preview
-            /model openai/gpt-5.3-codex
-        """
+        """Handle /model command for querying or switching model."""
         if not update.message or not update.effective_user:
             return
-        
-        # 获取命令参数
+
         args = context.args if context.args else []
-        
+
         try:
-            # 加载当前配置
             config = load_config()
             current_model = config.agents.defaults.model
-            
+
             if not args:
-                # 显示当前模型和可用的 providers
-                providers_status = []
-                # 从 registry 动态获取 provider 列表，避免硬编码不同步
                 from nanobot.providers.registry import PROVIDERS
-                provider_configs = []
+
+                providers_status = []
                 for spec in PROVIDERS:
                     p = getattr(config.providers, spec.name, None)
-                    if p is not None:
-                        provider_configs.append((spec.name, p))
-                
-                for name, provider in provider_configs:
-                    status = "✅" if provider.api_key else "❌"
-                    providers_status.append(f"  {status} {name}")
-                
-                providers_list = "\n".join(providers_status)
-                
+                    if p is None:
+                        continue
+                    status = "yes" if p.api_key else "no"
+                    providers_status.append(f"  - {spec.name}: {status}")
+
+                providers_list = "\n".join(providers_status) or "  (none)"
                 await update.message.reply_text(
-                    f"🤖 <b>当前模型</b>: <code>{current_model}</code>\n\n"
-                    f"<b>可用 Providers</b>:\n{providers_list}\n\n"
-                    f"<b>切换模型</b>:\n"
-                    f"<code>/model antigravity/claude-opus-4-6-thinking</code>\n"
-                    f"<code>/model antigravity/gemini-3-flash-preview</code>\n"
-                    f"<code>/model openai/gpt-5.3-codex</code>",
-                    parse_mode="HTML"
+                    f"Current model: <code>{current_model}</code>\n\n"
+                    f"Providers:\n{providers_list}\n\n"
+                    "Switch model: <code>/model openai/gpt-5.3-codex</code>",
+                    parse_mode="HTML",
                 )
-            else:
-                # 切换模型
-                new_model = args[0]
-                old_model = current_model
-                
-                # 更新配置
-                config.agents.defaults.model = new_model
-                
-                # 保存到配置文件
-                save_config(config)
-                
-                logger.info(f"Model switched from {old_model} to {new_model}")
-                
-                # 检查新模型是否支持工具调用
-                from nanobot.config.model_capabilities import supports_function_calling
-                supports_tools = supports_function_calling(new_model)
-                
-                if supports_tools:
-                    await update.message.reply_text(
-                        f"✅ <b>模型已切换</b>\n\n"
-                        f"<b>旧模型</b>: <code>{old_model}</code>\n"
-                        f"<b>新模型</b>: <code>{new_model}</code>\n\n"
-                        f"✨ 此模型支持所有工具功能。",
-                        parse_mode="HTML"
-                    )
-                else:
-                    # 检查是否是 Codex 模型
-                    is_codex = "codex" in new_model.lower()
-                    
-                    if is_codex:
-                        await update.message.reply_text(
-                            f"🚀 <b>模型已切换到 Codex</b>\n\n"
-                            f"<b>旧模型</b>: <code>{old_model}</code>\n"
-                            f"<b>新模型</b>: <code>{new_model}</code>\n\n"
-                            f"💡 <b>Codex 模式说明</b>:\n"
-                            f"- ✅ Codex 可以<b>自主执行命令</b>\n"
-                            f"- ✅ 支持<b>完整系统权限</b>\n"
-                            f"- ❌ 不支持 nanobot 工具调用\n\n"
-                            f"🔧 Codex 会直接在服务器上执行任务。",
-                            parse_mode="HTML"
-                        )
-                    else:
-                        await update.message.reply_text(
-                            f"⚠️ <b>模型已切换（功能受限）</b>\n\n"
-                            f"<b>旧模型</b>: <code>{old_model}</code>\n"
-                            f"<b>新模型</b>: <code>{new_model}</code>\n\n"
-                            f"❌ <b>此模型不支持工具调用</b>\n\n"
-                            f"以下功能<b>不可用</b>:\n"
-                            f"- 🔍 网络搜索\n"
-                            f"- 💻 执行命令\n"
-                            f"- 📁 文件操作\n\n"
-                            f"此模型仅适合<b>纯对话</b>场景。",
-                            parse_mode="HTML"
-                        )
-                
-        except Exception as e:
-            logger.error(f"Error handling /model command: {e}")
+                return
+
+            new_model = args[0]
+            old_model = current_model
+            config.agents.defaults.model = new_model
+            save_config(config)
+            logger.info(f"Model switched from {old_model} to {new_model}")
+
+            from nanobot.config.model_capabilities import supports_function_calling
+            supports_tools = supports_function_calling(new_model)
+            tool_note = "supports tools" if supports_tools else "tool support is limited"
+
             await update.message.reply_text(
-                f"❌ <b>错误</b>: {str(e)}",
-                parse_mode="HTML"
+                "Model switched successfully\n\n"
+                f"Old: <code>{old_model}</code>\n"
+                f"New: <code>{new_model}</code>\n"
+                f"Note: {tool_note}",
+                parse_mode="HTML",
             )
-    
+        except (ConfigError, ValueError, OSError, RuntimeError) as e:
+            logger.error(f"Error handling /model command: {e}")
+            await update.message.reply_text(f"Error: {e}")
+
     async def _on_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /status command - show current bot status."""
         if not update.message:
             return
-        
+
         try:
-            from nanobot.config.loader import load_config
             config = load_config()
-            
             current_model = config.agents.defaults.model
             brave_key = config.tools.web.search.api_key
             workspace = config.workspace_path
-            
+
             status_msg = (
-                f"📊 <b>Bot 状态</b>\n\n"
-                f"🤖 <b>当前模型</b>: <code>{current_model}</code>\n"
-                f"🔍 <b>搜索 API</b>: {'✅ 已配置' if brave_key else '❌ 未配置'}\n"
-                f"📍 <b>工作目录</b>: <code>{workspace}</code>\n"
+                "Bot status\n\n"
+                f"Model: <code>{current_model}</code>\n"
+                f"Search API configured: {'yes' if brave_key else 'no'}\n"
+                f"Workspace: <code>{workspace}</code>\n"
             )
-            
             await update.message.reply_text(status_msg, parse_mode="HTML")
-        except Exception as e:
+        except (ConfigError, ValueError, OSError, RuntimeError) as e:
             logger.error(f"Error handling /status command: {e}")
-            await update.message.reply_text(f"❌ 获取状态失败: {e}")
-    
+            await update.message.reply_text(f"Error getting status: {e}")
+
     async def _on_clear(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /clear command - clear session history."""
         if not update.message or not update.effective_user:
             return
-        
+
         try:
             chat_id = str(update.message.chat_id)
-            user_id = str(update.effective_user.id)
-            
-            # 构造 session key (与 loop.py 中的逻辑一致)
             session_key = f"telegram:{chat_id}"
-            
-            # 清除磁盘上的 session 文件
+
             from pathlib import Path
             session_dir = Path.home() / ".nanobot" / "sessions"
             session_file = session_dir / f"{session_key.replace(':', '_')}.json"
-            
             if session_file.exists():
                 session_file.unlink()
-            
-            # 也尝试清除 .jsonl 格式的文件
+
             session_jsonl = session_dir / f"{session_key.replace(':', '_')}.jsonl"
             if session_jsonl.exists():
                 session_jsonl.unlink()
-            
-            # 清除 SessionManager 的内存缓存
+
             if self.session_manager:
                 self.session_manager.delete(session_key)
-                logger.info(f"Cleared session (disk + memory cache): {session_key}")
-            else:
-                logger.info(f"Cleared session file: {session_key}")
-            
+
             await update.message.reply_text(
-                "🗑️ <b>会话已清空</b>\n\n"
-                "对话历史已直接清除（未保存到记忆）。\n"
-                "💡 如需保留对话摘要，请使用 /new。",
-                parse_mode="HTML"
+                "Session cleared.\n\n"
+                "History has been removed for this chat."
             )
-        except Exception as e:
+        except (ConfigError, ValueError, OSError, RuntimeError) as e:
             logger.error(f"Error handling /clear command: {e}")
-            await update.message.reply_text(f"❌ 清空失败: {e}")
-    
+            await update.message.reply_text(f"Clear failed: {e}")
+
     async def _on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming messages (text, photos, voice, documents)."""
         if not update.message or not update.effective_user:
@@ -487,7 +393,7 @@ class TelegramChannel(BaseChannel):
             content_parts.append(message.text)
         if message.caption:
             content_parts.append(message.caption)
-        
+
         # Handle media files
         media_file = None
         media_type = None
@@ -504,8 +410,16 @@ class TelegramChannel(BaseChannel):
         elif message.document:
             media_file = message.document
             media_type = "file"
-        
+
         # Download media if present
+        if media_file and self._app:
+            mime_type = getattr(media_file, "mime_type", None)
+            if not self._is_allowed_media_mime(media_type, mime_type):
+                logger.warning(f"Rejected unsupported Telegram media type: {media_type}/{mime_type}")
+                if update.message:
+                    await update.message.reply_text("Unsupported media type. Please send text, image, audio, or PDF/TXT/JSON files.")
+                media_file = None
+
         if media_file and self._app:
             try:
                 file = await self._app.bot.get_file(media_file.file_id)
@@ -535,12 +449,14 @@ class TelegramChannel(BaseChannel):
                     content_parts.append(f"[{media_type}: {file_path}]")
                     
                 logger.debug(f"Downloaded {media_type} to {file_path}")
-            except Exception as e:
+            except (TimedOut, NetworkError, TelegramError, OSError, ValueError) as e:
                 logger.error(f"Failed to download media: {e}")
                 content_parts.append(f"[{media_type}: download failed]")
-        
+
         content = "\n".join(content_parts) if content_parts else "[empty message]"
-        
+        if len(content) > self.MAX_INBOUND_TEXT_LENGTH:
+            content = content[: self.MAX_INBOUND_TEXT_LENGTH] + "\n...[truncated]"
+
         logger.debug(f"Telegram message from {sender_id}: {content[:50]}...")
         
         # Forward to the message bus
@@ -557,6 +473,21 @@ class TelegramChannel(BaseChannel):
                 "is_group": message.chat.type != "private"
             }
         )
+
+    def _is_allowed_media_mime(self, media_type: str | None, mime_type: str | None) -> bool:
+        """Validate incoming media MIME type against a small allowlist."""
+        if media_type is None:
+            return False
+        if media_type in {"image", "voice", "audio"}:
+            if not mime_type:
+                return True
+            for prefix, allowed in self.ALLOWED_MEDIA_MIME_PREFIXES.items():
+                if mime_type.startswith(prefix):
+                    return mime_type in allowed
+            return False
+        if media_type == "file":
+            return not mime_type or mime_type in self.ALLOWED_DOCUMENT_MIME_TYPES
+        return False
     
     def _get_extension(self, media_type: str, mime_type: str | None) -> str:
         """Get file extension based on media type."""

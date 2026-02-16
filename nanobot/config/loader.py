@@ -4,7 +4,10 @@ import json
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
 from nanobot.config.schema import Config
+from nanobot.exceptions import ConfigError
 
 
 def get_config_path() -> Path:
@@ -32,13 +35,18 @@ def load_config(config_path: Path | None = None) -> Config:
     
     if path.exists():
         try:
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 data = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            raise ConfigError(f"Failed to read config file {path}: {e}") from e
+
+        try:
             data = _migrate_config(data)
             return Config.model_validate(convert_keys(data))
-        except (json.JSONDecodeError, ValueError) as e:
-            print(f"Warning: Failed to load config from {path}: {e}")
-            print("Using default configuration.")
+        except ValidationError as e:
+            raise ConfigError(f"Invalid config in {path}: {e}") from e
+        except ValueError as e:
+            raise ConfigError(f"Invalid config in {path}: {e}") from e
     
     return Config()
 
@@ -58,8 +66,11 @@ def save_config(config: Config, config_path: Path | None = None) -> None:
     data = config.model_dump()
     data = convert_to_camel(data)
     
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except OSError as e:
+        raise ConfigError(f"Failed to write config file {path}: {e}") from e
 
 
 def _migrate_config(data: dict) -> dict:

@@ -1,8 +1,19 @@
 """Configuration schema using Pydantic."""
 
 from pathlib import Path
-from pydantic import BaseModel, Field
+from urllib.parse import urlparse
+
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
+
+
+def _validate_url(value: str, field_name: str, schemes: set[str]) -> str:
+    raw = value.strip()
+    parsed = urlparse(raw)
+    if parsed.scheme not in schemes or not parsed.netloc:
+        expected = "/".join(sorted(schemes))
+        raise ValueError(f"{field_name} must be a valid {expected} URL")
+    return raw
 
 
 class WhatsAppConfig(BaseModel):
@@ -11,6 +22,11 @@ class WhatsAppConfig(BaseModel):
     bridge_url: str = "ws://localhost:3001"
     allow_from: list[str] = Field(default_factory=list)  # Allowed phone numbers
 
+    @field_validator("bridge_url")
+    @classmethod
+    def validate_bridge_url(cls, value: str) -> str:
+        return _validate_url(value, "bridge_url", {"ws", "wss", "http", "https"})
+
 
 class TelegramConfig(BaseModel):
     """Telegram channel configuration."""
@@ -18,6 +34,27 @@ class TelegramConfig(BaseModel):
     token: str = ""  # Bot token from @BotFather
     allow_from: list[str] = Field(default_factory=list)  # Allowed user IDs or usernames
     proxy: str | None = None  # HTTP/SOCKS5 proxy URL, e.g. "http://127.0.0.1:7890" or "socks5://127.0.0.1:1080"
+
+    @field_validator("token")
+    @classmethod
+    def normalize_token(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("proxy")
+    @classmethod
+    def validate_proxy(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        raw = value.strip()
+        if not raw:
+            return None
+        return _validate_url(raw, "proxy", {"http", "https", "socks5", "socks5h"})
+
+    @model_validator(mode="after")
+    def validate_enabled_requirements(self):
+        if self.enabled and not self.token:
+            raise ValueError("channels.telegram.token is required when telegram is enabled")
+        return self
 
 
 class FeishuConfig(BaseModel):
@@ -46,6 +83,22 @@ class DiscordConfig(BaseModel):
     gateway_url: str = "wss://gateway.discord.gg/?v=10&encoding=json"
     intents: int = 37377  # GUILDS + GUILD_MESSAGES + DIRECT_MESSAGES + MESSAGE_CONTENT
 
+    @field_validator("token")
+    @classmethod
+    def normalize_token(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("gateway_url")
+    @classmethod
+    def validate_gateway_url(cls, value: str) -> str:
+        return _validate_url(value, "gateway_url", {"ws", "wss"})
+
+    @model_validator(mode="after")
+    def validate_enabled_requirements(self):
+        if self.enabled and not self.token:
+            raise ValueError("channels.discord.token is required when discord is enabled")
+        return self
+
 class EmailConfig(BaseModel):
     """Email channel configuration (IMAP inbound + SMTP outbound)."""
     enabled: bool = False
@@ -53,7 +106,7 @@ class EmailConfig(BaseModel):
 
     # IMAP (receive)
     imap_host: str = ""
-    imap_port: int = 993
+    imap_port: int = Field(default=993, ge=1, le=65535)
     imap_username: str = ""
     imap_password: str = ""
     imap_mailbox: str = "INBOX"
@@ -61,7 +114,7 @@ class EmailConfig(BaseModel):
 
     # SMTP (send)
     smtp_host: str = ""
-    smtp_port: int = 587
+    smtp_port: int = Field(default=587, ge=1, le=65535)
     smtp_username: str = ""
     smtp_password: str = ""
     smtp_use_tls: bool = True
@@ -70,9 +123,9 @@ class EmailConfig(BaseModel):
 
     # Behavior
     auto_reply_enabled: bool = True  # If false, inbound email is read but no automatic reply is sent
-    poll_interval_seconds: int = 30
+    poll_interval_seconds: int = Field(default=30, ge=1, le=86400)
     mark_seen: bool = True
-    max_body_chars: int = 12000
+    max_body_chars: int = Field(default=12000, ge=256, le=200000)
     subject_prefix: str = "Re: "
     allow_from: list[str] = Field(default_factory=list)  # Allowed sender email addresses
 
@@ -111,6 +164,19 @@ class MochatConfig(BaseModel):
     groups: dict[str, MochatGroupRule] = Field(default_factory=dict)
     reply_delay_mode: str = "non-mention"  # off | non-mention
     reply_delay_ms: int = 120000
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str) -> str:
+        return _validate_url(value, "base_url", {"http", "https"})
+
+    @field_validator("socket_url")
+    @classmethod
+    def validate_socket_url(cls, value: str) -> str:
+        raw = value.strip()
+        if not raw:
+            return ""
+        return _validate_url(raw, "socket_url", {"ws", "wss"})
 
 
 class SlackDMConfig(BaseModel):
@@ -158,9 +224,17 @@ class AgentDefaults(BaseModel):
     """Default agent configuration."""
     workspace: str = "~/.nanobot/workspace"
     model: str = "anthropic/claude-opus-4-5"
-    max_tokens: int = 8192
-    temperature: float = 0.7
-    max_tool_iterations: int = 20
+    max_tokens: int = Field(default=8192, ge=1, le=262144)
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    max_tool_iterations: int = Field(default=20, ge=1, le=100)
+
+    @field_validator("workspace")
+    @classmethod
+    def validate_workspace(cls, value: str) -> str:
+        raw = value.strip()
+        if not raw:
+            raise ValueError("workspace cannot be empty")
+        return raw
 
 
 class AgentsConfig(BaseModel):
@@ -173,6 +247,21 @@ class ProviderConfig(BaseModel):
     api_key: str = ""
     api_base: str | None = None
     extra_headers: dict[str, str] | None = None  # Custom headers (e.g. APP-Code for AiHubMix)
+
+    @field_validator("api_key")
+    @classmethod
+    def normalize_api_key(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("api_base")
+    @classmethod
+    def validate_api_base(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        raw = value.strip()
+        if not raw:
+            return None
+        return _validate_url(raw, "api_base", {"http", "https"})
 
 
 class ProvidersConfig(BaseModel):
@@ -195,13 +284,13 @@ class ProvidersConfig(BaseModel):
 class GatewayConfig(BaseModel):
     """Gateway/server configuration."""
     host: str = "0.0.0.0"
-    port: int = 18790
+    port: int = Field(default=18790, ge=1, le=65535)
 
 
 class WebSearchConfig(BaseModel):
     """Web search tool configuration."""
     api_key: str = ""  # Brave Search API key
-    max_results: int = 5
+    max_results: int = Field(default=5, ge=1, le=20)
 
 
 class WebToolsConfig(BaseModel):
@@ -211,7 +300,7 @@ class WebToolsConfig(BaseModel):
 
 class ExecToolConfig(BaseModel):
     """Shell exec tool configuration."""
-    timeout: int = 120
+    timeout: int = Field(default=120, ge=1, le=600)
 
 
 class ToolsConfig(BaseModel):

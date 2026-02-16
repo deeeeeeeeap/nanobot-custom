@@ -1,5 +1,6 @@
 """Message tool for sending messages to users."""
 
+import re
 from typing import Any, Callable, Awaitable
 
 from nanobot.agent.tools.base import Tool
@@ -8,6 +9,10 @@ from nanobot.bus.events import OutboundMessage
 
 class MessageTool(Tool):
     """Tool to send messages to users on chat channels."""
+
+    MAX_CONTENT_LEN = 8000
+    _CHANNEL_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
+    _CHAT_ID_RE = re.compile(r"^[A-Za-z0-9:_-]{1,128}$")
     
     def __init__(
         self, 
@@ -56,6 +61,22 @@ class MessageTool(Tool):
             },
             "required": ["content"]
         }
+
+    def validate_params(self, params: dict[str, Any]) -> list[str]:
+        errors = super().validate_params(params)
+        channel = params.get("channel")
+        chat_id = params.get("chat_id")
+        content = params.get("content", "")
+
+        if isinstance(content, str) and len(content) > self.MAX_CONTENT_LEN:
+            errors.append(f"content must be at most {self.MAX_CONTENT_LEN} chars")
+        if channel is not None and isinstance(channel, str):
+            if not self._CHANNEL_RE.match(channel):
+                errors.append("channel should match ^[a-z][a-z0-9_]{1,31}$")
+        if chat_id is not None and isinstance(chat_id, str):
+            if not self._CHAT_ID_RE.match(chat_id):
+                errors.append("chat_id contains invalid characters")
+        return errors
     
     async def execute(
         self, 
@@ -82,5 +103,5 @@ class MessageTool(Tool):
         try:
             await self._send_callback(msg)
             return f"Message sent to {channel}:{chat_id}"
-        except Exception as e:
+        except (TypeError, ValueError, RuntimeError) as e:
             return f"Error sending message: {str(e)}"

@@ -1,6 +1,10 @@
 """Cron tool for scheduling reminders and tasks."""
 
+import re
+from datetime import datetime
 from typing import Any
+
+from loguru import logger
 
 from nanobot.agent.tools.base import Tool
 from nanobot.cron.service import CronService
@@ -9,30 +13,29 @@ from nanobot.cron.types import CronSchedule
 
 class CronTool(Tool):
     """Tool to schedule reminders and recurring tasks."""
-    
+
     def __init__(self, cron_service: CronService):
         self._cron = cron_service
         self._channel = ""
         self._chat_id = ""
-    
+
     def set_context(self, channel: str, chat_id: str) -> None:
-        """设置当前会话上下文，用于消息投递。"""
+        """Set current channel/chat context for delivery."""
         self._channel = channel
         self._chat_id = chat_id
-    
+
     @property
     def name(self) -> str:
         return "cron"
-    
+
     @property
     def description(self) -> str:
         return (
             "Schedule reminders or agent tasks. "
-            "mode='remind' sends a static message; "
-            "mode='agent' makes the agent execute the prompt with full tool access "
-            "(weather, exec, web_search, etc.) and send results to the user."
+            "mode='remind' sends static message text; "
+            "mode='agent' makes the agent execute the prompt and deliver the result."
         )
-    
+
     @property
     def parameters(self) -> dict[str, Any]:
         return {
@@ -41,48 +44,41 @@ class CronTool(Tool):
                 "action": {
                     "type": "string",
                     "enum": ["add", "list", "remove"],
-                    "description": "Action to perform"
+                    "description": "Action to perform.",
                 },
                 "message": {
                     "type": "string",
-                    "description": (
-                        "内容文本。mode=remind 时为直接发送的提醒文字；"
-                        "mode=agent 时为要求 Agent 执行的指令"
-                        "（Agent 将用完整工具链处理并将结果发送给用户）"
-                    )
+                    "description": "Reminder text or agent prompt for add action.",
                 },
                 "mode": {
                     "type": "string",
                     "enum": ["remind", "agent"],
-                    "description": (
-                        "任务模式。remind=发送静态文本提醒（默认）；"
-                        "agent=由 Agent 完整执行指令（可调用 weather/exec/web_search 等工具）"
-                    )
+                    "description": "Task mode: static reminder or full agent run.",
                 },
                 "every_seconds": {
                     "type": "integer",
-                    "description": "Interval in seconds (for recurring tasks)"
+                    "description": "Interval in seconds for recurring tasks.",
                 },
                 "cron_expr": {
                     "type": "string",
-                    "description": "Cron expression like '0 9 * * *' (for scheduled tasks)"
+                    "description": "Cron expression like '0 9 * * *'.",
                 },
                 "timezone": {
                     "type": "string",
-                    "description": "时区，如 'Asia/Shanghai'。用于 cron_expr 的时间计算，默认 UTC"
+                    "description": "Timezone for cron_expr, e.g. 'Asia/Shanghai'.",
                 },
                 "at": {
                     "type": "string",
-                    "description": "ISO 格式的一次性执行时间（如 '2026-02-14T10:30:00'），执行后自动删除"
+                    "description": "One-shot ISO datetime, e.g. '2026-02-14T10:30:00'.",
                 },
                 "job_id": {
                     "type": "string",
-                    "description": "Job ID (for remove)"
-                }
+                    "description": "Job ID for remove action.",
+                },
             },
-            "required": ["action"]
+            "required": ["action"],
         }
-    
+
     async def execute(
         self,
         action: str,
@@ -93,16 +89,16 @@ class CronTool(Tool):
         timezone: str | None = None,
         at: str | None = None,
         job_id: str | None = None,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> str:
         if action == "add":
             return self._add_job(message, mode, every_seconds, cron_expr, timezone, at)
-        elif action == "list":
+        if action == "list":
             return self._list_jobs()
-        elif action == "remove":
+        if action == "remove":
             return self._remove_job(job_id)
         return f"Unknown action: {action}"
-    
+
     def _add_job(
         self,
         message: str,
@@ -116,79 +112,80 @@ class CronTool(Tool):
             return "Error: message is required for add"
         if not self._channel or not self._chat_id:
             return "Error: no session context (channel/chat_id)"
-        
-        # 构建调度计划
+
         delete_after = False
         if every_seconds:
             schedule = CronSchedule(kind="every", every_ms=every_seconds * 1000)
         elif cron_expr:
             schedule = CronSchedule(kind="cron", expr=cron_expr, tz=timezone)
         elif at:
-            from datetime import datetime
-            dt = datetime.fromisoformat(at)
-            at_ms = int(dt.timestamp() * 1000)
-            schedule = CronSchedule(kind="at", at_ms=at_ms)
+            try:
+                dt = datetime.fromisoformat(at)
+            except ValueError:
+                return "Error: invalid 'at' datetime format, expected ISO-8601"
+            schedule = CronSchedule(kind="at", at_ms=int(dt.timestamp() * 1000))
             delete_after = True
         else:
             return "Error: either every_seconds, cron_expr, or at is required"
-        
-        # 根据 mode 决定 payload.kind
+
         payload_kind = "agent_turn" if mode == "agent" else "system_event"
-        mode_label = "🤖 Agent 模式" if mode == "agent" else "📨 提醒模式"
-        
-        # 定制：验证 agent 模式的 message 不是工具调用语法
+        mode_label = "Agent" if mode == "agent" else "Remind"
+
         if mode == "agent":
-            import re
-            # 检测 exec(...), weather(...) 等工具调用格式
             tool_call_match = re.match(
-                r'^(exec|cron|weather|web_search|web_fetch|message)\s*\(',
-                message.strip()
+                r"^(exec|cron|weather|web_search|web_fetch|message)\s*\(",
+                message.strip(),
             )
             if tool_call_match:
-                # 尝试从工具调用中提取实际命令
                 cmd_match = re.search(r"command=['\"](.+?)['\"]", message)
                 if cmd_match:
-                    extracted = cmd_match.group(1)
-                    message = f"执行命令 {extracted} 并报告结果"
+                    message = f"Execute command {cmd_match.group(1)} and report the result."
                 else:
-                    message = f"请执行以下操作并报告结果: {message}"
-                from loguru import logger
-                logger.warning(f"Cron agent message 格式已纠正: {message[:60]}")
-        
-        job = self._cron.add_job(
-            name=message[:30],
-            schedule=schedule,
-            message=message,
-            deliver=True,
-            channel=self._channel,
-            to=self._chat_id,
-            payload_kind=payload_kind,
-            delete_after_run=delete_after,
+                    message = f"Please complete this task and report the result: {message}"
+                logger.warning(f"Normalized cron agent message: {message[:120]}")
+
+        try:
+            job = self._cron.add_job(
+                name=message[:30],
+                schedule=schedule,
+                message=message,
+                deliver=True,
+                channel=self._channel,
+                to=self._chat_id,
+                payload_kind=payload_kind,
+                delete_after_run=delete_after,
+            )
+        except ValueError as e:
+            return f"Error: {e}"
+
+        at_info = " (one-shot)" if delete_after else ""
+        return (
+            f"Created cron job [{mode_label}]{at_info}\n"
+            f"Name: {job.name}\n"
+            f"ID: {job.id}"
         )
-        at_info = " (一次性)" if delete_after else ""
-        return f"✅ 已创建定时任务 [{mode_label}]{at_info}\n名称: {job.name}\nID: {job.id}"
-    
+
     def _list_jobs(self) -> str:
         jobs = self._cron.list_jobs()
         if not jobs:
-            return "当前没有定时任务。"
+            return "No cron jobs found."
+
         lines = []
-        for j in jobs:
-            mode_icon = "🤖" if j.payload.kind == "agent_turn" else "📨"
-            tz_info = f" ({j.schedule.tz})" if j.schedule.tz else ""
-            if j.schedule.kind == "cron":
-                sched_info = f"cron: {j.schedule.expr}{tz_info}"
-            elif j.schedule.kind == "every":
-                secs = (j.schedule.every_ms or 0) // 1000
-                sched_info = f"每 {secs} 秒"
+        for job in jobs:
+            mode_icon = "A" if job.payload.kind == "agent_turn" else "R"
+            tz_info = f" ({job.schedule.tz})" if job.schedule.tz else ""
+            if job.schedule.kind == "cron":
+                sched_info = f"cron: {job.schedule.expr}{tz_info}"
+            elif job.schedule.kind == "every":
+                sched_info = f"every {(job.schedule.every_ms or 0) // 1000}s"
             else:
-                sched_info = j.schedule.kind
-            lines.append(f"- {mode_icon} {j.name} (id: {j.id}, {sched_info})")
-        return "定时任务列表：\n" + "\n".join(lines)
-    
+                sched_info = "one-shot"
+            lines.append(f"- [{mode_icon}] {job.name} (id: {job.id}, {sched_info})")
+        return "Cron jobs:\n" + "\n".join(lines)
+
     def _remove_job(self, job_id: str | None) -> str:
         if not job_id:
             return "Error: job_id is required for remove"
         if self._cron.remove_job(job_id):
-            return f"✅ 已删除任务 {job_id}"
-        return f"❌ 未找到任务 {job_id}"
+            return f"Removed job {job_id}"
+        return f"Job not found: {job_id}"

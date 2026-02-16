@@ -1,4 +1,4 @@
-"""CLI commands for nanobot."""
+﻿"""CLI commands for nanobot."""
 
 import asyncio
 import atexit
@@ -9,6 +9,7 @@ import select
 import sys
 
 import typer
+from loguru import logger
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -35,6 +36,7 @@ _HISTORY_FILE: Path | None = None
 _HISTORY_HOOK_REGISTERED = False
 _USING_LIBEDIT = False
 _SAVED_TERM_ATTRS = None  # original termios settings, restored on exit
+_GLOBAL_EXCEPTION_HOOKS_INSTALLED = False
 
 
 def _flush_pending_tty_input() -> None:
@@ -166,6 +168,48 @@ async def _read_interactive_input_async() -> str:
         raise KeyboardInterrupt from exc
 
 
+def _handle_uncaught_exception(exc_type, exc, exc_tb) -> None:
+    """Log uncaught sync exceptions and show a concise CLI notice."""
+    if issubclass(exc_type, KeyboardInterrupt):
+        return
+    logger.opt(exception=(exc_type, exc, exc_tb)).critical("Unhandled exception")
+    console.print("[red]Fatal error: unhandled exception. See logs for details.[/red]")
+
+
+def _handle_asyncio_exception(loop: asyncio.AbstractEventLoop, context: dict) -> None:
+    """Log uncaught async exceptions from the active event loop."""
+    exc = context.get("exception")
+    msg = context.get("message", "Unhandled asyncio exception")
+    if exc:
+        logger.opt(exception=exc).error(msg)
+    else:
+        logger.error(f"{msg}: {context}")
+    console.print("[red]Runtime error: async task failed unexpectedly.[/red]")
+
+
+def _install_global_exception_hooks() -> None:
+    global _GLOBAL_EXCEPTION_HOOKS_INSTALLED
+    if _GLOBAL_EXCEPTION_HOOKS_INSTALLED:
+        return
+    sys.excepthook = _handle_uncaught_exception
+    _GLOBAL_EXCEPTION_HOOKS_INSTALLED = True
+
+
+def _run_async(coro):
+    """Run async entrypoints with loop-level exception handling."""
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        loop.set_exception_handler(_handle_asyncio_exception)
+        return loop.run_until_complete(coro)
+    finally:
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+
+
 def version_callback(value: bool):
     if value:
         console.print(f"{__logo__} nanobot v{__version__}")
@@ -179,7 +223,7 @@ def main(
     ),
 ):
     """nanobot - Personal AI Assistant."""
-    pass
+    _install_global_exception_hooks()
 
 
 # ============================================================================
@@ -204,11 +248,11 @@ def onboard():
     # Create default config
     config = Config()
     save_config(config)
-    console.print(f"[green]✓[/green] Created config at {config_path}")
+    console.print(f"[green]鉁揫/green] Created config at {config_path}")
     
     # Create workspace
     workspace = get_workspace_path()
-    console.print(f"[green]✓[/green] Created workspace at {workspace}")
+    console.print(f"[green]鉁揫/green] Created workspace at {workspace}")
     
     # Create default bootstrap files
     _create_workspace_templates(workspace)
@@ -365,19 +409,14 @@ def gateway(
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         session_manager=session_manager,
-    )
-    
-    # 设置 cron 回调（需要 agent 和 bus）
+    )    # Setup cron callbacks (agent mode and direct-delivery mode)
     async def on_cron_job(job: CronJob) -> str | None:
-        """Agent 模式：通过 Agent 完整处理定时任务（调用工具链）。"""
+        """Agent mode: process scheduled job via AgentLoop."""
         from nanobot.bus.events import OutboundMessage
-        
-        response = None
+
+        response: str | None = None
         try:
-            # 清理上次 cron session，避免失败历史污染下次执行
             session_manager.delete(f"cron:{job.id}")
-            
-            # 带超时的 agent 处理（2 分钟）
             response = await asyncio.wait_for(
                 agent.process_direct(
                     job.payload.message,
@@ -385,22 +424,20 @@ def gateway(
                     channel=job.payload.channel or "cli",
                     chat_id=job.payload.to or "direct",
                 ),
-                timeout=120
+                timeout=120,
             )
             logger.info(f"Cron agent job '{job.name}' response: {len(response or '')} chars")
         except asyncio.TimeoutError:
-            response = f"⚠️ 定时任务超时：{job.name}\n任务在 2 分钟内未完成，请检查工具调用是否正常。"
+            response = f"Cron job timed out: {job.name}"
             logger.error(f"Cron agent job '{job.name}' timed out after 120s")
-        except Exception as e:
-            response = f"⚠️ 定时任务失败：{job.name}\n错误：{str(e)}"
+        except (RuntimeError, ValueError, OSError) as e:
+            response = f"Cron job failed: {job.name}\nError: {e}"
             logger.error(f"Cron agent job '{job.name}' failed: {e}")
-        
-        # 确保有内容投递（空响应兜底）
+
         if not response or not response.strip():
-            response = f"⚠️ 定时任务完成但无输出：{job.name}\n请检查任务指令是否明确。"
+            response = f"Cron job completed with empty output: {job.name}"
             logger.warning(f"Cron agent job '{job.name}' produced empty response")
-        
-        # 投递结果到用户
+
         if job.payload.deliver and job.payload.to:
             await bus.publish_outbound(OutboundMessage(
                 channel=job.payload.channel or "cli",
@@ -408,9 +445,9 @@ def gateway(
                 content=response,
             ))
         return response
-    
+
     async def on_cron_deliver(job: CronJob) -> None:
-        """提醒模式：直接发送静态消息，不经过 Agent。"""
+        """Remind mode: directly publish static message without agent processing."""
         if job.payload.deliver and job.payload.to and job.payload.message:
             from nanobot.bus.events import OutboundMessage
             await bus.publish_outbound(OutboundMessage(
@@ -418,7 +455,7 @@ def gateway(
                 chat_id=job.payload.to,
                 content=job.payload.message,
             ))
-    
+
     cron.on_job = on_cron_job
     cron.on_deliver = on_cron_deliver
     
@@ -437,13 +474,13 @@ def gateway(
     # Create channel manager
     channels = ChannelManager(config, bus, session_manager=session_manager)
     
-    # 定制：连接 Telegram 状态报告器（实时进度反馈 🤔→🔧→✅）
+    # 瀹氬埗锛氳繛鎺?Telegram 鐘舵€佹姤鍛婂櫒锛堝疄鏃惰繘搴﹀弽棣?馃鈫掟煍р啋鉁咃級
     if "telegram" in channels.channels:
         from nanobot.channels.telegram_reporter import TelegramStatusReporter
         tg_channel = channels.channels["telegram"]
         
         def _telegram_reporter_factory(channel: str, chat_id: str):
-            """创建 Telegram 状态报告器的工厂函数。"""
+            """Create Telegram status reporter for the current chat when available."""
             if channel == "telegram" and tg_channel._app and tg_channel._app.bot:
                 return TelegramStatusReporter(
                     bot=tg_channel._app.bot,
@@ -454,15 +491,15 @@ def gateway(
         agent.reporter_factory = _telegram_reporter_factory
     
     if channels.enabled_channels:
-        console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
+        console.print(f"[green]鉁揫/green] Channels enabled: {', '.join(channels.enabled_channels)}")
     else:
         console.print("[yellow]Warning: No channels enabled[/yellow]")
     
     cron_status = cron.status()
     if cron_status["jobs"] > 0:
-        console.print(f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs")
+        console.print(f"[green]鉁揫/green] Cron: {cron_status['jobs']} scheduled jobs")
     
-    console.print(f"[green]✓[/green] Heartbeat: every 30m")
+    console.print(f"[green]鉁揫/green] Heartbeat: every 30m")
     
     async def run():
         try:
@@ -479,7 +516,7 @@ def gateway(
             agent.stop()
             await channels.stop_all()
     
-    asyncio.run(run())
+    _run_async(run())
 
 
 
@@ -535,7 +572,7 @@ def agent(
                 response = await agent_loop.process_direct(message, session_id)
             _print_agent_response(response, render_markdown=markdown)
         
-        asyncio.run(run_once())
+        _run_async(run_once())
     else:
         # Interactive mode
         _enable_line_editing()
@@ -580,7 +617,7 @@ def agent(
                     console.print("\nGoodbye!")
                     break
         
-        asyncio.run(run_interactive())
+        _run_async(run_interactive())
 
 
 # ============================================================================
@@ -608,14 +645,14 @@ def channels_status():
     wa = config.channels.whatsapp
     table.add_row(
         "WhatsApp",
-        "✓" if wa.enabled else "✗",
+        "yes" if wa.enabled else "no",
         wa.bridge_url
     )
 
     dc = config.channels.discord
     table.add_row(
         "Discord",
-        "✓" if dc.enabled else "✗",
+        "yes" if dc.enabled else "no",
         dc.gateway_url
     )
 
@@ -624,7 +661,7 @@ def channels_status():
     fs_config = f"app_id: {fs.app_id[:10]}..." if fs.app_id else "[dim]not configured[/dim]"
     table.add_row(
         "Feishu",
-        "✓" if fs.enabled else "✗",
+        "yes" if fs.enabled else "no",
         fs_config
     )
 
@@ -633,7 +670,7 @@ def channels_status():
     mc_base = mc.base_url or "[dim]not configured[/dim]"
     table.add_row(
         "Mochat",
-        "✓" if mc.enabled else "✗",
+        "yes" if mc.enabled else "no",
         mc_base
     )
     
@@ -642,7 +679,7 @@ def channels_status():
     tg_config = f"token: {tg.token[:10]}..." if tg.token else "[dim]not configured[/dim]"
     table.add_row(
         "Telegram",
-        "✓" if tg.enabled else "✗",
+        "yes" if tg.enabled else "no",
         tg_config
     )
 
@@ -651,7 +688,7 @@ def channels_status():
     slack_config = "socket" if slack.app_token and slack.bot_token else "[dim]not configured[/dim]"
     table.add_row(
         "Slack",
-        "✓" if slack.enabled else "✗",
+        "yes" if slack.enabled else "no",
         slack_config
     )
 
@@ -706,7 +743,7 @@ def _get_bridge_dir() -> Path:
         console.print("  Building...")
         subprocess.run(["npm", "run", "build"], cwd=user_bridge, check=True, capture_output=True)
         
-        console.print("[green]✓[/green] Bridge ready\n")
+        console.print("[green]鉁揫/green] Bridge ready\n")
     except subprocess.CalledProcessError as e:
         console.print(f"[red]Build failed: {e}[/red]")
         if e.stderr:
@@ -812,7 +849,11 @@ def cron_add(
         schedule = CronSchedule(kind="cron", expr=cron_expr)
     elif at:
         import datetime
-        dt = datetime.datetime.fromisoformat(at)
+        try:
+            dt = datetime.datetime.fromisoformat(at)
+        except ValueError:
+            console.print("[red]Error: --at must be ISO datetime, e.g. 2026-02-16T09:00:00[/red]")
+            raise typer.Exit(1)
         schedule = CronSchedule(kind="at", at_ms=int(dt.timestamp() * 1000))
     else:
         console.print("[red]Error: Must specify --every, --cron, or --at[/red]")
@@ -821,16 +862,20 @@ def cron_add(
     store_path = get_data_dir() / "cron" / "jobs.json"
     service = CronService(store_path)
     
-    job = service.add_job(
-        name=name,
-        schedule=schedule,
-        message=message,
-        deliver=deliver,
-        to=to,
-        channel=channel,
-    )
+    try:
+        job = service.add_job(
+            name=name,
+            schedule=schedule,
+            message=message,
+            deliver=deliver,
+            to=to,
+            channel=channel,
+        )
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
     
-    console.print(f"[green]✓[/green] Added job '{job.name}' ({job.id})")
+    console.print(f"[green]鉁揫/green] Added job '{job.name}' ({job.id})")
 
 
 @cron_app.command("remove")
@@ -845,7 +890,7 @@ def cron_remove(
     service = CronService(store_path)
     
     if service.remove_job(job_id):
-        console.print(f"[green]✓[/green] Removed job {job_id}")
+        console.print(f"[green]鉁揫/green] Removed job {job_id}")
     else:
         console.print(f"[red]Job {job_id} not found[/red]")
 
@@ -865,7 +910,7 @@ def cron_enable(
     job = service.enable_job(job_id, enabled=not disable)
     if job:
         status = "disabled" if disable else "enabled"
-        console.print(f"[green]✓[/green] Job '{job.name}' {status}")
+        console.print(f"[green]鉁揫/green] Job '{job.name}' {status}")
     else:
         console.print(f"[red]Job {job_id} not found[/red]")
 
@@ -885,8 +930,8 @@ def cron_run(
     async def run():
         return await service.run_job(job_id, force=force)
     
-    if asyncio.run(run()):
-        console.print(f"[green]✓[/green] Job executed")
+    if _run_async(run()):
+        console.print(f"[green]鉁揫/green] Job executed")
     else:
         console.print(f"[red]Failed to run job {job_id}[/red]")
 
@@ -907,8 +952,8 @@ def status():
 
     console.print(f"{__logo__} nanobot Status\n")
 
-    console.print(f"Config: {config_path} {'[green]✓[/green]' if config_path.exists() else '[red]✗[/red]'}")
-    console.print(f"Workspace: {workspace} {'[green]✓[/green]' if workspace.exists() else '[red]✗[/red]'}")
+    console.print(f"Config: {config_path} {'[green]鉁揫/green]' if config_path.exists() else '[red]鉁梉/red]'}")
+    console.print(f"Workspace: {workspace} {'[green]鉁揫/green]' if workspace.exists() else '[red]鉁梉/red]'}")
 
     if config_path.exists():
         from nanobot.providers.registry import PROVIDERS
@@ -923,12 +968,12 @@ def status():
             if spec.is_local:
                 # Local deployments show api_base instead of api_key
                 if p.api_base:
-                    console.print(f"{spec.label}: [green]✓ {p.api_base}[/green]")
+                    console.print(f"{spec.label}: [green]鉁?{p.api_base}[/green]")
                 else:
                     console.print(f"{spec.label}: [dim]not set[/dim]")
             else:
                 has_key = bool(p.api_key)
-                console.print(f"{spec.label}: {'[green]✓[/green]' if has_key else '[dim]not set[/dim]'}")
+                console.print(f"{spec.label}: {'[green]鉁揫/green]' if has_key else '[dim]not set[/dim]'}")
 
 
 if __name__ == "__main__":
