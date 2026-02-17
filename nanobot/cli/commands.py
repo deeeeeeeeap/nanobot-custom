@@ -406,6 +406,7 @@ def gateway(
         max_iterations=config.agents.defaults.max_tool_iterations,
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
+        search_config=config.search,
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         session_manager=session_manager,
@@ -555,6 +556,7 @@ def agent(
         workspace=config.workspace_path,
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
+        search_config=config.search,
         restrict_to_workspace=config.tools.restrict_to_workspace,
     )
     
@@ -934,6 +936,320 @@ def cron_run(
         console.print("[green]OK[/green] Job executed")
     else:
         console.print(f"[red]Failed to run job {job_id}[/red]")
+
+
+# ============================================================================
+# Search Commands
+# ============================================================================
+
+search_app = typer.Typer(help="Manage local knowledge search")
+app.add_typer(search_app, name="search")
+
+
+def _search_db_path(config) -> Path:
+    if config.search.db_path:
+        return Path(config.search.db_path).expanduser()
+    return config.workspace_path / "search" / "index.sqlite"
+
+
+def _open_search_store(config):
+    from nanobot.search.store import SearchStore
+
+    db_path = _search_db_path(config)
+    try:
+        return SearchStore(db_path)
+    except OSError as e:
+        console.print(f"[red]Failed to open search DB at {db_path}: {e}[/red]")
+        raise typer.Exit(1) from e
+
+
+def _merge_hybrid_results(bm25_results, vector_results, limit: int):
+    from nanobot.search.store import SearchResult
+
+    merged: dict[str, dict[str, SearchResult | None]] = {}
+    for item in bm25_results:
+        merged.setdefault(item.filepath, {"bm25": None, "vector": None})["bm25"] = item
+    for item in vector_results:
+        merged.setdefault(item.filepath, {"bm25": None, "vector": None})["vector"] = item
+
+    out = []
+    for entry in merged.values():
+        bm = entry["bm25"]
+        vec = entry["vector"]
+        if bm and vec:
+            score = (bm.score * 0.45) + (vec.score * 0.55)
+            base = vec if vec.score >= bm.score else bm
+            out.append(
+                SearchResult(
+                    filepath=base.filepath,
+                    display_path=base.display_path,
+                    title=base.title,
+                    hash=base.hash,
+                    docid=base.docid,
+                    collection=base.collection,
+                    modified_at=base.modified_at,
+                    body_length=base.body_length,
+                    snippet=base.snippet,
+                    score=score,
+                    source="hybrid",
+                )
+            )
+        elif bm:
+            out.append(bm)
+        elif vec:
+            out.append(vec)
+
+    out.sort(key=lambda x: x.score, reverse=True)
+    return out[:limit]
+
+
+@search_app.command("status")
+def search_status():
+    """Show local search index status."""
+    from nanobot.config.loader import load_config
+    config = load_config()
+    if not config.search.enabled:
+        console.print("[yellow]Search is disabled in config.search.enabled[/yellow]")
+        return
+
+    store = _open_search_store(config)
+    try:
+        status = store.get_status()
+    finally:
+        store.close()
+
+    console.print("Search Status\n")
+    console.print(f"DB: {status['db_path']}")
+    console.print(f"Documents: {status['active_documents']}/{status['total_documents']} active")
+    console.print(f"Content blobs: {status['content_blobs']}")
+    console.print(f"FTS rows: {status['fts_rows']}")
+    console.print(f"Vector enabled: {config.search.vector_enabled}")
+    console.print(f"Embedding model: {config.search.embedding_model}")
+    console.print(f"Vector chunks: {status['vector_chunks']}")
+    if status["collections"]:
+        table = Table(title="Collections")
+        table.add_column("Name", style="cyan")
+        table.add_column("Active", style="green")
+        table.add_column("Total", style="yellow")
+        for item in status["collections"]:
+            table.add_row(item["name"], str(item["active"]), str(item["total"]))
+        console.print(table)
+    if status["vector_models"]:
+        table = Table(title="Vector Models")
+        table.add_column("Model", style="cyan")
+        table.add_column("Chunks", style="green")
+        table.add_column("Documents", style="yellow")
+        for item in status["vector_models"]:
+            table.add_row(item["model"], str(item["chunks"]), str(item["documents"]))
+        console.print(table)
+
+
+@search_app.command("reindex")
+def search_reindex(
+    directory: list[str] | None = typer.Option(None, "--dir", "-d", help="Directory to index (repeatable)"),
+    collection: str = typer.Option("memory", "--collection", "-c", help="Collection name"),
+    pattern: str = typer.Option("**/*.md", "--pattern", "-p", help="Glob pattern"),
+):
+    """Rebuild local search index."""
+    from nanobot.config.loader import load_config
+    from nanobot.search.indexer import Indexer
+    config = load_config()
+    if not config.search.enabled:
+        console.print("[yellow]Search is disabled in config.search.enabled[/yellow]")
+        raise typer.Exit(1)
+
+    targets = directory if directory else config.search.index_dirs
+    dirs = [Path(d).expanduser() if Path(d).is_absolute() else (config.workspace_path / d) for d in targets]
+
+    store = _open_search_store(config)
+    try:
+        indexer = Indexer(store=store, workspace=config.workspace_path)
+        result = indexer.full_index(directories=dirs, collection=collection, pattern=pattern)
+    finally:
+        store.close()
+
+    console.print(
+        "[green]OK[/green] Reindex complete "
+        f"(indexed={result['indexed']}, updated={result['updated']}, unchanged={result['unchanged']}, "
+        f"removed={result['removed']}, skipped={result['skipped']})"
+    )
+
+
+@search_app.command("query")
+def search_query(
+    query: str = typer.Argument(..., help="Search query"),
+    limit: int = typer.Option(None, "--limit", "-l", help="Max results"),
+    collection: str = typer.Option(None, "--collection", "-c", help="Optional collection filter"),
+    semantic: bool | None = typer.Option(
+        None,
+        "--semantic/--no-semantic",
+        help="Use semantic/hybrid search when embeddings are available",
+    ),
+):
+    """Query local search index."""
+    from nanobot.config.loader import load_config
+    from nanobot.search.embedder import SentenceTransformerEmbedder
+
+    config = load_config()
+    if not config.search.enabled:
+        console.print("[yellow]Search is disabled in config.search.enabled[/yellow]")
+        raise typer.Exit(1)
+
+    use_limit = limit or config.search.default_limit
+    use_semantic = config.search.vector_enabled if semantic is None else semantic
+    store = _open_search_store(config)
+    try:
+        bm25_results = store.search(
+            query=query,
+            limit=use_limit,
+            min_score=config.search.min_score,
+            collection=collection,
+        )
+        results = bm25_results
+        mode = "bm25"
+        if use_semantic:
+            embedder = None
+            try:
+                embedder = SentenceTransformerEmbedder(config.search.embedding_model)
+            except RuntimeError as e:
+                console.print(f"[yellow]Semantic disabled ({e}); using BM25 only.[/yellow]")
+
+            if embedder is not None:
+                vector_results = store.search_vector(
+                    embedder.embed_query(query),
+                    model=config.search.embedding_model,
+                    limit=use_limit,
+                    min_score=config.search.min_score,
+                    collection=collection,
+                )
+                if bm25_results and vector_results:
+                    results = _merge_hybrid_results(bm25_results, vector_results, use_limit)
+                    mode = "hybrid"
+                elif vector_results:
+                    results = vector_results
+                    mode = "vector"
+    finally:
+        store.close()
+
+    if not results:
+        console.print("No results.")
+        return
+
+    table = Table(title=f"Search Results ({len(results)})")
+    table.caption = f"mode={mode}"
+    table.add_column("Score", style="green")
+    table.add_column("Source", style="magenta")
+    table.add_column("Path", style="cyan")
+    table.add_column("Title", style="yellow")
+    table.add_column("Snippet")
+    for item in results:
+        table.add_row(
+            f"{item.score:.3f}",
+            item.source,
+            item.display_path,
+            item.title,
+            item.snippet,
+        )
+    console.print(table)
+
+
+@search_app.command("embed")
+def search_embed(
+    directory: list[str] | None = typer.Option(None, "--dir", "-d", help="Directory to index (repeatable)"),
+    collection: str = typer.Option("memory", "--collection", "-c", help="Collection name"),
+    pattern: str = typer.Option("**/*.md", "--pattern", "-p", help="Glob pattern"),
+    model: str | None = typer.Option(None, "--model", help="Embedding model name"),
+    force: bool = typer.Option(False, "--force", help="Re-embed even if vectors already exist"),
+    reindex: bool = typer.Option(True, "--reindex/--no-reindex", help="Run full text reindex before embedding"),
+    persist: bool = typer.Option(
+        True, "--persist/--no-persist", help="Persist vector settings to config"
+    ),
+    batch_size: int | None = typer.Option(None, "--batch-size", help="Embedding batch size"),
+    chunk_size: int | None = typer.Option(None, "--chunk-size", help="Chunk size in words"),
+    chunk_overlap: float | None = typer.Option(None, "--chunk-overlap", help="Chunk overlap ratio (0-0.5)"),
+):
+    """Enable and build semantic vector search embeddings."""
+    from nanobot.config.loader import load_config, save_config
+    from nanobot.exceptions import ConfigError
+    from nanobot.search.embedder import SentenceTransformerEmbedder
+    from nanobot.search.indexer import Indexer
+
+    config = load_config()
+    if not config.search.enabled:
+        console.print("[yellow]Search is disabled in config.search.enabled[/yellow]")
+        raise typer.Exit(1)
+
+    embedding_model = model or config.search.embedding_model
+    use_batch_size = batch_size or config.search.embedding_batch_size
+    use_chunk_size = chunk_size or config.search.embedding_chunk_size
+    use_chunk_overlap = (
+        config.search.embedding_chunk_overlap if chunk_overlap is None else chunk_overlap
+    )
+    if use_batch_size < 1:
+        console.print("[red]--batch-size must be >= 1[/red]")
+        raise typer.Exit(1)
+    if use_chunk_size < 100:
+        console.print("[red]--chunk-size must be >= 100[/red]")
+        raise typer.Exit(1)
+    if not (0.0 <= use_chunk_overlap <= 0.5):
+        console.print("[red]--chunk-overlap must be between 0.0 and 0.5[/red]")
+        raise typer.Exit(1)
+
+    targets = directory if directory else config.search.index_dirs
+    dirs = [Path(d).expanduser() if Path(d).is_absolute() else (config.workspace_path / d) for d in targets]
+
+    store = _open_search_store(config)
+    try:
+        indexer = Indexer(store=store, workspace=config.workspace_path)
+        index_stats = None
+        if reindex:
+            index_stats = indexer.full_index(directories=dirs, collection=collection, pattern=pattern)
+
+        try:
+            embedder = SentenceTransformerEmbedder(embedding_model)
+        except RuntimeError as e:
+            console.print(f"[red]{e}[/red]")
+            console.print("[yellow]Install it with: pip install sentence-transformers[/yellow]")
+            raise typer.Exit(1) from e
+
+        embed_stats = indexer.embed_documents(
+            embedder=embedder,
+            collection=collection,
+            force=force,
+            chunk_size=use_chunk_size,
+            chunk_overlap=use_chunk_overlap,
+            batch_size=use_batch_size,
+        )
+        status = store.get_status()
+    finally:
+        store.close()
+
+    if persist:
+        config.search.vector_enabled = True
+        config.search.embedding_model = embedding_model
+        config.search.embedding_batch_size = use_batch_size
+        config.search.embedding_chunk_size = use_chunk_size
+        config.search.embedding_chunk_overlap = use_chunk_overlap
+        try:
+            save_config(config)
+        except ConfigError as e:
+            console.print(f"[yellow]Embedding built, but failed to persist config: {e}[/yellow]")
+
+    console.print("[green]OK[/green] Semantic embeddings complete")
+    console.print(f"Model: {embedding_model}")
+    if index_stats is not None:
+        console.print(
+            "Reindex: "
+            f"indexed={index_stats['indexed']}, updated={index_stats['updated']}, "
+            f"unchanged={index_stats['unchanged']}, removed={index_stats['removed']}, "
+            f"skipped={index_stats['skipped']}"
+        )
+    console.print(
+        "Embed: "
+        f"docs={embed_stats['docs_embedded']}/{embed_stats['docs_considered']}, "
+        f"chunks={embed_stats['chunks_embedded']}, skipped={embed_stats['docs_skipped']}"
+    )
+    console.print(f"Vector chunks in DB: {status['vector_chunks']}")
 
 
 # ============================================================================

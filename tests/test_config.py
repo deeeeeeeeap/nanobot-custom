@@ -61,3 +61,17 @@ def test_load_config_accepts_valid_config(tmp_path) -> None:
     config = load_config(config_path)
     assert config.channels.telegram.enabled is True
     assert config.channels.telegram.token == "abc123"
+
+
+def test_search_config_defaults_and_validation() -> None:
+    cfg = Config()
+    assert cfg.search.enabled is True
+    assert cfg.search.index_dirs == ["memory"]
+    assert cfg.search.vector_enabled is False
+
+    with pytest.raises(ValidationError):
+        Config.model_validate({"search": {"default_limit": 0}})
+    with pytest.raises(ValidationError):
+        Config.model_validate({"search": {"embedding_chunk_overlap": 0.9}})
+    with pytest.raises(ValidationError):
+        Config.model_validate({"search": {"embedding_batch_size": 0}})

@@ -5,7 +5,7 @@
   <p>
     <img src="https://img.shields.io/badge/python-≥3.11-blue" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
-    <img src="https://img.shields.io/badge/core-~4000_lines-orange" alt="Core">
+    <img src="https://img.shields.io/badge/core-~5000_lines-orange" alt="Core">
     <img src="https://img.shields.io/badge/channels-8-blueviolet" alt="Channels">
   </p>
 </div>
@@ -34,6 +34,7 @@
 - 🔗 **URL 真实性验证** — 模型给出的链接也要查验
 - 📊 **实时状态反馈** — 🤔→🔧→✅ 执行进度一目了然
 - 🧠 **双层记忆** — 长期事实 + 事件日志，跨会话永久记忆
+- 🔎 **知识搜索** — BM25 全文检索 + 可选语义向量搜索
 
 </td>
 </tr>
@@ -70,6 +71,7 @@ cd /opt/nanobot
 apt install pipx -y && pipx ensurepath && source ~/.bashrc
 pipx install -e . --force
 pip install croniter --break-system-packages  # 定时任务依赖
+pip install sentence-transformers --break-system-packages  # 语义搜索（可选）
 ```
 
 ### 2. 初始化
@@ -216,16 +218,30 @@ cd /opt/nanobot && git pull && systemctl restart nanobot
 
 自动解析 Antigravity 的 `{"raw": "..."}` 工具参数格式为标准格式，确保所有工具调用正常工作。
 
-### 双层记忆系统
+### 双层记忆 + 知识搜索
 
 ```
-MEMORY.md  — 长期事实，始终加载到上下文（用户偏好、项目信息、习惯）
-HISTORY.md — 事件日志，通过 grep 按关键词搜索历史
+MEMORY.md    — 长期事实，始终加载到上下文（用户偏好、项目信息、习惯）
+HISTORY.md   — 事件日志，通过 grep 按关键词搜索历史
+index.sqlite — 本地 FTS5 全文索引，BM25 关键词检索
 ```
 
 - 会话超过 50 条消息时自动整合（LLM 分析对话 → 提取事实 → 归档事件）
 - `/new` 命令主动触发整合后清空会话
 - 跨会话持久记忆，重启不丢失
+- 🔎 **内置搜索引擎**（Python 原生 SQLite FTS5，零外部依赖）
+  - 启动时自动索引记忆文件，写入/修改后增量更新
+  - Agent 调用 `knowledge_search` 工具搜索历史知识
+  - 默认 BM25 关键词模式，可通过 `nanobot search embed` 激活语义向量搜索
+
+#### CLI 搜索命令
+
+```bash
+nanobot search status          # 查看索引状态
+nanobot search query "关键词"   # CLI 搜索测试
+nanobot search reindex          # 手动重建索引
+nanobot search embed            # 激活语义搜索（需安装 sentence-transformers）
+```
 
 ### 推特智能监控
 

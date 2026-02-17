@@ -16,3 +16,4 @@ docs/
 .venv/
 __pycache__/
 .coverage
+.nanobot/

@@ -309,6 +309,22 @@ class ToolsConfig(BaseModel):
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
 
 
+class SearchConfig(BaseModel):
+    """Built-in local search configuration."""
+
+    enabled: bool = True
+    db_path: str = ""  # Empty means workspace/search/index.sqlite
+    default_limit: int = Field(default=5, ge=1, le=50)
+    min_score: float = Field(default=0.1, ge=0.0, le=1.0)
+    auto_index: bool = True
+    index_dirs: list[str] = Field(default_factory=lambda: ["memory"])
+    vector_enabled: bool = False
+    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    embedding_batch_size: int = Field(default=32, ge=1, le=512)
+    embedding_chunk_size: int = Field(default=900, ge=100, le=4000)
+    embedding_chunk_overlap: float = Field(default=0.15, ge=0.0, le=0.5)
+
+
 class Config(BaseSettings):
     """Root configuration for nanobot."""
     model_config = SettingsConfigDict(
@@ -321,6 +337,7 @@ class Config(BaseSettings):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    search: SearchConfig = Field(default_factory=SearchConfig)
     
     @property
     def workspace_path(self) -> Path:

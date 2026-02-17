@@ -23,7 +23,7 @@ from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.memory_tool import MemoryTool
 from nanobot.agent.subagent import SubagentManager
 from nanobot.config.loader import load_config, save_config
-from nanobot.config.schema import ExecToolConfig
+from nanobot.config.schema import ExecToolConfig, SearchConfig
 from nanobot.cron.service import CronService
 from nanobot.exceptions import ConfigError, NanobotError
 from nanobot.session.manager import SessionManager
@@ -96,6 +96,7 @@ class AgentLoop:
         memory_window: int = 50,
         brave_api_key: str | None = None,
         exec_config: ExecToolConfig | None = None,
+        search_config: SearchConfig | None = None,
         cron_service: CronService | None = None,
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
@@ -109,9 +110,13 @@ class AgentLoop:
         self.memory_window = memory_window
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
+        self.search_config = search_config
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
         self.reporter_factory = reporter_factory  # Optional status reporter factory.
+        self.search_store = None
+        self.search_indexer = None
+        self.search_embedder = None
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -156,10 +161,56 @@ class AgentLoop:
         self.tools.register(spawn_tool)
 
         # Memory management tool.
-        self.tools.register(MemoryTool(
+        memory_tool = MemoryTool(
             memory_store=self.context.memory,
             workspace=self.workspace,
-        ))
+        )
+        self.tools.register(memory_tool)
+
+        if self.search_config and self.search_config.enabled:
+            from nanobot.agent.tools.knowledge_search import KnowledgeSearchTool
+            from nanobot.search.embedder import SentenceTransformerEmbedder
+            from nanobot.search.indexer import Indexer
+            from nanobot.search.store import SearchStore
+
+            db_path = (
+                Path(self.search_config.db_path).expanduser()
+                if self.search_config.db_path
+                else self.workspace / "search" / "index.sqlite"
+            )
+            self.search_store = SearchStore(db_path)
+            self.search_indexer = Indexer(self.search_store, self.workspace)
+            if self.search_config.auto_index:
+                self.search_indexer.auto_index_on_startup(self.search_config.index_dirs)
+            if self.search_config.vector_enabled:
+                try:
+                    self.search_embedder = SentenceTransformerEmbedder(
+                        self.search_config.embedding_model
+                    )
+                    embed_stats = self.search_indexer.embed_documents(
+                        embedder=self.search_embedder,
+                        force=False,
+                        chunk_size=self.search_config.embedding_chunk_size,
+                        chunk_overlap=self.search_config.embedding_chunk_overlap,
+                        batch_size=self.search_config.embedding_batch_size,
+                    )
+                    if embed_stats["docs_embedded"] > 0:
+                        logger.info(
+                            "Semantic embeddings updated: "
+                            f"{embed_stats['docs_embedded']} docs / {embed_stats['chunks_embedded']} chunks"
+                        )
+                except RuntimeError as e:
+                    logger.warning(f"Semantic search disabled: {e}")
+                except Exception as e:
+                    logger.warning(f"Semantic embedding bootstrap failed: {e}")
+            memory_tool.set_indexer(self.search_indexer)
+            self.tools.register(
+                KnowledgeSearchTool(
+                    store=self.search_store,
+                    config=self.search_config,
+                    embedder=self.search_embedder,
+                )
+            )
 
         # Scheduled-task tool.
         if self.cron_service:
@@ -217,6 +268,8 @@ class AgentLoop:
     def stop(self) -> None:
         """Stop the agent loop."""
         self._running = False
+        if self.search_store is not None:
+            self.search_store.close()
         logger.info("Agent loop stopping")
 
     def _update_provider_env(self, model: str, api_key: str | None, api_base: str | None) -> None:

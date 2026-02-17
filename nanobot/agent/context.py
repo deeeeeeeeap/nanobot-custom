@@ -49,6 +49,13 @@ class ContextBuilder:
         memory = self.memory.get_memory_context()
         if memory:
             parts.append(f"# Memory\n\n{memory}")
+
+        parts.append(
+            "# Built-in Knowledge Search\n\n"
+            "- `knowledge_search`: BM25 keyword search over indexed workspace knowledge.\n"
+            "- Use it first when asked about historical details or prior documents.\n"
+            "- If the user asks what was discussed before, call `knowledge_search` before answering."
+        )
         
         # Skills - progressive loading
         # 1. Always-loaded skills: include full content
