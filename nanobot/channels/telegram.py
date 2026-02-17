@@ -143,6 +143,9 @@ class TelegramChannel(BaseChannel):
         
         # Add /clear command handler
         self._app.add_handler(CommandHandler("clear", self._on_clear))
+
+        # Add /new command handler (forward to agent loop slash-command handler)
+        self._app.add_handler(CommandHandler("new", self._on_new))
         
         # Add /help command handler
         self._app.add_handler(CommandHandler("help", self._on_help))
@@ -255,6 +258,7 @@ class TelegramChannel(BaseChannel):
             "<b>Basic</b>\n"
             "/start - start using bot\n"
             "/help - show this help\n"
+            "/new - start a new session and consolidate memory\n"
             "/clear - clear current session\n\n"
             "<b>Model</b>\n"
             "/model - show current model/providers\n"
@@ -367,6 +371,32 @@ class TelegramChannel(BaseChannel):
         except (ConfigError, ValueError, OSError, RuntimeError) as e:
             logger.error(f"Error handling /clear command: {e}")
             await update.message.reply_text(f"Clear failed: {e}")
+
+    async def _on_new(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /new command by forwarding to the core agent slash-command path."""
+        if not update.message or not update.effective_user:
+            return
+
+        user = update.effective_user
+        sender_id = str(user.id)
+        if user.username:
+            sender_id = f"{sender_id}|{user.username}"
+
+        chat_id = str(update.message.chat_id)
+        self._chat_ids[sender_id] = update.message.chat_id
+
+        await self._handle_message(
+            sender_id=sender_id,
+            chat_id=chat_id,
+            content="/new",
+            metadata={
+                "message_id": update.message.message_id,
+                "user_id": user.id,
+                "username": user.username,
+                "first_name": user.first_name,
+                "is_group": update.message.chat.type != "private",
+            },
+        )
 
     async def _on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming messages (text, photos, voice, documents)."""
