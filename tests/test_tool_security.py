@@ -11,9 +11,9 @@ async def test_exec_tool_blocks_command_injection_pattern() -> None:
     assert "command injection pattern" in result.lower()
 
 
-async def test_exec_blocks_rm_rf() -> None:
+async def test_exec_blocks_mkfs() -> None:
     tool = ExecTool()
-    result = await tool.execute("rm -rf /")
+    result = await tool.execute("mkfs.ext4 /dev/sda1")
     assert "dangerous pattern" in result.lower()
 
 
