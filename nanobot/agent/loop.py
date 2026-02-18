@@ -23,9 +23,13 @@ from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.memory_tool import MemoryTool
 from nanobot.agent.subagent import SubagentManager
 from nanobot.config.loader import load_config, save_config
-from nanobot.config.schema import ExecToolConfig, SearchConfig
+from nanobot.config.schema import ExecToolConfig, MemoryConfig, SearchConfig
 from nanobot.cron.service import CronService
 from nanobot.exceptions import ConfigError, NanobotError
+from nanobot.memory.compressor import SessionCompressor
+from nanobot.memory.deduplicator import MemoryDeduplicator
+from nanobot.memory.extractor import MemoryExtractor
+from nanobot.memory.models import CompressionResult
 from nanobot.session.manager import SessionManager
 from nanobot.config.model_capabilities import supports_function_calling
 from nanobot.agent.hallucination_detector import (
@@ -97,6 +101,7 @@ class AgentLoop:
         brave_api_key: str | None = None,
         exec_config: ExecToolConfig | None = None,
         search_config: SearchConfig | None = None,
+        memory_config: MemoryConfig | None = None,
         cron_service: CronService | None = None,
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
@@ -111,12 +116,15 @@ class AgentLoop:
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
         self.search_config = search_config
+        self.memory_config = memory_config or MemoryConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
         self.reporter_factory = reporter_factory  # Optional status reporter factory.
         self.search_store = None
         self.search_indexer = None
         self.search_embedder = None
+        self.memory_compressor: SessionCompressor | None = None
+        self._compression_tasks: set[asyncio.Task] = set()
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -211,10 +219,42 @@ class AgentLoop:
                     embedder=self.search_embedder,
                 )
             )
+        self._setup_memory_compressor()
 
         # Scheduled-task tool.
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
+
+    def _setup_memory_compressor(self) -> None:
+        """Initialize structured session compressor based on memory settings."""
+        if not self.memory_config.enabled:
+            self.memory_compressor = None
+            return
+        dedup = MemoryDeduplicator(
+            store=self.search_store,
+            provider=self.provider,
+            model=self.model,
+            search_config=self.search_config,
+            embedder=self.search_embedder,
+            min_score=self.memory_config.dedup_min_score,
+            output_language=self.memory_config.output_language,
+        )
+        extractor = MemoryExtractor(
+            provider=self.provider,
+            workspace=self.workspace,
+            model=self.model,
+            output_language=self.memory_config.output_language,
+        )
+        self.memory_compressor = SessionCompressor(
+            extractor=extractor,
+            deduplicator=dedup,
+            memory_store=self.context.memory,
+            provider=self.provider,
+            model=self.model,
+            indexer=self.search_indexer,
+            max_memories_per_category=self.memory_config.max_memories_per_category,
+            output_language=self.memory_config.output_language,
+        )
 
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
@@ -274,6 +314,8 @@ class AgentLoop:
     def stop(self) -> None:
         """Stop the agent loop."""
         self._running = False
+        for task in list(self._compression_tasks):
+            task.cancel()
         if self.search_store is not None:
             self.search_store.close()
         logger.info("Agent loop stopping")
@@ -344,6 +386,7 @@ class AgentLoop:
                 api_key = current_config.get_api_key(current_model)
                 api_base = current_config.get_api_base(current_model)
                 self._update_provider_env(current_model, api_key, api_base)
+                self._setup_memory_compressor()
         except (ConfigError, ValueError, OSError) as e:
             logger.warning(f"Failed to reload config: {e}, using cached model")
 
@@ -356,18 +399,19 @@ class AgentLoop:
         cmd = raw_cmd.lower()
         if cmd == "/new":
             msg_count = len(session.messages)
-            result = await self._consolidate_memory(session, archive_all=True)
+            result = await self._compress_session_for_new(session)
             session.clear()
             self.sessions.save(session)
-            if result and result.get("success"):
+            if result is not None:
                 parts = ["已开始新会话。"]
-                parts.append(f"- 已归档消息数: {result.get('archived', 0)}")
-                if result.get("memory_updated"):
-                    parts.append("- 长期记忆: 已更新")
-                else:
-                    parts.append("- 长期记忆: 无变化")
-                if result.get("history_added"):
+                parts.append(f"- 已归档消息数: {msg_count}")
+                parts.append(
+                    f"- 记忆更新: created={result.created}, merged={result.merged}, skipped={result.skipped}"
+                )
+                if result.summary:
                     parts.append("- 历史记录: 已写入 HISTORY.md")
+                else:
+                    parts.append("- 历史记录: 无新增摘要")
                 feedback = "\n".join(parts)
             elif msg_count == 0:
                 feedback = "已开始新会话（原会话本来就是空的）。"
@@ -406,10 +450,6 @@ class AgentLoop:
                 "/help - 显示帮助"
             )
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=help_text)
-
-        # Auto-consolidate memory when the session grows beyond the window.
-        if len(session.messages) > self.memory_window:
-            await self._consolidate_memory(session)
 
         # Refresh per-channel tool context for this message.
         message_tool = self.tools.get("message")
@@ -577,6 +617,7 @@ class AgentLoop:
         session.add_message("user", msg.content)
         session.add_message("assistant", final_content,
                             tools_used=tools_used if tools_used else None)
+        self._maybe_schedule_session_compression(session)
         self.sessions.save(session)
 
         return OutboundMessage(
@@ -689,7 +730,8 @@ class AgentLoop:
             f"- 模型: {model}\n"
             f"- Function calling: {fc}\n"
             f"- 已注册工具: {tools}\n"
-            f"- 会话消息数: {len(session.messages)}"
+            f"- 会话消息数: {len(session.messages)}\n"
+            f"- 记忆自动压缩: {'开启' if self.memory_config.auto_compress else '关闭'}"
         )
 
     def _handle_model_command(self, raw_cmd: str) -> str:
@@ -731,6 +773,7 @@ class AgentLoop:
             config.get_api_key(new_model),
             config.get_api_base(new_model),
         )
+        self._setup_memory_compressor()
         fc = "已启用" if supports_function_calling(new_model) else "受限"
         return (
             "模型切换成功。\n\n"
@@ -738,6 +781,56 @@ class AgentLoop:
             f"- 新模型: {new_model}\n"
             f"- Function calling: {fc}"
         )
+
+    def _maybe_schedule_session_compression(self, session) -> None:
+        if (
+            self.memory_compressor is None
+            or not self.memory_config.auto_compress
+            or self.memory_config.compress_threshold <= 0
+        ):
+            return
+
+        current_count = len(session.messages)
+        last_count = int(session.metadata.get("last_compressed_count", 0))
+        if current_count < self.memory_config.compress_threshold:
+            return
+        if current_count - last_count < self.memory_config.compress_threshold:
+            return
+
+        task = asyncio.create_task(self._compress_session_background(session.key, current_count))
+        self._compression_tasks.add(task)
+        task.add_done_callback(self._compression_tasks.discard)
+
+    async def _compress_session_background(self, session_key: str, message_count: int) -> None:
+        session = self.sessions.get_or_create(session_key)
+        result = await self._compress_session_for_new(session)
+        if result is None:
+            return
+        session.metadata["last_compressed_count"] = message_count
+        self.sessions.save(session)
+        logger.info(
+            "记忆压缩完成: "
+            f"session={session_key}, created={result.created}, merged={result.merged}, skipped={result.skipped}"
+        )
+
+    async def _compress_session_for_new(self, session):
+        if not session.messages:
+            return None
+        if self.memory_compressor is None:
+            legacy = await self._consolidate_memory(session, archive_all=True)
+            if not legacy or not legacy.get("success"):
+                return None
+            return CompressionResult(
+                created=1 if legacy.get("memory_updated") else 0,
+                merged=0,
+                skipped=0,
+                summary="legacy",
+            )
+        try:
+            return await self.memory_compressor.compress(session.messages, session.key)
+        except Exception as e:
+            logger.error(f"记忆压缩失败: {e}")
+            return None
 
     async def _consolidate_memory(self, session, archive_all: bool = False) -> dict | None:
         """

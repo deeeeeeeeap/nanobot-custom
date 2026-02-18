@@ -1,4 +1,5 @@
-﻿from pathlib import Path
+﻿import asyncio
+from pathlib import Path
 from typing import Any
 
 from nanobot.agent.loop import AgentLoop, _is_lazy_response
@@ -88,31 +89,31 @@ async def test_new_command_returns_feedback(monkeypatch, tmp_path: Path) -> None
     session.add_message("assistant", "world")
     loop.sessions.save(session)
 
-    async def _ok_consolidate(session_obj, archive_all: bool = False):
-        assert archive_all is True
-        return {
-            "success": True,
-            "archived": len(session_obj.messages),
-            "memory_updated": True,
-            "history_added": True,
-        }
+    class _Result:
+        created = 1
+        merged = 1
+        skipped = 0
+        summary = "ok"
 
-    monkeypatch.setattr(loop, "_consolidate_memory", _ok_consolidate)
+    async def _ok_compress(session_obj):
+        return _Result()
+
+    monkeypatch.setattr(loop, "_compress_session_for_new", _ok_compress)
 
     reply = await loop.process_direct("/new", channel="telegram", chat_id="42")
     assert "已开始新会话。" in reply
     assert "- 已归档消息数: 2" in reply
-    assert "- 长期记忆: 已更新" in reply
+    assert "created=1, merged=1, skipped=0" in reply
     assert "- 历史记录: 已写入 HISTORY.md" in reply
 
 
 async def test_new_empty_session_feedback(monkeypatch, tmp_path: Path) -> None:
     loop = _make_loop(monkeypatch, tmp_path)
 
-    async def _no_consolidation(session_obj, archive_all: bool = False):
+    async def _no_consolidation(session_obj):
         return None
 
-    monkeypatch.setattr(loop, "_consolidate_memory", _no_consolidation)
+    monkeypatch.setattr(loop, "_compress_session_for_new", _no_consolidation)
 
     reply = await loop.process_direct("/new", channel="telegram", chat_id="empty")
     assert reply == "已开始新会话（原会话本来就是空的）。"
@@ -142,3 +143,18 @@ async def test_process_direct_uses_explicit_session_key(monkeypatch, tmp_path: P
     assert len(session_2.messages) == 2
     assert default_chat_session.messages == []
 
+
+async def test_auto_compress_background_trigger(monkeypatch, tmp_path: Path) -> None:
+    loop = _make_loop(monkeypatch, tmp_path)
+    loop.memory_config.compress_threshold = 2
+    loop.memory_config.auto_compress = True
+
+    called = {"value": False}
+
+    async def _fake_bg(session_key: str, message_count: int) -> None:
+        called["value"] = True
+
+    monkeypatch.setattr(loop, "_compress_session_background", _fake_bg)
+    await loop.process_direct("trigger", channel="telegram", chat_id="99")
+    await asyncio.sleep(0)
+    assert called["value"] is True

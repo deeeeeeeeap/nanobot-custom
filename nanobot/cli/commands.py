@@ -321,6 +321,10 @@ Information about the user goes here.
     # Create memory directory and MEMORY.md
     memory_dir = workspace / "memory"
     memory_dir.mkdir(exist_ok=True)
+    memories_dir = memory_dir / "memories"
+    memories_dir.mkdir(exist_ok=True)
+    for cat in ("preferences", "entities", "events", "cases", "patterns"):
+        (memories_dir / cat).mkdir(parents=True, exist_ok=True)
     memory_file = memory_dir / "MEMORY.md"
     if not memory_file.exists():
         memory_file.write_text("""# Long-term Memory
@@ -410,10 +414,12 @@ def gateway(
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
         search_config=config.search,
+        memory_config=config.memory,
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         session_manager=session_manager,
-    )    # Setup cron callbacks (agent mode and direct-delivery mode)
+    )
+    # Setup cron callbacks (agent mode and direct-delivery mode)
     async def on_cron_job(job: CronJob) -> str | None:
         """Agent mode: process scheduled job via AgentLoop."""
         from nanobot.bus.events import OutboundMessage
@@ -560,6 +566,7 @@ def agent(
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
         search_config=config.search,
+        memory_config=config.memory,
         restrict_to_workspace=config.tools.restrict_to_workspace,
     )
     
@@ -1253,6 +1260,169 @@ def search_embed(
         f"chunks={embed_stats['chunks_embedded']}, skipped={embed_stats['docs_skipped']}"
     )
     console.print(f"Vector chunks in DB: {status['vector_chunks']}")
+
+
+# ============================================================================
+# Memory Commands
+# ============================================================================
+
+memory_app = typer.Typer(help="Manage structured memories")
+app.add_typer(memory_app, name="memory")
+
+
+def _memory_root(config) -> Path:
+    return config.workspace_path / "memory" / "memories"
+
+
+@memory_app.command("status")
+def memory_status():
+    """Show structured memory status."""
+    from nanobot.config.loader import load_config
+
+    config = load_config()
+    root = _memory_root(config)
+    profile = root / "profile.md"
+
+    console.print("Memory Status\n")
+    console.print(f"Root: {root}")
+    console.print(f"Profile: {'exists' if profile.exists() else 'missing'}")
+
+    table = Table(title="Categories")
+    table.add_column("Category", style="cyan")
+    table.add_column("Count", style="green")
+    table.add_column("Last Updated", style="yellow")
+    for category in ("preferences", "entities", "events", "cases", "patterns"):
+        cat_dir = root / category
+        files = sorted((p for p in cat_dir.glob('*.md') if p.is_file()), key=lambda p: p.stat().st_mtime)
+        updated = "-" if not files else files[-1].stat().st_mtime
+        if updated == "-":
+            display = "-"
+        else:
+            import time
+
+            display = time.strftime("%Y-%m-%d %H:%M", time.localtime(updated))
+        table.add_row(category, str(len(files)), display)
+    console.print(table)
+
+
+@memory_app.command("list")
+def memory_list(
+    category: str | None = typer.Option(None, "--category", "-c", help="Category filter"),
+):
+    """List memories with L0 abstracts."""
+    from nanobot.config.loader import load_config
+
+    config = load_config()
+    root = _memory_root(config)
+    categories = [category] if category else ["preferences", "entities", "events", "cases", "patterns"]
+
+    rows: list[tuple[str, str, str]] = []
+    for cat in categories:
+        cat_dir = root / cat
+        if not cat_dir.exists():
+            continue
+        for fp in sorted(cat_dir.glob("*.md")):
+            try:
+                abstract = fp.read_text(encoding="utf-8").splitlines()[0].strip()
+            except (OSError, IndexError):
+                abstract = ""
+            rel = fp.relative_to(config.workspace_path).as_posix()
+            rows.append((cat, rel, abstract))
+
+    if not rows:
+        console.print("No memories found.")
+        return
+
+    table = Table(title="Memories")
+    table.add_column("Category", style="cyan")
+    table.add_column("Path", style="green")
+    table.add_column("Abstract")
+    for row in rows:
+        table.add_row(*row)
+    console.print(table)
+
+
+@memory_app.command("show")
+def memory_show(path: str = typer.Argument(..., help="Workspace-relative memory path")):
+    """Show full memory detail."""
+    from nanobot.config.loader import load_config
+    from nanobot.agent.memory import MemoryStore
+
+    config = load_config()
+    store = MemoryStore(config.workspace_path)
+    content = store.get_memory_detail(path)
+    if not content:
+        console.print(f"[red]Not found or not readable: {path}[/red]")
+        raise typer.Exit(1)
+    console.print(content)
+
+
+@memory_app.command("compress")
+def memory_compress(
+    session: str = typer.Option("cli:default", "--session", "-s", help="Session key"),
+):
+    """Run memory compression for one session immediately."""
+    from nanobot.config.loader import load_config
+    from nanobot.session.manager import SessionManager
+    from nanobot.agent.loop import AgentLoop
+    from nanobot.bus.queue import MessageBus
+
+    config = load_config()
+    sm = SessionManager(config.workspace_path)
+    target = sm.get_or_create(session)
+    if not target.messages:
+        console.print("[yellow]Session is empty, nothing to compress.[/yellow]")
+        return
+
+    provider = _make_provider(config)
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=config.workspace_path,
+        model=config.agents.defaults.model,
+        search_config=config.search,
+        memory_config=config.memory,
+        exec_config=config.tools.exec,
+    )
+
+    async def run():
+        return await loop._compress_session_for_new(target)
+
+    result = _run_async(run())
+    loop.stop()
+    if result is None:
+        console.print("[red]Compression failed.[/red]")
+        raise typer.Exit(1)
+    console.print(
+        f"[green]OK[/green] created={result.created}, merged={result.merged}, skipped={result.skipped}"
+    )
+
+
+@memory_app.command("clear")
+def memory_clear(
+    category: str | None = typer.Option(None, "--category", "-c", help="Category to clear"),
+):
+    """Clear structured memories by category or all categories."""
+    from nanobot.config.loader import load_config
+
+    config = load_config()
+    root = _memory_root(config)
+    categories = (
+        [category]
+        if category
+        else ["preferences", "entities", "events", "cases", "patterns"]
+    )
+
+    removed = 0
+    for cat in categories:
+        cat_dir = root / cat
+        if not cat_dir.exists():
+            continue
+        for fp in cat_dir.glob("*.md"):
+            if fp.is_file():
+                fp.unlink(missing_ok=True)
+                removed += 1
+    console.print(f"[green]OK[/green] removed {removed} memory files")
 
 
 # ============================================================================

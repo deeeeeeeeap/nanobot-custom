@@ -37,6 +37,7 @@ dependencies = [
     "slack-sdk>=3.26.0",
     "qq-botpy>=1.0.0",
     "python-socks[asyncio]>=2.4.0",
+    "Jinja2>=3.1.0",
 ]
 
 [project.optional-dependencies]
@@ -63,6 +64,7 @@ packages = ["nanobot"]
 [tool.hatch.build]
 include = [
     "nanobot/**/*.py",
+    "nanobot/prompts/templates/*.j2",
     "nanobot/skills/**/*.md",
     "nanobot/skills/**/*.sh",
 ]

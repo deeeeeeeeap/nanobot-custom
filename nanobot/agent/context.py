@@ -49,6 +49,9 @@ class ContextBuilder:
         memory = self.memory.get_memory_context()
         if memory:
             parts.append(f"# Memory\n\n{memory}")
+            parts.append(
+                "当需要某条记忆的完整细节时，优先使用 `knowledge_search` 或 `read_file` 读取具体路径。"
+            )
 
         parts.append(
             "# Built-in Knowledge Search\n\n"

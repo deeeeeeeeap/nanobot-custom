@@ -68,27 +68,34 @@ async def _roundtrip(loop: AgentLoop, bus: MessageBus, content: str) -> Outbound
         await asyncio.wait_for(run_task, timeout=3)
 
 
-async def test_new_triggers_consolidation(monkeypatch, tmp_path: Path) -> None:
+async def test_new_triggers_compression(monkeypatch, tmp_path: Path) -> None:
     loop, bus = _make_loop(monkeypatch, tmp_path)
     session = loop.sessions.get_or_create("telegram:c1")
     session.add_message("user", "hello")
     session.add_message("assistant", "world")
     loop.sessions.save(session)
 
-    calls: list[bool] = []
+    called = False
 
-    async def _ok_consolidate(session_obj, archive_all: bool = False):
-        calls.append(archive_all)
-        return {"success": True, "archived": 2, "memory_updated": True, "history_added": True}
+    class _Result:
+        created = 1
+        merged = 0
+        skipped = 0
+        summary = "ok"
 
-    monkeypatch.setattr(loop, "_consolidate_memory", _ok_consolidate)
+    async def _ok_compress(session_obj):
+        nonlocal called
+        called = True
+        return _Result()
+
+    monkeypatch.setattr(loop, "_compress_session_for_new", _ok_compress)
 
     outbound = await _roundtrip(loop, bus, "/new")
-    assert calls == [True]
+    assert called is True
     assert "已开始新会话。" in outbound.content
 
 
-async def test_clear_skips_consolidation(monkeypatch, tmp_path: Path) -> None:
+async def test_clear_skips_compression(monkeypatch, tmp_path: Path) -> None:
     loop, bus = _make_loop(monkeypatch, tmp_path)
     session = loop.sessions.get_or_create("telegram:c1")
     session.add_message("user", "hello")
@@ -96,12 +103,12 @@ async def test_clear_skips_consolidation(monkeypatch, tmp_path: Path) -> None:
 
     called = False
 
-    async def _should_not_run(session_obj, archive_all: bool = False):
+    async def _should_not_run(session_obj):
         nonlocal called
         called = True
-        return {"success": True}
+        return None
 
-    monkeypatch.setattr(loop, "_consolidate_memory", _should_not_run)
+    monkeypatch.setattr(loop, "_compress_session_for_new", _should_not_run)
 
     outbound = await _roundtrip(loop, bus, "/clear")
     assert called is False

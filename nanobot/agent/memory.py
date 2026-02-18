@@ -1,43 +1,99 @@
-"""Memory system for persistent agent memory."""
+﻿"""Memory system for persistent agent memory."""
+
+from __future__ import annotations
 
 from pathlib import Path
 
+from nanobot.memory.models import MemoryCategory
 from nanobot.utils.helpers import ensure_dir
 
 
 class MemoryStore:
-    """
-    双层记忆系统。
-    
-    - MEMORY.md: 长期事实（用户偏好、项目上下文、关键信息）。始终加载到上下文。
-    - HISTORY.md: 追加式事件日志（对话摘要）。不加载到上下文，通过 grep 检索。
-    """
-    
+    """Workspace-backed long-term memory and history store."""
+
+    INDEX_CATEGORIES = [
+        MemoryCategory.PREFERENCES,
+        MemoryCategory.ENTITIES,
+        MemoryCategory.EVENTS,
+        MemoryCategory.CASES,
+        MemoryCategory.PATTERNS,
+    ]
+
     def __init__(self, workspace: Path):
-        self.memory_dir = ensure_dir(workspace / "memory")
+        self.workspace = Path(workspace).expanduser()
+        self.memory_dir = ensure_dir(self.workspace / "memory")
         self.memory_file = self.memory_dir / "MEMORY.md"
         self.history_file = self.memory_dir / "HISTORY.md"
-    
+        self.memories_dir = ensure_dir(self.memory_dir / "memories")
+        self.profile_file = self.memories_dir / "profile.md"
+
     def read_long_term(self) -> str:
-        """读取长期记忆（MEMORY.md）。"""
+        """Read legacy MEMORY.md (compatibility mode)."""
         if self.memory_file.exists():
             return self.memory_file.read_text(encoding="utf-8")
         return ""
-    
+
     def write_long_term(self, content: str) -> None:
-        """写入长期记忆（MEMORY.md）。"""
+        """Write legacy MEMORY.md (compatibility mode)."""
         self.memory_file.write_text(content, encoding="utf-8")
-    
+
     def append_history(self, entry: str) -> None:
-        """追加一条事件到历史日志（HISTORY.md）。"""
+        """Append one entry into HISTORY.md."""
         with open(self.history_file, "a", encoding="utf-8") as f:
             f.write(entry.rstrip() + "\n\n")
-    
+
     def get_memory_context(self) -> str:
-        """
-        获取记忆上下文（只加载长期记忆）。
-        
-        HISTORY.md 不加载到上下文，需要时通过 exec 工具的 grep 搜索。
-        """
-        long_term = self.read_long_term()
-        return f"## Long-term Memory\n{long_term}" if long_term else ""
+        """Build compact layered memory context for system prompt."""
+        parts: list[str] = []
+
+        # Compatibility: keep legacy MEMORY.md if present.
+        long_term = self.read_long_term().strip()
+        if long_term:
+            parts.append("## Legacy Long-term Memory\n" + long_term)
+
+        # Always include profile in full.
+        if self.profile_file.exists():
+            profile = self.profile_file.read_text(encoding="utf-8").strip()
+            if profile:
+                parts.append("## Profile\n" + profile)
+
+        # L0 abstracts from categorized memory files.
+        index_lines: list[str] = []
+        for category in self.INDEX_CATEGORIES:
+            cat_dir = self.memories_dir / category.value
+            if not cat_dir.exists():
+                continue
+            for fp in sorted(cat_dir.glob("*.md")):
+                try:
+                    first_line = fp.read_text(encoding="utf-8").splitlines()[0].strip()
+                except (OSError, IndexError):
+                    continue
+                if not first_line:
+                    continue
+                rel = fp.relative_to(self.workspace).as_posix()
+                index_lines.append(f"- [{category.value}] {first_line} ({rel})")
+        if index_lines:
+            parts.append("## Memory Index (L0)\n" + "\n".join(index_lines[:80]))
+
+        return "\n\n".join(parts)
+
+    def get_memory_detail(self, path: str) -> str:
+        """Read full memory content by workspace-relative or absolute path."""
+        raw = (path or "").strip()
+        if not raw:
+            return ""
+
+        target = Path(raw).expanduser()
+        if not target.is_absolute():
+            target = (self.workspace / raw).resolve()
+        else:
+            target = target.resolve()
+
+        try:
+            target.relative_to(self.workspace.resolve())
+        except ValueError:
+            return ""
+
+        if not target.exists() or not target.is_file():
+            return ""
+        return target.read_text(encoding="utf-8")

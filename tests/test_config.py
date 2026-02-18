@@ -68,6 +68,8 @@ def test_search_config_defaults_and_validation() -> None:
     assert cfg.search.enabled is True
     assert cfg.search.index_dirs == ["memory"]
     assert cfg.search.vector_enabled is False
+    assert cfg.memory.auto_compress is True
+    assert cfg.memory.compress_threshold == 10
 
     with pytest.raises(ValidationError):
         Config.model_validate({"search": {"default_limit": 0}})
@@ -75,3 +77,5 @@ def test_search_config_defaults_and_validation() -> None:
         Config.model_validate({"search": {"embedding_chunk_overlap": 0.9}})
     with pytest.raises(ValidationError):
         Config.model_validate({"search": {"embedding_batch_size": 0}})
+    with pytest.raises(ValidationError):
+        Config.model_validate({"memory": {"compress_threshold": 0}})
