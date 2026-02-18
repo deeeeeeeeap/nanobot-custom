@@ -54,7 +54,7 @@
 - Docker test helper: `tests/test_docker.sh` (Linux shell required)
 
 ## CI Reality
-- There is currently no committed `.github/workflows/` pipeline in this repo.
+- CI workflow exists at `.github/workflows/ci.yml` (Python checks + conditional bridge build).
 - Use local checks as the effective pre-PR gate:
   - `.venv\Scripts\python -m ruff check . --select F,E9`
   - `.venv\Scripts\python -m pytest -q`

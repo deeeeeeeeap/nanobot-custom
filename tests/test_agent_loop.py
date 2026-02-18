@@ -1,4 +1,4 @@
-from pathlib import Path
+﻿from pathlib import Path
 from typing import Any
 
 from nanobot.agent.loop import AgentLoop, _is_lazy_response
@@ -116,3 +116,29 @@ async def test_new_empty_session_feedback(monkeypatch, tmp_path: Path) -> None:
 
     reply = await loop.process_direct("/new", channel="telegram", chat_id="empty")
     assert reply == "已开始新会话（原会话本来就是空的）。"
+
+
+async def test_process_direct_uses_explicit_session_key(monkeypatch, tmp_path: Path) -> None:
+    loop = _make_loop(monkeypatch, tmp_path)
+
+    await loop.process_direct(
+        "first task",
+        session_key="cron:job-1",
+        channel="telegram",
+        chat_id="42",
+    )
+    await loop.process_direct(
+        "second task",
+        session_key="cron:job-2",
+        channel="telegram",
+        chat_id="42",
+    )
+
+    session_1 = loop.sessions.get_or_create("cron:job-1")
+    session_2 = loop.sessions.get_or_create("cron:job-2")
+    default_chat_session = loop.sessions.get_or_create("telegram:42")
+
+    assert len(session_1.messages) == 2
+    assert len(session_2.messages) == 2
+    assert default_chat_session.messages == []
+

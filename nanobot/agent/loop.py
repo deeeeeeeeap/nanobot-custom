@@ -1,4 +1,4 @@
-"""Agent loop: the core processing engine."""
+﻿"""Agent loop: the core processing engine."""
 from __future__ import annotations
 
 import asyncio
@@ -233,7 +233,7 @@ class AgentLoop:
                     try:
                         reporter = self.reporter_factory(msg.channel, msg.chat_id)
                     except (TypeError, ValueError, RuntimeError) as e:
-                        logger.warning(f"创建状态报告器失败: {e}")
+                        logger.warning(f"鍒涘缓鐘舵€佹姤鍛婂櫒澶辫触: {e}")
 
                 # Process one inbound message.
                 try:
@@ -245,22 +245,28 @@ class AgentLoop:
                     if response:
                         await self.bus.publish_outbound(response)
                 except (NanobotError, RuntimeError, ValueError, OSError) as e:
-                    logger.error(f"处理消息时出错: {e}")
+                    logger.error(
+                        "Message processing failed "
+                        f"(channel={msg.channel}, chat_id={msg.chat_id}, sender_id={msg.sender_id}): {e}"
+                    )
                     if reporter:
                         await reporter.finalize(delete_status=True)
                     await self.bus.publish_outbound(OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
-                        content=f"抱歉，处理时遇到错误: {str(e)}"
+                        content=f"[E_AGENT_PROCESSING] 请求处理失败: {str(e)}"
                     ))
-                except Exception:
-                    logger.exception("Unexpected message-processing failure")
+                except Exception as e:
+                    logger.exception(
+                        "Unexpected message-processing failure "
+                        f"(channel={msg.channel}, chat_id={msg.chat_id}, sender_id={msg.sender_id}): {e}"
+                    )
                     if reporter:
                         await reporter.finalize(delete_status=True)
                     await self.bus.publish_outbound(OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
-                        content="抱歉，处理时发生了未预期错误。"
+                        content="[E_AGENT_UNEXPECTED] 处理请求时发生未预期错误。",
                     ))
             except asyncio.TimeoutError:
                 continue
@@ -341,7 +347,9 @@ class AgentLoop:
         except (ConfigError, ValueError, OSError) as e:
             logger.warning(f"Failed to reload config: {e}, using cached model")
 
-        session = self.sessions.get_or_create(msg.session_key)
+        override_session_key = msg.metadata.get("session_key") if msg.metadata else None
+        effective_session_key = override_session_key or msg.session_key
+        session = self.sessions.get_or_create(effective_session_key)
 
         # Handle slash commands.
         raw_cmd = msg.content.strip()
@@ -542,7 +550,7 @@ class AgentLoop:
                 break
 
         if not final_content:
-            final_content = "（任务已执行完毕，但模型未生成回复文本。）"
+            final_content = "锛堜换鍔″凡鎵ц瀹屾瘯锛屼絾妯″瀷鏈敓鎴愬洖澶嶆枃鏈€傦級"
 
         # Run hallucination checks when tools are unavailable or not used.
         should_check_hallucination = (
@@ -821,7 +829,7 @@ Respond with ONLY valid JSON, no markdown fences."""
     async def process_direct(
         self,
         content: str,
-        session_key: str = "cli:direct",
+        session_key: str | None = None,
         channel: str = "cli",
         chat_id: str = "direct",
     ) -> str:
@@ -841,8 +849,12 @@ Respond with ONLY valid JSON, no markdown fences."""
             channel=channel,
             sender_id="user",
             chat_id=chat_id,
-            content=content
+            content=content,
+            metadata={"session_key": session_key} if session_key else {},
         )
 
         response = await self._process_message(msg)
         return response.content if response else ""
+
+
+

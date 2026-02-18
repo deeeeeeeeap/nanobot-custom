@@ -1,4 +1,4 @@
-"""Tests for URL validation helpers."""
+﻿"""Tests for URL validation helpers."""
 
 from nanobot.security.url_validator import (
     X_STATUS_ID_MIN,
@@ -83,7 +83,7 @@ class TestFilterInvalidUrls:
     def test_filter_replaces_invalid_url(self):
         text = f"Demo: https://x.com/fake/status/{_future_status_id()}"
         filtered, removed = filter_invalid_urls(text)
-        assert "链接已移除" in filtered
+        assert "[链接已移除:" in filtered
         assert len(removed) == 1
 
     def test_valid_url_not_filtered(self):
@@ -99,10 +99,11 @@ class TestShouldWarnAboutUrls:
         text = f"Link: https://x.com/test/status/{_future_status_id()}"
         should_warn, message = should_warn_about_urls(text)
         assert should_warn
-        assert "可疑链接" in message
+        assert "检测到可疑链接。" in message
 
     def test_no_warn_for_valid_urls(self):
         text = f"Real link: https://x.com/user/status/{_valid_status_id()}"
         should_warn, message = should_warn_about_urls(text)
         assert not should_warn
         assert message == ""
+

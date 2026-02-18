@@ -45,15 +45,16 @@ def _flush_pending_tty_input() -> None:
         fd = sys.stdin.fileno()
         if not os.isatty(fd):
             return
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Skipping tty input flush: {e}")
         return
 
     try:
         import termios
         termios.tcflush(fd, termios.TCIFLUSH)
         return
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"termios flush unavailable, falling back to select loop: {e}")
 
     try:
         while True:
@@ -62,7 +63,8 @@ def _flush_pending_tty_input() -> None:
                 break
             if not os.read(fd, 4096):
                 break
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Best-effort tty flush failed: {e}")
         return
 
 
@@ -71,7 +73,8 @@ def _save_history() -> None:
         return
     try:
         _READLINE.write_history_file(str(_HISTORY_FILE))
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Failed to save readline history: {e}")
         return
 
 
@@ -82,8 +85,8 @@ def _restore_terminal() -> None:
     try:
         import termios
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, _SAVED_TERM_ATTRS)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Failed to restore terminal settings: {e}")
 
 
 def _enable_line_editing() -> None:
@@ -94,8 +97,8 @@ def _enable_line_editing() -> None:
     try:
         import termios
         _SAVED_TERM_ATTRS = termios.tcgetattr(sys.stdin.fileno())
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Could not snapshot terminal settings: {e}")
 
     history_file = Path.home() / ".nanobot" / "history" / "cli_history"
     history_file.parent.mkdir(parents=True, exist_ok=True)
@@ -115,13 +118,13 @@ def _enable_line_editing() -> None:
         else:
             readline.parse_and_bind("tab: complete")
         readline.parse_and_bind("set editing-mode emacs")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Readline keybind setup failed: {e}")
 
     try:
         readline.read_history_file(str(history_file))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Readline history load skipped: {e}")
 
     if not _HISTORY_HOOK_REGISTERED:
         atexit.register(_save_history)
@@ -678,7 +681,7 @@ def channels_status():
     
     # Telegram
     tg = config.channels.telegram
-    tg_config = f"token: {tg.token[:10]}..." if tg.token else "[dim]not configured[/dim]"
+    tg_config = "configured" if tg.token else "[dim]not configured[/dim]"
     table.add_row(
         "Telegram",
         "yes" if tg.enabled else "no",
