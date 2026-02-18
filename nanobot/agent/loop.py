@@ -430,6 +430,7 @@ class AgentLoop:
         final_content = None
         tools_used: list[str] = []
         tools_were_called = False  # Track whether any tool was actually called.
+        hallucination_retry_used = False
 
         # Check whether the current model supports function-calling.
         model_supports_tools = supports_function_calling(self.model)
@@ -507,6 +508,34 @@ class AgentLoop:
                     )
                     messages = self.context.add_user_nudge(messages, nudge)
                     continue
+
+                # Hallucination guardrail: give the model one tool-forced retry before blocking.
+                if (
+                    model_supports_tools
+                    and response.content
+                    and not tools_were_called
+                    and not hallucination_retry_used
+                    and iteration < self.max_iterations
+                ):
+                    hallucination = detect_hallucination(
+                        response.content,
+                        tools_were_called=False,
+                        model_supports_tools=True,
+                    )
+                    if hallucination.is_hallucination:
+                        logger.warning(
+                            "Detected fabricated execution without tool calls; forcing one retry "
+                            f"(pattern={hallucination.pattern_name}, confidence={hallucination.confidence:.2f})"
+                        )
+                        messages = self.context.add_assistant_message(messages, response.content)
+                        nudge = (
+                            "[System directive] Your previous reply described completed execution without "
+                            "tool calls. In the next reply, you must call relevant tools first, then "
+                            "report only tool-observed results."
+                        )
+                        messages = self.context.add_user_nudge(messages, nudge)
+                        hallucination_retry_used = True
+                        continue
 
                 # No tool call; use model content as final output.
                 final_content = response.content
