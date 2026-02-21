@@ -28,8 +28,8 @@ class ExecTool(Tool):
         self.deny_patterns = deny_patterns or [
             # rm -rf / del /f 已移除：bot 需要清理临时文件的权限
             r"\b(mkfs|diskpart)\b",
-            r"\bformat\s+[A-Za-z]:",
-            r"\bformat\s+/dev/",
+            # Block standalone "format" command only, allow flags like "--format=json".
+            r"(?:^|[;&|]\s*)format(?:\s|$)",
             r"\bdd\s+if=",
             r">\s*/dev/sd",
             r"\b(shutdown|reboot|poweroff)\b",
@@ -102,6 +102,11 @@ class ExecTool(Tool):
                 )
             except asyncio.TimeoutError:
                 process.kill()
+                # Ensure process resources are reclaimed after kill.
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    pass
                 return (
                     f"Error: command timed out after {effective_timeout}s. "
                     f"Use timeout parameter (max {self.MAX_TIMEOUT})."

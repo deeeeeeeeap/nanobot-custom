@@ -43,3 +43,58 @@ def test_provider_parse_response_without_tool_calls() -> None:
     assert parsed.content == "ok"
     assert parsed.tool_calls == []
     assert parsed.usage["total_tokens"] == 3
+
+
+def test_provider_apply_cache_control_marks_system_and_last_tool() -> None:
+    provider = LiteLLMProvider(api_key="k")
+    messages = [
+        {"role": "system", "content": "system prompt"},
+        {"role": "user", "content": "hi"},
+    ]
+    tools = [
+        {"type": "function", "function": {"name": "one"}},
+        {"type": "function", "function": {"name": "two"}},
+    ]
+
+    new_messages, new_tools = provider._apply_cache_control(messages, tools)
+    assert isinstance(new_messages[0]["content"], list)
+    assert new_messages[0]["content"][0]["cache_control"]["type"] == "ephemeral"
+    assert new_tools is not None
+    assert new_tools[-1]["cache_control"]["type"] == "ephemeral"
+    assert "cache_control" not in tools[-1]
+
+
+def test_provider_supports_cache_control_for_claude_only() -> None:
+    provider = LiteLLMProvider(api_key="k")
+    assert provider._supports_cache_control("anthropic/claude-3-5-sonnet")
+    assert not provider._supports_cache_control("openai/gpt-4o-mini")
+
+
+async def test_provider_chat_injects_cache_control_for_supported_model(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def _fake_completion(**kwargs):
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(content="ok", reasoning_content=None, tool_calls=None),
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+
+    monkeypatch.setattr("nanobot.providers.litellm_provider.acompletion", _fake_completion)
+    provider = LiteLLMProvider(api_key="k", default_model="anthropic/claude-3-5-sonnet")
+    await provider.chat(
+        messages=[{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}],
+        tools=[{"type": "function", "function": {"name": "ping"}}],
+        model="anthropic/claude-3-5-sonnet",
+    )
+
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    messages = kwargs["messages"]
+    assert isinstance(messages, list)
+    assert messages[0]["content"][0]["cache_control"]["type"] == "ephemeral"

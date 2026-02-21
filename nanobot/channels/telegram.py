@@ -193,6 +193,16 @@ class TelegramChannel(BaseChannel):
             logger.error(f"Invalid chat_id: {msg.chat_id}")
             return
 
+        reply_kwargs: dict[str, int | bool] = {}
+        if self.config.reply_to_message and msg.metadata:
+            source_message_id = msg.metadata.get("message_id")
+            try:
+                if source_message_id is not None:
+                    reply_kwargs["reply_to_message_id"] = int(source_message_id)
+                    reply_kwargs["allow_sending_without_reply"] = True
+            except (TypeError, ValueError):
+                pass
+
         html_content = _markdown_to_telegram_html(msg.content)
         html_chunks = self._split_message(html_content, self.MAX_OUTBOUND_TEXT_LENGTH)
         plain_chunks = self._split_message(msg.content, self.MAX_OUTBOUND_TEXT_LENGTH)
@@ -204,10 +214,15 @@ class TelegramChannel(BaseChannel):
                         chat_id=chat_id,
                         text=chunk,
                         parse_mode="HTML",
+                        **reply_kwargs,
                     )
                 except BadRequest:
                     fallback = plain_chunks[idx] if idx < len(plain_chunks) else chunk
-                    await self._app.bot.send_message(chat_id=chat_id, text=fallback)
+                    await self._app.bot.send_message(
+                        chat_id=chat_id,
+                        text=fallback,
+                        **reply_kwargs,
+                    )
         except (TimedOut, NetworkError, Forbidden, TelegramError) as e:
             logger.error(f"Error sending Telegram message: {e}")
 

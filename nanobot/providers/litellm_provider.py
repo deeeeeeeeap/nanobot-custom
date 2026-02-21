@@ -73,6 +73,56 @@ class LiteLLMProvider(LLMProvider):
             model = f"{spec.litellm_prefix}/{model}"
         return model
 
+    def _supports_cache_control(self, model: str) -> bool:
+        """Return True when provider/model supports cache_control on content blocks."""
+        if self._gateway is not None:
+            flag = getattr(self._gateway, "supports_prompt_caching", None)
+            if flag is not None:
+                return bool(flag)
+
+        spec = find_by_model(model)
+        flag = getattr(spec, "supports_prompt_caching", None) if spec else None
+        if flag is not None:
+            return bool(flag)
+
+        model_lower = model.lower()
+        return "anthropic" in model_lower or "claude" in model_lower
+
+    def _apply_cache_control(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None]:
+        """Return copies of messages/tools with cache_control injected where applicable."""
+        new_messages: list[dict[str, Any]] = []
+        for msg in messages:
+            if msg.get("role") == "system":
+                content = msg.get("content")
+                if isinstance(content, str):
+                    new_content: Any = [
+                        {
+                            "type": "text",
+                            "text": content,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ]
+                elif isinstance(content, list) and content:
+                    new_content = list(content)
+                    last = new_content[-1]
+                    if isinstance(last, dict):
+                        new_content[-1] = {**last, "cache_control": {"type": "ephemeral"}}
+                else:
+                    new_content = content
+                new_messages.append({**msg, "content": new_content})
+            else:
+                new_messages.append(msg)
+
+        new_tools = tools
+        if tools:
+            new_tools = list(tools)
+            new_tools[-1] = {**new_tools[-1], "cache_control": {"type": "ephemeral"}}
+        return new_messages, new_tools
+
     def _apply_model_overrides(self, model: str, kwargs: dict[str, Any]) -> None:
         """Apply model-specific parameter overrides from provider registry."""
         spec = find_by_model(model)
@@ -98,7 +148,11 @@ class LiteLLMProvider(LLMProvider):
         Returns an LLMResponse with either assistant content, tool calls,
         or an error payload that upper layers can handle gracefully.
         """
-        model = self._resolve_model(model or self.default_model)
+        original_model = model or self.default_model
+        model = self._resolve_model(original_model)
+        if self._supports_cache_control(original_model):
+            messages, tools = self._apply_cache_control(messages, tools)
+
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -119,16 +173,20 @@ class LiteLLMProvider(LLMProvider):
 
         try:
             logger.debug(
-                f"LLM request: model={model}, tools={len(tools) if tools else 0}, "
-                f"api_base={kwargs.get('api_base', 'default')}"
+                "LLM request: model={}, tools={}, api_base={}",
+                model,
+                len(tools) if tools else 0,
+                kwargs.get("api_base", "default"),
             )
             response = await acompletion(**kwargs)
             choice = response.choices[0] if response.choices else None
             if choice:
                 has_tc = bool(getattr(choice.message, "tool_calls", None))
                 logger.debug(
-                    f"LLM response: finish_reason={choice.finish_reason}, "
-                    f"has_tool_calls={has_tc}, content_len={len(choice.message.content or '')}"
+                    "LLM response: finish_reason={}, has_tool_calls={}, content_len={}",
+                    choice.finish_reason,
+                    has_tc,
+                    len(choice.message.content or ""),
                 )
             return self._parse_response(response)
         except (TypeError, ValueError, OSError, TimeoutError) as e:

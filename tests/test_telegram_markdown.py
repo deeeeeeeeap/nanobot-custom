@@ -1,7 +1,7 @@
+from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
-from nanobot.channels.telegram import TelegramChannel
+from nanobot.channels.telegram import TelegramChannel, _markdown_to_telegram_html
 from nanobot.config.schema import TelegramConfig
-from nanobot.channels.telegram import _markdown_to_telegram_html
 
 
 def test_markdown_list_prefix_is_not_mojibake() -> None:
@@ -59,3 +59,33 @@ async def test_on_new_forwards_to_agent(monkeypatch) -> None:
     assert seen["chat_id"] == "456"
     assert seen["content"] == "/new"
     assert seen["metadata"]["message_id"] == 789
+
+
+async def test_send_respects_reply_to_message_config() -> None:
+    class _DummyBot:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        async def send_message(self, **kwargs):
+            self.calls.append(kwargs)
+
+    class _DummyApp:
+        def __init__(self) -> None:
+            self.bot = _DummyBot()
+
+    ch = TelegramChannel(TelegramConfig(token="x", reply_to_message=True), MessageBus())
+    ch._app = _DummyApp()
+
+    await ch.send(
+        OutboundMessage(
+            channel="telegram",
+            chat_id="456",
+            content="hello",
+            metadata={"message_id": 789},
+        )
+    )
+
+    calls = ch._app.bot.calls
+    assert calls
+    assert calls[0]["reply_to_message_id"] == 789
+    assert calls[0]["allow_sending_without_reply"] is True
