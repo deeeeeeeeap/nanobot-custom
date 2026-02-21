@@ -333,7 +333,7 @@ class MemoryConfig(BaseModel):
     compress_threshold: int = Field(default=10, ge=1, le=500)
     max_memories_per_category: int = Field(default=50, ge=1, le=5000)
     output_language: str = "zh-CN"
-    dedup_min_score: float = Field(default=0.2, ge=0.0, le=1.0)
+    dedup_min_score: float = Field(default=0.15, ge=0.0, le=1.0)
 
 
 class Config(BaseSettings):

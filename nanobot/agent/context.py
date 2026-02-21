@@ -6,6 +6,8 @@ import platform
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
 
@@ -19,6 +21,7 @@ class ContextBuilder:
     """
     
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
+    _MOJIBAKE_MARKERS = ("�", "\ue0ff", "锛", "銆", "鈥")
     
     def __init__(self, workspace: Path):
         self.workspace = workspace
@@ -38,7 +41,11 @@ class ContextBuilder:
         parts = []
         
         # Core identity
-        parts.append(self._get_identity())
+        identity = self._get_identity()
+        if self._looks_mojibake(identity):
+            logger.warning("Detected mojibake in identity block, using safe fallback.")
+            identity = self._identity_fallback()
+        parts.append(identity)
         
         # Bootstrap files
         bootstrap = self._load_bootstrap_files()
@@ -48,6 +55,9 @@ class ContextBuilder:
         # Memory context
         memory = self.memory.get_memory_context()
         if memory:
+            if self._looks_mojibake(memory):
+                logger.warning("Detected mojibake in memory block, skipping memory injection.")
+                memory = "(记忆内容因编码异常已跳过)"
             parts.append(f"# Memory\n\n{memory}")
             parts.append(
                 "当需要某条记忆的完整细节时，优先使用 `knowledge_search` 或 `read_file` 读取具体路径。"
@@ -66,11 +76,17 @@ class ContextBuilder:
         if always_skills:
             always_content = self.skills.load_skills_for_context(always_skills)
             if always_content:
+                if self._looks_mojibake(always_content):
+                    logger.warning("Detected mojibake in active skills block, skipping skill content.")
+                    always_content = "(技能内容因编码异常已跳过)"
                 parts.append(f"# Active Skills\n\n{always_content}")
         
         # 2. Available skills: only show summary (agent uses read_file to load)
         skills_summary = self.skills.build_skills_summary()
         if skills_summary:
+            if self._looks_mojibake(skills_summary):
+                logger.warning("Detected mojibake in skills summary, skipping summary.")
+                skills_summary = "<skills unavailable=\"encoding_error\" />"
             parts.append(f"""# Skills
 
 The following skills extend your capabilities. To use a skill, read its SKILL.md file using the read_file tool.
@@ -146,7 +162,7 @@ Skills with available="false" need dependencies installed first - you can try in
 - 💻 **命令执行**：`exec` - 直接操控系统
 - 📁 **文件管理**：读取、写入、编辑文件
 - 📢 **主动通知**：`message` - 随时向用户发送消息（进度、结果、问题）
-- 🧠 **记忆管理**：`memory` - 读写结构化记忆（USER.md=用户偏好, MEMORY.md=经验教训, log=今日日记）
+- 🧠 **记忆管理**：`memory` - 读写 MEMORY.md 和结构化记忆，查看 HISTORY.md 日志
 - 🚀 **子代理**：派遣后台任务，无需持续盯着
 - ⏰ **定时任务**：`cron` - 支持两种模式：提醒模式（发送静态文本）和 Agent 模式（定时执行完整工具链任务，如天气预报、系统巡检）
 
@@ -166,9 +182,34 @@ Skills with available="false" need dependencies installed first - you can try in
             file_path = self.workspace / filename
             if file_path.exists():
                 content = file_path.read_text(encoding="utf-8")
+                if self._looks_mojibake(content):
+                    logger.warning(
+                        "Detected mojibake in bootstrap file {}, replacing content with safe notice.",
+                        file_path,
+                    )
+                    content = "(内容因编码异常已跳过)"
                 parts.append(f"## {filename}\n\n{content}")
         
         return "\n\n".join(parts) if parts else ""
+
+    @classmethod
+    def _looks_mojibake(cls, text: str) -> bool:
+        """Heuristic detector for common UTF-8/GBK mojibake fragments."""
+        if not text:
+            return False
+        private_use_count = sum(1 for ch in text if "\ue000" <= ch <= "\uf8ff")
+        marker_hits = sum(text.count(marker) for marker in cls._MOJIBAKE_MARKERS)
+        hit_ratio = (private_use_count + marker_hits) / max(1, len(text))
+        return private_use_count > 0 or marker_hits >= 8 or hit_ratio > 0.015
+
+    @staticmethod
+    def _identity_fallback() -> str:
+        """Conservative fallback identity when template text appears corrupted."""
+        return (
+            "# 🦾 碳核 (Carbon-Core)\n\n"
+            "你是碳核助手。请优先真实、可验证、可执行的回复；不编造工具执行结果；"
+            "在需要时先调用工具再汇报结论。"
+        )
     
     def build_messages(
         self,

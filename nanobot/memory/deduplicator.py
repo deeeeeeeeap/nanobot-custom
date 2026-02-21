@@ -19,6 +19,7 @@ from nanobot.search.store import SearchResult, SearchStore
 
 class MemoryDeduplicator:
     """Detect duplicate memories before persistence."""
+    _CROSS_CATEGORY_SCORE_THRESHOLD = 0.5
 
     def __init__(
         self,
@@ -28,7 +29,7 @@ class MemoryDeduplicator:
         model: str,
         search_config: SearchConfig | None,
         embedder: TextEmbedder | None = None,
-        min_score: float = 0.2,
+        min_score: float = 0.15,
         output_language: str = "zh-CN",
     ):
         self._store = store
@@ -85,12 +86,19 @@ class MemoryDeduplicator:
                 logger.warning(f"Vector dedup pre-filter failed: {e}")
 
         category_fragment = f"/memories/{candidate.category.value}/"
-        similar = [
-            self._to_workspace_path(item)
-            for item in results
-            if category_fragment in f"/{item.display_path.strip('/')}/"
-        ]
-        return [path for path in similar if path]
+        similar: list[str] = []
+        for item in results:
+            path = self._to_workspace_path(item)
+            if not path:
+                continue
+            in_same_category = category_fragment in f"/{item.display_path.strip('/')}/"
+            high_confidence_cross_category = (
+                item.score > self._CROSS_CATEGORY_SCORE_THRESHOLD
+                or self._is_exact_text_hit(query, item.snippet)
+            )
+            if in_same_category or high_confidence_cross_category:
+                similar.append(path)
+        return list(dict.fromkeys(similar))
 
     async def _llm_decision(self, candidate: CandidateMemory, similar: list[str]) -> tuple[DedupDecision, str]:
         payload = {
@@ -153,3 +161,10 @@ class MemoryDeduplicator:
         if not path:
             return ""
         return str(Path(path))
+
+    @staticmethod
+    def _is_exact_text_hit(query: str, snippet: str) -> bool:
+        """Treat exact snippet hit as high-confidence similarity across categories."""
+        normalized_query = " ".join(query.lower().split())
+        normalized_snippet = " ".join(snippet.lower().split())
+        return bool(normalized_query) and normalized_query in normalized_snippet

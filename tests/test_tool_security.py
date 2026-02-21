@@ -1,7 +1,9 @@
 from pathlib import Path
 
+from nanobot.agent.memory import MemoryStore
 from nanobot.agent.tools.filesystem import MAX_FILE_BYTES, EditFileTool, ReadFileTool, WriteFileTool
 from nanobot.agent.tools.message import MessageTool
+from nanobot.agent.tools.memory_tool import MemoryTool
 from nanobot.agent.tools.shell import ExecTool
 
 
@@ -76,3 +78,17 @@ def test_message_tool_validates_channel_and_chat_id_format() -> None:
     joined = "; ".join(errors)
     assert "channel" in joined
     assert "chat_id" in joined
+
+
+async def test_memory_tool_rejects_non_memory_file(tmp_path: Path) -> None:
+    tool = MemoryTool(memory_store=MemoryStore(tmp_path), workspace=tmp_path)
+    result = await tool.execute(action="read", file="USER.md")
+    assert "not allowed" in result.lower()
+    assert "MEMORY.md" in result
+
+
+def test_memory_tool_declares_memory_only(tmp_path: Path) -> None:
+    tool = MemoryTool(memory_store=MemoryStore(tmp_path), workspace=tmp_path)
+    assert tool.ALLOWED_FILES == {"MEMORY.md"}
+    assert "USER.md" not in tool.description
+    assert tool.parameters["properties"]["file"]["description"] == "Target file name: MEMORY.md"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from nanobot.memory.models import MemoryCategory
@@ -10,6 +11,13 @@ from nanobot.utils.helpers import ensure_dir
 
 class MemoryStore:
     """Workspace-backed long-term memory and history store."""
+
+    # Keep generic fallback conservative to avoid redacting non-secret IDs (e.g. git SHA-1).
+    _GENERIC_SECRET_RE = re.compile(r"\b[a-fA-F0-9]{48,}\b")
+    _TELEGRAM_TOKEN_RE = re.compile(r"\b\d{6,12}:AA[A-Za-z0-9_-]{20,}\b")
+    _KEY_VALUE_SECRET_RE = re.compile(
+        r"(?im)\b(auth_token|ct0|api[_-]?key|token|password)\b\s*([:=])\s*([^\s\"'`]+)"
+    )
 
     INDEX_CATEGORIES = [
         MemoryCategory.PREFERENCES,
@@ -30,7 +38,7 @@ class MemoryStore:
     def read_long_term(self) -> str:
         """Read legacy MEMORY.md (compatibility mode)."""
         if self.memory_file.exists():
-            return self.memory_file.read_text(encoding="utf-8")
+            return self._redact_secrets(self.memory_file.read_text(encoding="utf-8"))
         return ""
 
     def write_long_term(self, content: str) -> None:
@@ -59,6 +67,7 @@ class MemoryStore:
 
         # L0 abstracts from categorized memory files.
         index_lines: list[str] = []
+        seen_abstracts: set[str] = set()
         for category in self.INDEX_CATEGORIES:
             cat_dir = self.memories_dir / category.value
             if not cat_dir.exists():
@@ -70,12 +79,16 @@ class MemoryStore:
                     continue
                 if not first_line:
                     continue
+                normalized = first_line.strip().lower()
+                if normalized in seen_abstracts:
+                    continue
+                seen_abstracts.add(normalized)
                 rel = fp.relative_to(self.workspace).as_posix()
                 index_lines.append(f"- [{category.value}] {first_line} ({rel})")
         if index_lines:
             parts.append("## Memory Index (L0)\n" + "\n".join(index_lines[:80]))
 
-        return "\n\n".join(parts)
+        return self._redact_secrets("\n\n".join(parts))
 
     def get_memory_detail(self, path: str) -> str:
         """Read full memory content by workspace-relative or absolute path."""
@@ -97,3 +110,17 @@ class MemoryStore:
         if not target.exists() or not target.is_file():
             return ""
         return target.read_text(encoding="utf-8")
+
+    @classmethod
+    def _redact_secrets(cls, text: str) -> str:
+        """Redact known secret patterns before injecting memory into prompts."""
+        if not text:
+            return text
+
+        redacted = cls._KEY_VALUE_SECRET_RE.sub(
+            lambda m: f"{m.group(1)}{m.group(2)} [REDACTED]",
+            text,
+        )
+        redacted = cls._TELEGRAM_TOKEN_RE.sub("[REDACTED]", redacted)
+        redacted = cls._GENERIC_SECRET_RE.sub("[REDACTED]", redacted)
+        return redacted

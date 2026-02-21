@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 class MemoryTool(Tool):
     """Allow the agent to read/write core memory files."""
 
-    ALLOWED_FILES = {"IDENTITY.md", "USER.md", "SOUL.md", "MEMORY.md"}
+    ALLOWED_FILES = {"MEMORY.md"}
 
     def __init__(
         self,
@@ -41,7 +41,7 @@ class MemoryTool(Tool):
     def description(self) -> str:
         return (
             "Manage structured memory files. Supports read, write, append, list, and log actions "
-            "for USER.md, MEMORY.md, and related workspace memory files."
+            "for MEMORY.md and workspace memory logs."
         )
 
     @property
@@ -56,7 +56,7 @@ class MemoryTool(Tool):
                 },
                 "file": {
                     "type": "string",
-                    "description": "Target file name: IDENTITY.md, USER.md, SOUL.md, MEMORY.md",
+                    "description": "Target file name: MEMORY.md",
                 },
                 "content": {
                     "type": "string",
@@ -87,13 +87,8 @@ class MemoryTool(Tool):
 
     def _list_files(self) -> str:
         parts = ["Memory files:"]
-        for filename in sorted(self.ALLOWED_FILES):
-            if filename == "MEMORY.md":
-                exists = self._memory.memory_file.exists()
-            else:
-                exists = (self._workspace / filename).exists()
-            status = "exists" if exists else "missing"
-            parts.append(f"- {filename}: {status}")
+        status = "exists" if self._memory.memory_file.exists() else "missing"
+        parts.append(f"- MEMORY.md: {status}")
 
         memory_dir = self._workspace / "memory"
         if memory_dir.exists():
@@ -179,4 +174,3 @@ class MemoryTool(Tool):
             self._indexer.index_single(target)
         except Exception as e:  # pragma: no cover - non-critical follow-up path
             logger.warning(f"Memory index update failed for {target}: {e}")
-
