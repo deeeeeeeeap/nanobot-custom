@@ -32,7 +32,12 @@ HALLUCINATION_PATTERNS: list[tuple[str, str, float]] = [
     ("fake_system_status", r"(系统状态|system status)[:：]?\\s*\\n.*?(cpu|memory|disk|负载)", 0.8),
     ("fake_table_status", r"\\|\\s*项目\\s*\\|\\s*状态\\s*\\|", 0.7),
     # Claimed execution without tools.
-    ("claimed_execution", r"(我刚刚|我刚才|我已|我已经).{0,20}(执行|运行|调用).{0,30}(命令|指令|脚本)", 0.9),
+    (
+        "claimed_execution",
+        r"(我刚刚|我刚才|我已|我已经).{0,20}(执行|运行|调用).{0,30}(命令|指令|脚本)|"
+        r"\b(i just|i already|i have)\b.{0,30}\b(executed|ran|called)\b.{0,30}\b(command|script|tool)\b",
+        0.9,
+    ),
     ("claimed_command_output", r"(执行|运行).{0,20}(du|df|ls|ps|top|free|cat|find|grep|docker|systemctl)\\b", 0.85),
     ("fake_path_listing", r"(\\d+(\\.\\d+)?[KMGT]?\\s+/[\\w./-]+\\n){3,}", 0.85),
     # URL / account fabrication indicators.
@@ -50,8 +55,22 @@ def _looks_like_execution_plan(text: str) -> bool:
 
     lower = text.lower()
     has_plan_intent = (
-        any(k in text for k in ("下一步", "接下来", "我会", "我将", "开始执行", "继续执行", "进度已确认"))
-        or any(k in lower for k in ("next step", "i will", "i'll", "going to", "proceed"))
+        any(
+            k in text
+            for k in ("下一步", "接下来", "我会", "我将", "开始执行", "继续执行", "进度已确认", "如果你同意")
+        )
+        or any(
+            k in lower
+            for k in (
+                "next step",
+                "i will",
+                "i'll",
+                "going to",
+                "proceed",
+                "if you agree",
+                "started execution",
+            )
+        )
     )
     has_numbered_steps = bool(re.search(r"(^|\\n)\\s*\\d+[).、]\\s+", text))
 

@@ -418,6 +418,7 @@ def gateway(
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         session_manager=session_manager,
+        idle_intervention=config.agents.defaults.idle_intervention,
     )
     # Setup cron callbacks (agent mode and direct-delivery mode)
     async def on_cron_job(job: CronJob) -> str | None:
@@ -568,6 +569,7 @@ def agent(
         search_config=config.search,
         memory_config=config.memory,
         restrict_to_workspace=config.tools.restrict_to_workspace,
+        idle_intervention=config.agents.defaults.idle_intervention,
     )
     
     # Show spinner when logs are off (no output to miss); skip when logs are on
@@ -1383,6 +1385,7 @@ def memory_compress(
         search_config=config.search,
         memory_config=config.memory,
         exec_config=config.tools.exec,
+        idle_intervention=config.agents.defaults.idle_intervention,
     )
 
     async def run():

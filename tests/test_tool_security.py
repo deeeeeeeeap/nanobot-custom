@@ -15,7 +15,7 @@ from nanobot.agent.tools.shell import ExecTool
 
 async def test_exec_tool_blocks_command_injection_pattern() -> None:
     tool = ExecTool()
-    result = await tool.execute("echo $(whoami)")
+    result = await tool.execute("echo `whoami`")
     assert "command injection pattern" in result.lower()
 
 
@@ -41,6 +41,32 @@ async def test_exec_blocks_standalone_format_command() -> None:
     tool = ExecTool()
     result = await tool.execute("format /q")
     assert "dangerous pattern" in result.lower()
+
+
+def test_exec_allows_whitelisted_subcommand_substitution() -> None:
+    tool = ExecTool()
+    assert tool._guard_command("echo $(whoami)", cwd=".") is None
+
+
+def test_exec_blocks_non_whitelisted_subcommand_substitution() -> None:
+    tool = ExecTool()
+    result = tool._guard_command("echo $(rm -rf /)", cwd=".")
+    assert result is not None
+    assert "subcommand" in result.lower()
+
+
+def test_exec_blocks_nested_subcommand_substitution() -> None:
+    tool = ExecTool()
+    result = tool._guard_command("echo $(echo $(date))", cwd=".")
+    assert result is not None
+    assert "nested subcommand" in result.lower()
+
+
+def test_exec_blocks_unsafe_subcommand_composition() -> None:
+    tool = ExecTool()
+    result = tool._guard_command("echo $(date; whoami)", cwd=".")
+    assert result is not None
+    assert "unsafe subcommand composition" in result.lower()
 
 
 async def test_exec_timeout_waits_for_process_exit(monkeypatch) -> None:

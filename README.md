@@ -23,14 +23,15 @@
 - 🌐 **Antigravity 网关** — 多 Google 账号轮换，免费用 Claude & Gemini
 - 🧬 **思维链支持** — DeepSeek-R1、Claude Thinking 推理过程可视化
 - 🔄 **交错思维链** — 工具执行后自动反思，提升多步推理质量
-- ⚡ **懒惰检测** — 模型说了"我将要做"但没调工具？自动催促重试
+- ⚡ **反空转干预** — 模型说了"我将要做"但没调工具？2 级渐进式干预（提醒→终止）
+- 💰 **Prompt Caching** — Anthropic/Claude 自动注入缓存标记，节省 token 成本
 
 </td>
 <td width="50%">
 
 ### 🛡️ 安全可靠
 - 🛡️ **防幻觉机制** — 自动拦截编造的命令输出、虚假搜索结果
-- 🔒 **命令安全护栏** — 智能拦截 `rm -rf`、`format` 等危险操作
+- 🔒 **命令安全护栏** — 智能拦截危险操作 + `$()` 受控放行（白名单子命令）
 - 🔗 **URL 真实性验证** — 模型给出的链接也要查验
 - 📊 **实时状态反馈** — 🤔→🔧→✅ 执行进度一目了然
 - 🧠 **双层记忆** — 长期事实 + 事件日志，跨会话永久记忆
@@ -52,8 +53,8 @@
 <td>
 
 ### 📱 全平台接入
-- Telegram ✅ | 飞书 ✅ | 钉钉 ✅ | Slack ✅
-- Email ✅ | QQ ✅ | Discord ✅ | WhatsApp ✅
+- Telegram ✅ (reply-to 引用) | 飞书 ✅ | 钉钉 ✅ | Slack ✅
+- Email ✅ | QQ ✅ | Discord ✅ (长消息自动分片) | WhatsApp ✅
 
 </td>
 </tr>
@@ -185,11 +186,27 @@ cd /opt/nanobot && git pull && systemctl restart nanobot
 - 即使模型支持工具但选择不用，也会触发检测
 - URL 真实性验证，拦截虚构链接
 
-### 懒惰检测 & 自动重试
+### 反空转干预（2 级渐进式）
 
 ```
 模型首轮: "我将使用 exec 工具来执行 curl..."  (has_tool_calls=False)
-碳核:     检测到懒惰回复 → 注入催促 → 模型重试 → 真正调用工具 ✅
+碳核 Level 1: 检测到懒惰回复 → 注入强制工具指令 → 重试 1 次
+碳核 Level 2: 仍无工具调用 → 直接终止空转，返回可执行指令模板
+```
+
+- 自动判断执行型 vs 问答型请求（默认执行型，排除明显问答）
+- 中英双语懒惰模式识别（"下一步我会..." / "If you agree, I will..."）
+- 每个请求最多额外 1 次 LLM 调用，成本可控
+- 可通过 `idle_intervention: false` 关闭
+
+### Shell $() 受控放行
+
+```
+✅ echo $(date)              — 白名单放行
+✅ echo $(cat notes.txt)     — 放行（再受 workspace 约束）
+❌ echo $(rm -rf /)          — 拦截
+❌ echo $(date; whoami)      — 复合命令拦截
+❌ echo $(echo $(date))      — 嵌套拦截
 ```
 
 ### 定时任务 Agent 模式
@@ -266,7 +283,7 @@ nanobot search embed            # 激活语义搜索（需安装 sentence-transf
 
 ## 🙏 致谢
 
-本项目 fork 自 [HKUDS/nanobot](https://github.com/HKUDS/nanobot) v0.1.3.post7，在其基础上进行了大量定制开发。
+本项目 fork 自 [HKUDS/nanobot](https://github.com/HKUDS/nanobot) v0.1.4.post1，在其基础上进行了大量定制开发。
 
 ---
 

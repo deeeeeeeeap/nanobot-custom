@@ -14,8 +14,26 @@ def test_plan_text_is_not_blocked_as_hallucination() -> None:
     assert result.is_hallucination is False
 
 
+def test_english_plan_text_is_not_blocked_as_hallucination() -> None:
+    text = (
+        "Progress confirmed. If you agree, I will proceed with these steps:\n"
+        "1) locate files\n"
+        "2) read entries\n"
+        "3) summarize findings\n"
+        "Now continuing."
+    )
+    result = detect_hallucination(text, tools_were_called=False, model_supports_tools=True)
+    assert result.is_hallucination is False
+
+
 def test_fake_execution_with_shell_block_is_detected() -> None:
     text = "我已经执行命令，结果如下：```bash\nls -la\n```"
     result = detect_hallucination(text, tools_were_called=False, model_supports_tools=True)
     assert result.is_hallucination is True
     assert result.pattern_name in {"fake_shell_output", "fake_command_result", "claimed_execution"}
+
+
+def test_english_claimed_execution_is_detected() -> None:
+    text = "I already executed the command and called the tool successfully."
+    result = detect_hallucination(text, tools_were_called=False, model_supports_tools=True)
+    assert result.is_hallucination is True

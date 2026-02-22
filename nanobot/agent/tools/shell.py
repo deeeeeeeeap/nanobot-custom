@@ -14,6 +14,8 @@ class ExecTool(Tool):
 
     MAX_TIMEOUT = 600
     MAX_OUTPUT_LEN = 10000
+    SUBCOMMAND_PATTERN = re.compile(r"\$\(([^()]*)\)")
+    SUBCOMMAND_WHITELIST = {"date", "pwd", "whoami", "hostname", "cat", "echo"}
 
     def __init__(
         self,
@@ -39,7 +41,6 @@ class ExecTool(Tool):
         self.restrict_to_workspace = restrict_to_workspace
         self.injection_patterns = [
             r"`[^`]+`",
-            r"\$\([^)]+\)",
             r"\x00",
             r"[\r\n]",
         ]
@@ -141,6 +142,10 @@ class ExecTool(Tool):
             if re.search(pattern, lower):
                 return "Error: Command blocked by safety guard (dangerous pattern detected)"
 
+        subcommand_error = self._validate_subcommand_substitution(cmd, cwd)
+        if subcommand_error:
+            return subcommand_error
+
         for pattern in self.injection_patterns:
             if re.search(pattern, cmd):
                 return "Error: Command blocked by safety guard (command injection pattern detected)"
@@ -163,5 +168,45 @@ class ExecTool(Tool):
                     continue
                 if p.is_absolute() and cwd_path not in p.parents and p != cwd_path:
                     return "Error: Command blocked by safety guard (path outside working dir)"
+
+        return None
+
+    def _validate_subcommand_substitution(self, command: str, cwd: str) -> str | None:
+        """Allow only a narrow `$()` subset to reduce false positives without opening RCE paths."""
+        if "$(" not in command:
+            return None
+        if re.search(r"\$\([^()]*\$\(", command):
+            return "Error: Command blocked by safety guard (nested subcommand substitution is not allowed)"
+
+        matches = self.SUBCOMMAND_PATTERN.findall(command)
+        if not matches or command.count("$(") != len(matches):
+            return "Error: Command blocked by safety guard (malformed subcommand substitution)"
+
+        for raw_inner in matches:
+            inner = raw_inner.strip()
+            if not inner:
+                return "Error: Command blocked by safety guard (empty subcommand substitution)"
+            if any(token in inner for token in (";", "&&", "||", "|", "`", ">", "<", "\r", "\n")):
+                return "Error: Command blocked by safety guard (unsafe subcommand composition)"
+
+            parts = inner.split()
+            subcmd = parts[0].lower()
+            if subcmd not in self.SUBCOMMAND_WHITELIST:
+                return "Error: Command blocked by safety guard (subcommand not in allowlist)"
+
+            if subcmd == "cat":
+                if len(parts) != 2:
+                    return "Error: Command blocked by safety guard (cat subcommand expects one file path)"
+                path_token = parts[1].strip("'\"")
+                if not path_token or path_token.startswith("-"):
+                    return "Error: Command blocked by safety guard (invalid cat path)"
+                path_obj = Path(path_token)
+                if path_obj.is_absolute() or any(part == ".." for part in path_obj.parts):
+                    return "Error: Command blocked by safety guard (cat path must stay relative)"
+                if self.restrict_to_workspace:
+                    cwd_path = Path(cwd).resolve()
+                    resolved = (cwd_path / path_obj).resolve()
+                    if cwd_path not in resolved.parents and resolved != cwd_path:
+                        return "Error: Command blocked by safety guard (cat path outside working dir)"
 
         return None

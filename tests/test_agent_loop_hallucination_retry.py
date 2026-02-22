@@ -67,6 +67,39 @@ async def test_loop_retries_once_on_hallucination_then_uses_tools(monkeypatch, t
     assert any(
         m.get("role") == "user"
         and isinstance(m.get("content"), str)
-        and "completed execution without tool calls" in m["content"]
+        and "Execution request detected" in m["content"]
         for m in second_call_messages
     )
+
+
+async def test_loop_stops_after_one_retry_when_no_tool_calls(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "nanobot.agent.loop.load_config",
+        lambda: (_ for _ in ()).throw(ConfigError("test config missing")),
+    )
+    monkeypatch.setattr("nanobot.agent.loop.supports_function_calling", lambda model: True)
+
+    provider = SequencedProvider(
+        [
+            LLMResponse(
+                content=(
+                    "已开始执行。下一步我会按以下步骤处理：\n"
+                    "1. 读取文件\n2. 跑命令\n3. 汇总结果\n"
+                    "请确认后我继续。"
+                )
+            ),
+            LLMResponse(
+                content=(
+                    "继续执行中。我将继续分步处理并回报。\n"
+                    "1. 继续检查\n2. 继续验证\n3. 输出结论"
+                )
+            ),
+        ]
+    )
+
+    loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path)
+    reply = await loop.process_direct("开始执行", channel="telegram", chat_id="43")
+
+    assert "连续未调用任何工具" in reply
+    assert provider.call_count == 2

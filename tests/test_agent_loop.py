@@ -2,7 +2,7 @@
 from pathlib import Path
 from typing import Any
 
-from nanobot.agent.loop import AgentLoop, _is_lazy_response
+from nanobot.agent.loop import AgentLoop, _is_execution_intent, _is_lazy_response
 from nanobot.bus.queue import MessageBus
 from nanobot.exceptions import ConfigError
 from nanobot.providers.base import LLMProvider, LLMResponse
@@ -69,6 +69,16 @@ def test_lazy_detects_planning_language() -> None:
     assert _is_lazy_response(content) is True
 
 
+def test_lazy_detects_english_if_you_agree_pattern() -> None:
+    content = (
+        "If you agree, I will proceed with these steps right now.\n"
+        "1. Next step: inspect files.\n"
+        "2. Next step: run command.\n"
+        "3. Next step: summarize."
+    )
+    assert _is_lazy_response(content) is True
+
+
 def test_lazy_ignores_normal_response() -> None:
     content = "Implemented the change and verified tests are now passing."
     assert _is_lazy_response(content) is False
@@ -80,6 +90,18 @@ def test_lazy_score_threshold() -> None:
         + "long_context " * 80
     )
     assert _is_lazy_response(content) is False
+
+
+def test_execution_intent_defaults_to_execute_for_imperative_text() -> None:
+    assert _is_execution_intent("帮我部署一下") is True
+    assert _is_execution_intent("把这个改了") is True
+    assert _is_execution_intent("跑个测试") is True
+
+
+def test_execution_intent_excludes_obvious_questions() -> None:
+    assert _is_execution_intent("为什么这样设计？") is False
+    assert _is_execution_intent("这两个方案什么区别") is False
+    assert _is_execution_intent("If you agree, what is the difference?") is False
 
 
 async def test_new_command_returns_feedback(monkeypatch, tmp_path: Path) -> None:

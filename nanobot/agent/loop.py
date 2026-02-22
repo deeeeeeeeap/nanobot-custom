@@ -61,9 +61,14 @@ def _is_lazy_response(content: str, user_message: str = "") -> bool:
     score = 0
     lower = content.lower()
 
-    if any(k in lower for k in ["马上", "立即", "正在", "稍等", "please wait"]):
+    if any(k in lower for k in ["马上", "立即", "正在", "稍等", "please wait", "stand by"]):
         score += 2
-    if any(k in lower for k in ["我会", "i will", "接下来", "next step"]):
+    if any(k in lower for k in ["我会", "我将", "i will", "i'll"]):
+        score += 2
+    if any(
+        k in lower
+        for k in ["接下来", "下一步", "如果你同意", "已开始执行", "next step", "if you agree", "i will proceed", "started execution"]
+    ):
         score += 2
     if re.search(r"\n\s*[1-9]\.\s+", content):
         score += 1
@@ -76,6 +81,36 @@ def _is_lazy_response(content: str, user_message: str = "") -> bool:
     if lazy:
         logger.info(f"Lazy response detected, score={score}")
     return lazy
+
+
+def _is_execution_intent(user_message: str) -> bool:
+    """Default to execution intent, excluding obvious Q&A prompts."""
+    text = (user_message or "").strip()
+    if not text:
+        return False
+
+    lower = text.lower()
+    if text.endswith(("?", "？", "吗", "呢")):
+        return False
+
+    cn_question_markers = (
+        "为什么",
+        "什么区别",
+        "怎么理解",
+        "如何看待",
+        "如何解释",
+    )
+    en_question_markers = (
+        "why",
+        "what's the difference",
+        "what is the difference",
+        "how to explain",
+    )
+    if any(marker in text for marker in cn_question_markers):
+        return False
+    if any(marker in lower for marker in en_question_markers):
+        return False
+    return True
 
 
 class AgentLoop:
@@ -106,6 +141,7 @@ class AgentLoop:
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
         reporter_factory: Callable[[str, str], StatusReporter] | None = None,
+        idle_intervention: bool = True,
     ):
         self.bus = bus
         self.provider = provider
@@ -120,6 +156,7 @@ class AgentLoop:
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
         self.reporter_factory = reporter_factory  # Optional status reporter factory.
+        self.idle_intervention = idle_intervention
         self.search_store = None
         self.search_indexer = None
         self.search_embedder = None
@@ -478,7 +515,9 @@ class AgentLoop:
         final_content = None
         tools_used: list[str] = []
         tools_were_called = False  # Track whether any tool was actually called.
-        hallucination_retry_used = False
+        idle_retry_used = False
+        forced_idle_stop = False
+        execution_intent = _is_execution_intent(msg.content)
 
         # Check whether the current model supports function-calling.
         model_supports_tools = supports_function_calling(self.model)
@@ -537,52 +576,49 @@ class AgentLoop:
                     tools_were_called = True
                 messages.append({"role": "user", "content": "Reflect on the results and decide next steps."})
             else:
-                # Lazy-response detection:
-                # model describes a plan but does not call tools; auto-nudge and retry.
-                if (
-                    iteration <= 2
+                intervene = (
+                    self.idle_intervention
                     and model_supports_tools
-                    and response.content
-                    and _is_lazy_response(response.content, msg.content)
-                ):
-                    logger.warning(
-                        f"Detected lazy response (iteration {iteration}), injecting tool-use nudge"
-                    )
-                    messages = self.context.add_assistant_message(messages, response.content)
-                    nudge = (
-                        "[System directive] Your previous reply described a plan but did not call tools. "
-                        "In the next reply, you must use tools first (e.g., exec/read_file/write_file), "
-                        "then summarize results."
-                    )
-                    messages = self.context.add_user_nudge(messages, nudge)
-                    continue
-
-                # Hallucination guardrail: give the model one tool-forced retry before blocking.
-                if (
-                    model_supports_tools
+                    and execution_intent
                     and response.content
                     and not tools_were_called
-                    and not hallucination_retry_used
-                    and iteration < self.max_iterations
-                ):
+                )
+                if intervene:
+                    if idle_retry_used:
+                        logger.warning(
+                            "Idle intervention level=2 (stop): still no tool calls after one forced retry"
+                        )
+                        forced_idle_stop = True
+                        final_content = (
+                            "⚠️ 检测到你当前请求是执行型任务，但模型连续未调用任何工具。\n"
+                            "本次已停止空转以节省成本。\n\n"
+                            "请直接发送可执行指令（例如：先 read_file/list_dir，再执行下一步），"
+                            "我会立即执行并只回传实测结果。"
+                        )
+                        break
+
+                    lazy = _is_lazy_response(response.content, msg.content)
                     hallucination = detect_hallucination(
                         response.content,
                         tools_were_called=False,
                         model_supports_tools=True,
                     )
-                    if hallucination.is_hallucination:
+                    should_intervene = lazy or hallucination.is_hallucination
+                    if should_intervene and not idle_retry_used and iteration < self.max_iterations:
                         logger.warning(
-                            "Detected fabricated execution without tool calls; forcing one retry "
-                            f"(pattern={hallucination.pattern_name}, confidence={hallucination.confidence:.2f})"
+                            "Idle intervention level=1 (retry once): lazy={}, hallucination={}, pattern={}",
+                            lazy,
+                            hallucination.is_hallucination,
+                            hallucination.pattern_name or "n/a",
                         )
                         messages = self.context.add_assistant_message(messages, response.content)
                         nudge = (
-                            "[System directive] Your previous reply described completed execution without "
-                            "tool calls. In the next reply, you must call relevant tools first, then "
-                            "report only tool-observed results."
+                            "[System directive] Execution request detected. You must call tools in your next reply "
+                            "(for example: read_file/list_dir/exec) before any summary. "
+                            "Do not ask for confirmation, do not restate plans."
                         )
                         messages = self.context.add_user_nudge(messages, nudge)
-                        hallucination_retry_used = True
+                        idle_retry_used = True
                         continue
 
                 # No tool call; use model content as final output.
@@ -597,7 +633,7 @@ class AgentLoop:
             not model_supports_tools
             or (model_supports_tools and not tools_were_called)  # model supports tools, but none were called
         )
-        if should_check_hallucination:
+        if should_check_hallucination and not forced_idle_stop:
             hallucination = detect_hallucination(
                 final_content,
                 tools_were_called=tools_were_called,
