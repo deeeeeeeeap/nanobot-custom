@@ -11,7 +11,6 @@ class SequencedProvider(LLMProvider):
     def __init__(self, responses: list[LLMResponse]):
         super().__init__(api_key=None, api_base=None)
         self.responses = responses
-        self.calls: list[list[dict[str, Any]]] = []
         self.tool_choices: list[str] = []
         self.call_count = 0
 
@@ -24,7 +23,6 @@ class SequencedProvider(LLMProvider):
         max_tokens: int = 4096,
         temperature: float = 0.7,
     ) -> LLMResponse:
-        self.calls.append(messages)
         self.tool_choices.append(tool_choice)
         self.call_count += 1
         if self.call_count <= len(self.responses):
@@ -35,48 +33,28 @@ class SequencedProvider(LLMProvider):
         return "openai/gpt-4o-mini"
 
 
-async def test_execution_intent_without_tools_uses_required_and_stops(
-    monkeypatch, tmp_path: Path
-) -> None:
+class _NoHallucination:
+    is_hallucination = False
+    pattern_name = ""
+    confidence = 0.0
+
+
+def _prepare(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     monkeypatch.setattr(
         "nanobot.agent.loop.load_config",
         lambda: (_ for _ in ()).throw(ConfigError("test config missing")),
     )
     monkeypatch.setattr("nanobot.agent.loop.supports_function_calling", lambda model: True)
+    monkeypatch.setattr("nanobot.agent.loop.detect_hallucination", lambda *a, **k: _NoHallucination())
+
+
+async def test_execution_intent_retries_once_then_uses_tools(monkeypatch, tmp_path: Path) -> None:
+    _prepare(monkeypatch, tmp_path)
 
     provider = SequencedProvider(
         [
-            LLMResponse(
-                content=(
-                    "已开始执行。下一步我会按以下步骤处理：\n"
-                    "1. 读取文件\n2. 运行命令\n3. 汇总结果\n"
-                    "如果你同意我将继续。"
-                )
-            )
-        ]
-    )
-    loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path)
-
-    reply = await loop.process_direct("开始执行", channel="telegram", chat_id="43")
-
-    assert "未产生有效工具调用" in reply
-    assert provider.call_count == 1
-    assert provider.tool_choices == ["required"]
-
-
-async def test_meaningful_tool_call_switches_later_rounds_to_auto(
-    monkeypatch, tmp_path: Path
-) -> None:
-    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-    monkeypatch.setattr(
-        "nanobot.agent.loop.load_config",
-        lambda: (_ for _ in ()).throw(ConfigError("test config missing")),
-    )
-    monkeypatch.setattr("nanobot.agent.loop.supports_function_calling", lambda model: True)
-
-    provider = SequencedProvider(
-        [
+            LLMResponse(content="我会开始执行，下一步处理文件并汇总结果。"),
             LLMResponse(
                 content=None,
                 tool_calls=[
@@ -87,7 +65,7 @@ async def test_meaningful_tool_call_switches_later_rounds_to_auto(
                     )
                 ],
             ),
-            LLMResponse(content="已读取文件并完成。"),
+            LLMResponse(content="已执行完成。"),
         ]
     )
     loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path)
@@ -97,21 +75,36 @@ async def test_meaningful_tool_call_switches_later_rounds_to_auto(
         return "ok"
 
     monkeypatch.setattr(loop.tools, "execute", _fake_execute)
+    reply = await loop.process_direct("开始执行", channel="telegram", chat_id="43")
+
+    assert "已执行完成" in reply
+    assert provider.tool_choices == ["required", "required", "auto"]
+
+
+async def test_execution_intent_stops_after_single_internal_retry(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _prepare(monkeypatch, tmp_path)
+
+    provider = SequencedProvider(
+        [
+            LLMResponse(content="我会继续执行。"),
+            LLMResponse(content="继续执行中。"),
+        ]
+    )
+    loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path)
+
     reply = await loop.process_direct("开始执行", channel="telegram", chat_id="44")
 
-    assert "已读取文件并完成" in reply
-    assert provider.tool_choices == ["required", "auto"]
+    assert "未产生有效工具调用" in reply
+    assert provider.call_count == 2
+    assert provider.tool_choices == ["required", "required"]
 
 
 async def test_required_tool_choice_error_falls_back_to_auto_once(
     monkeypatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-    monkeypatch.setattr(
-        "nanobot.agent.loop.load_config",
-        lambda: (_ for _ in ()).throw(ConfigError("test config missing")),
-    )
-    monkeypatch.setattr("nanobot.agent.loop.supports_function_calling", lambda model: True)
+    _prepare(monkeypatch, tmp_path)
 
     provider = SequencedProvider(
         [
@@ -143,12 +136,7 @@ async def test_required_tool_choice_error_falls_back_to_auto_once(
 
 
 async def test_non_execution_intent_keeps_tool_choice_auto(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-    monkeypatch.setattr(
-        "nanobot.agent.loop.load_config",
-        lambda: (_ for _ in ()).throw(ConfigError("test config missing")),
-    )
-    monkeypatch.setattr("nanobot.agent.loop.supports_function_calling", lambda model: True)
+    _prepare(monkeypatch, tmp_path)
 
     provider = SequencedProvider([LLMResponse(content="这是问答，不需要执行工具。")])
     loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path)
@@ -157,3 +145,23 @@ async def test_non_execution_intent_keeps_tool_choice_auto(monkeypatch, tmp_path
 
     assert "这是问答" in reply
     assert provider.tool_choices == ["auto"]
+
+
+async def test_repeated_failure_escalates_user_message(monkeypatch, tmp_path: Path) -> None:
+    _prepare(monkeypatch, tmp_path)
+
+    provider = SequencedProvider(
+        [
+            LLMResponse(content="我会先准备。"),
+            LLMResponse(content="继续准备。"),
+            LLMResponse(content="我会继续处理。"),
+            LLMResponse(content="继续处理中。"),
+        ]
+    )
+    loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path)
+
+    first = await loop.process_direct("开始执行", channel="telegram", chat_id="47")
+    second = await loop.process_direct("开始执行", channel="telegram", chat_id="47")
+
+    assert "未产生有效工具调用" in first
+    assert "连续两次未触发有效工具调用" in second

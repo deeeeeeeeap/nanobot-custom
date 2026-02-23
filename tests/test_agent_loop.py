@@ -110,6 +110,12 @@ def test_execution_intent_excludes_obvious_questions() -> None:
     assert _is_execution_intent("If you agree, what is the difference?") is False
 
 
+def test_execution_intent_excludes_smalltalk() -> None:
+    assert _is_execution_intent("hello") is False
+    assert _is_execution_intent("你好") is False
+    assert _is_execution_intent("谢谢") is False
+
+
 def test_lazy_detects_admitted_inaction() -> None:
     """模型承认自己还没做正事的典型空转模式。"""
     content = (

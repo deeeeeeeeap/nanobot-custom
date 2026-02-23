@@ -94,6 +94,24 @@ def _is_execution_intent(user_message: str) -> bool:
         return False
 
     lower = text.lower()
+    smalltalk_literals = {
+        "hi",
+        "hello",
+        "hey",
+        "thanks",
+        "thank you",
+        "ok",
+        "okay",
+        "你好",
+        "嗨",
+        "哈喽",
+        "在吗",
+        "谢谢",
+        "好的",
+    }
+    if lower in smalltalk_literals or text in smalltalk_literals:
+        return False
+
     if text.endswith(("?", "？", "吗", "呢")):
         return False
 
@@ -544,6 +562,9 @@ class AgentLoop:
         tools_used: list[str] = []
         tools_were_called = False  # Track whether any tool was actually called.
         meaningful_tools_called = False
+        required_retry_used = False
+        required_no_tool_blocked = False
+        required_no_tool_streak = int(session.metadata.get("required_no_tool_streak", 0))
         execution_intent = _is_execution_intent(msg.content)
 
         # Check whether the current model supports function-calling.
@@ -650,24 +671,53 @@ class AgentLoop:
                         hallucination.pattern_name,
                         hallucination.confidence,
                     )
-                suspicious_response = lazy or (hallucination.is_hallucination if hallucination else False)
-                if (
+                required_guard = (
                     self.idle_intervention
                     and model_supports_tools
                     and execution_intent
                     and not meaningful_tools_called
-                    and suspicious_response
-                ):
+                    and requested_tool_choice == "required"
+                )
+                if required_guard:
+                    if not required_retry_used and iteration < self.max_iterations:
+                        logger.warning(
+                            "[E_TOOL_CHOICE_IGNORED] tool_choice=required returned no tool_calls, retrying with explicit nudge once"
+                        )
+                        messages = self.context.add_assistant_message(
+                            messages, response.content, reasoning_content=response.reasoning_content
+                        )
+                        nudge = (
+                            "[System directive] Execution request detected. "
+                            "In your next reply, call tools directly first (read_file/list_dir/exec). "
+                            "Do not ask for confirmation and do not restate plans."
+                        )
+                        messages = self.context.add_user_nudge(messages, nudge)
+                        required_retry_used = True
+                        continue
+
+                    required_no_tool_blocked = True
+                    required_no_tool_streak += 1
                     logger.warning(
-                        "[E_IDLE_EXEC_NO_MEANINGFUL_TOOL] tool_choice={}, stopping idle execution path",
+                        "[E_IDLE_EXEC_NO_MEANINGFUL_TOOL] tool_choice={}, streak={}, stopping idle execution path",
                         actual_tool_choice,
+                        required_no_tool_streak,
                     )
-                    final_content = (
-                        "⚠️ 检测到你当前请求是执行型任务，但模型未产生有效工具调用。\n"
-                        "本次已停止空转以节省成本。\n\n"
-                        "请直接发送可执行指令（例如：先 read_file/list_dir，再执行下一步），"
-                        "我会立即执行并只回传实测结果。"
-                    )
+                    if required_no_tool_streak >= 2:
+                        final_content = (
+                            "⚠️ 执行型请求连续两次未触发有效工具调用。\n"
+                            "这通常是当前模型/网关未稳定支持工具调用导致。\n\n"
+                            "建议：\n"
+                            "1) 切换到已验证支持工具调用的模型；\n"
+                            "2) 保持请求不变再试一次；\n"
+                            "3) 若仍失败，请检查 provider 对 tool_choice=required 的兼容性。"
+                        )
+                    else:
+                        final_content = (
+                            "⚠️ 检测到你当前请求是执行型任务，但模型未产生有效工具调用。\n"
+                            "本次已停止空转以节省成本。\n\n"
+                            "请直接发送可执行指令（例如：先 read_file/list_dir，再执行下一步），"
+                            "我会立即执行并只回传实测结果。"
+                        )
                     break
 
                 # No tool call; use model content as final output.
@@ -699,6 +749,10 @@ class AgentLoop:
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
 
         # Persist conversation; include used tools for later memory consolidation.
+        if required_no_tool_blocked:
+            session.metadata["required_no_tool_streak"] = required_no_tool_streak
+        else:
+            session.metadata["required_no_tool_streak"] = 0
         session.add_message("user", msg.content)
         session.add_message("assistant", final_content,
                             tools_used=tools_used if tools_used else None)
