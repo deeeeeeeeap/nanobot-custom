@@ -634,7 +634,7 @@ class AgentLoop:
                     if _is_meaningful_tool_call(tool_call.name, tool_call.arguments):
                         meaningful_tools_called = True
                     tools_were_called = True
-                messages.append({"role": "user", "content": "Based on tool results, proceed with next action. Call tools directly, do not restate plans."})
+                messages.append({"role": "user", "content": "Based on tool results, proceed with next action or summarize results. Do not restate plans without acting."})
             else:
                 lazy = _is_lazy_response(response.content or "", msg.content) if response.content else False
                 if lazy:
