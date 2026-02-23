@@ -2,7 +2,12 @@
 from pathlib import Path
 from typing import Any
 
-from nanobot.agent.loop import AgentLoop, _is_execution_intent, _is_lazy_response
+from nanobot.agent.loop import (
+    AgentLoop,
+    _is_execution_intent,
+    _is_lazy_response,
+    _is_meaningful_tool_call,
+)
 from nanobot.bus.queue import MessageBus
 from nanobot.exceptions import ConfigError
 from nanobot.providers.base import LLMProvider, LLMResponse
@@ -125,6 +130,13 @@ def test_idle_exempt_tools() -> None:
     assert "send_message" in _IDLE_EXEMPT_TOOLS
     assert "exec" not in _IDLE_EXEMPT_TOOLS
     assert "read_file" not in _IDLE_EXEMPT_TOOLS
+
+
+def test_meaningful_tool_call_for_exec_trivial_vs_real() -> None:
+    assert _is_meaningful_tool_call("message", {"content": "ping"}) is False
+    assert _is_meaningful_tool_call("exec", {"command": "whoami"}) is False
+    assert _is_meaningful_tool_call("exec", {"command": "date"}) is False
+    assert _is_meaningful_tool_call("exec", {"command": "ls -la"}) is True
 
 
 async def test_new_command_returns_feedback(monkeypatch, tmp_path: Path) -> None:

@@ -103,3 +103,50 @@ async def test_loop_stops_after_one_retry_when_no_tool_calls(monkeypatch, tmp_pa
 
     assert "连续未调用任何工具" in reply
     assert provider.call_count == 2
+
+
+async def test_loop_stops_when_only_trivial_exec_was_called(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "nanobot.agent.loop.load_config",
+        lambda: (_ for _ in ()).throw(ConfigError("test config missing")),
+    )
+    monkeypatch.setattr("nanobot.agent.loop.supports_function_calling", lambda model: True)
+
+    provider = SequencedProvider(
+        [
+            LLMResponse(
+                content=None,
+                tool_calls=[
+                    ToolCallRequest(
+                        id="tc_exec",
+                        name="exec",
+                        arguments={"command": "whoami"},
+                    )
+                ],
+            ),
+            LLMResponse(
+                content=(
+                    "已开始执行，下一步我会继续处理并很快给你结果，请继续等待：\n"
+                    "1. 继续检查\n2. 继续验证\n3. 输出结论"
+                )
+            ),
+            LLMResponse(
+                content=(
+                    "继续执行中，我将马上给你最终结果。"
+                )
+            ),
+        ]
+    )
+
+    loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path)
+
+    async def _fake_execute(name: str, arguments: dict[str, Any]) -> str:
+        assert name == "exec"
+        return "tester"
+
+    monkeypatch.setattr(loop.tools, "execute", _fake_execute)
+
+    reply = await loop.process_direct("开始执行", channel="telegram", chat_id="44")
+    assert "连续未调用任何工具" in reply
+    assert provider.call_count == 3

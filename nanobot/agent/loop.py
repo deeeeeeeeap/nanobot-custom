@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from typing import Callable
 
@@ -118,6 +119,26 @@ def _is_execution_intent(user_message: str) -> bool:
 
 # 这些工具不算「真正完成了任务」，即使调了也不阻止空转干预
 _IDLE_EXEMPT_TOOLS = frozenset({"message", "send_message"})
+_IDLE_EXEMPT_EXEC_COMMANDS = frozenset({"date", "pwd", "whoami", "hostname"})
+
+
+def _is_meaningful_tool_call(tool_name: str, arguments: dict | None = None) -> bool:
+    """Return whether this tool call should count as meaningful progress."""
+    if tool_name in _IDLE_EXEMPT_TOOLS:
+        return False
+    if tool_name != "exec":
+        return True
+
+    command = str((arguments or {}).get("command", "")).strip().lower()
+    if not command:
+        return False
+    # If command chains multiple operations, treat it as meaningful.
+    if any(op in command for op in ("&&", "||", ";", "|")):
+        return True
+    # Single lightweight identity/time checks do not count as meaningful progress.
+    if re.fullmatch(r"(date|pwd|whoami|hostname)(\s+[-/\w:.]+)?", command):
+        return False
+    return True
 
 
 class AgentLoop:
@@ -522,6 +543,7 @@ class AgentLoop:
         final_content = None
         tools_used: list[str] = []
         tools_were_called = False  # Track whether any tool was actually called.
+        meaningful_tools_called = False
         idle_retry_used = False
         forced_idle_stop = False
         execution_intent = _is_execution_intent(msg.content)
@@ -580,17 +602,17 @@ class AgentLoop:
                         messages, tool_call.id, tool_call.name, result
                     )
                     tools_used.append(tool_call.name)
+                    if _is_meaningful_tool_call(tool_call.name, tool_call.arguments):
+                        meaningful_tools_called = True
                     tools_were_called = True
                 messages.append({"role": "user", "content": "Based on tool results, proceed with next action. Call tools directly, do not restate plans."})
             else:
-                # 只有「有意义」的工具调用才算完成任务；message/send_message 属于打卡、不算
-                meaningful_tools = [t for t in tools_used if t not in _IDLE_EXEMPT_TOOLS]
                 intervene = (
                     self.idle_intervention
                     and model_supports_tools
                     and execution_intent
                     and response.content
-                    and not meaningful_tools
+                    and not meaningful_tools_called
                 )
                 if intervene:
                     if idle_retry_used:
