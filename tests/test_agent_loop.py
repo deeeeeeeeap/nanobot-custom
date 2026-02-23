@@ -104,6 +104,29 @@ def test_execution_intent_excludes_obvious_questions() -> None:
     assert _is_execution_intent("If you agree, what is the difference?") is False
 
 
+def test_lazy_detects_admitted_inaction() -> None:
+    """模型承认自己还没做正事的典型空转模式。"""
+    content = (
+        "进展复盘：\n"
+        "- ✅ 已发执行中通知给你\n"
+        "- ❌ 还没做你要求的核心动作\n"
+        "下一步我将直接执行，不再停顿：\n"
+        "1. 提取段落到归档\n"
+        "2. 从 MEMORY.md 删除\n"
+        "3. 发完成通知"
+    )
+    assert _is_lazy_response(content) is True
+
+
+def test_idle_exempt_tools() -> None:
+    """message/send_message 不算有意义的工具调用。"""
+    from nanobot.agent.loop import _IDLE_EXEMPT_TOOLS
+    assert "message" in _IDLE_EXEMPT_TOOLS
+    assert "send_message" in _IDLE_EXEMPT_TOOLS
+    assert "exec" not in _IDLE_EXEMPT_TOOLS
+    assert "read_file" not in _IDLE_EXEMPT_TOOLS
+
+
 async def test_new_command_returns_feedback(monkeypatch, tmp_path: Path) -> None:
     loop = _make_loop(monkeypatch, tmp_path)
     session = loop.sessions.get_or_create("telegram:42")

@@ -70,6 +70,9 @@ def _is_lazy_response(content: str, user_message: str = "") -> bool:
         for k in ["接下来", "下一步", "如果你同意", "已开始执行", "next step", "if you agree", "i will proceed", "started execution"]
     ):
         score += 2
+    # 模型承认自己还没做正事（打卡后继续空转的典型模式）
+    if any(k in lower for k in ["还没做", "还未完成", "未完成核心", "未完成你要求", "还没真正", "not yet done", "haven't completed", "not yet completed"]):
+        score += 3
     if re.search(r"\n\s*[1-9]\.\s+", content):
         score += 1
     if len(content) > 200:
@@ -111,6 +114,10 @@ def _is_execution_intent(user_message: str) -> bool:
     if any(marker in lower for marker in en_question_markers):
         return False
     return True
+
+
+# 这些工具不算「真正完成了任务」，即使调了也不阻止空转干预
+_IDLE_EXEMPT_TOOLS = frozenset({"message", "send_message"})
 
 
 class AgentLoop:
@@ -574,14 +581,16 @@ class AgentLoop:
                     )
                     tools_used.append(tool_call.name)
                     tools_were_called = True
-                messages.append({"role": "user", "content": "Reflect on the results and decide next steps."})
+                messages.append({"role": "user", "content": "Based on tool results, proceed with next action. Call tools directly, do not restate plans."})
             else:
+                # 只有「有意义」的工具调用才算完成任务；message/send_message 属于打卡、不算
+                meaningful_tools = [t for t in tools_used if t not in _IDLE_EXEMPT_TOOLS]
                 intervene = (
                     self.idle_intervention
                     and model_supports_tools
                     and execution_intent
                     and response.content
-                    and not tools_were_called
+                    and not meaningful_tools
                 )
                 if intervene:
                     if idle_retry_used:

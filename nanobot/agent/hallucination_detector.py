@@ -30,7 +30,7 @@ HALLUCINATION_PATTERNS: list[tuple[str, str, float]] = [
     ("fake_file_read", r"读取.*?文件.*?[:：]", 0.7),
     # Claimed system status evidence.
     ("fake_system_status", r"(系统状态|system status)[:：]?\\s*\\n.*?(cpu|memory|disk|负载)", 0.8),
-    ("fake_table_status", r"\\|\\s*项目\\s*\\|\\s*状态\\s*\\|", 0.7),
+    ("fake_table_status", r"\\|\s*项目\s*\\|\s*状态\s*\\|[^\n]*\\|\s*(正常|异常|running|stopped|✅|❌)", 0.7),
     # Claimed execution without tools.
     (
         "claimed_execution",
