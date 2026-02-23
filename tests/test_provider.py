@@ -98,3 +98,56 @@ async def test_provider_chat_injects_cache_control_for_supported_model(monkeypat
     messages = kwargs["messages"]
     assert isinstance(messages, list)
     assert messages[0]["content"][0]["cache_control"]["type"] == "ephemeral"
+    assert kwargs["tool_choice"] == "auto"
+
+
+async def test_provider_chat_passes_required_tool_choice(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def _fake_completion(**kwargs):
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(content="ok", reasoning_content=None, tool_calls=None),
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+
+    monkeypatch.setattr("nanobot.providers.litellm_provider.acompletion", _fake_completion)
+    provider = LiteLLMProvider(api_key="k", default_model="openai/gpt-4o-mini")
+    await provider.chat(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[{"type": "function", "function": {"name": "ping"}}],
+        tool_choice="required",
+    )
+
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs["tool_choice"] == "required"
+
+
+async def test_provider_chat_omits_tool_choice_without_tools(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def _fake_completion(**kwargs):
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(content="ok", reasoning_content=None, tool_calls=None),
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+
+    monkeypatch.setattr("nanobot.providers.litellm_provider.acompletion", _fake_completion)
+    provider = LiteLLMProvider(api_key="k", default_model="openai/gpt-4o-mini")
+    await provider.chat(messages=[{"role": "user", "content": "hi"}], tools=None, tool_choice="required")
+
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert "tool_choice" not in kwargs

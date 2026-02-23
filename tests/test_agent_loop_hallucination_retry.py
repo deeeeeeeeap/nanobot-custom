@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 from typing import Any
 
 from nanobot.agent.loop import AgentLoop
@@ -12,17 +12,20 @@ class SequencedProvider(LLMProvider):
         super().__init__(api_key=None, api_base=None)
         self.responses = responses
         self.calls: list[list[dict[str, Any]]] = []
+        self.tool_choices: list[str] = []
         self.call_count = 0
 
     async def chat(
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
     ) -> LLMResponse:
         self.calls.append(messages)
+        self.tool_choices.append(tool_choice)
         self.call_count += 1
         if self.call_count <= len(self.responses):
             return self.responses[self.call_count - 1]
@@ -32,47 +35,9 @@ class SequencedProvider(LLMProvider):
         return "openai/gpt-4o-mini"
 
 
-async def test_loop_retries_once_on_hallucination_then_uses_tools(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-    monkeypatch.setattr(
-        "nanobot.agent.loop.load_config",
-        lambda: (_ for _ in ()).throw(ConfigError("test config missing")),
-    )
-    monkeypatch.setattr("nanobot.agent.loop.supports_function_calling", lambda model: True)
-
-    provider = SequencedProvider(
-        [
-            LLMResponse(content="我已经执行命令，结果如下：```bash\nls -la\n```"),
-            LLMResponse(
-                content=None,
-                tool_calls=[
-                    ToolCallRequest(
-                        id="tc1",
-                        name="read_file",
-                        arguments={"path": "missing.txt"},
-                    )
-                ],
-            ),
-            LLMResponse(content="已改为真实执行，missing.txt 不存在。"),
-        ]
-    )
-
-    loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path)
-    reply = await loop.process_direct("开始执行", channel="telegram", chat_id="42")
-
-    assert "检测到异常" not in reply
-    assert "missing.txt" in reply
-    assert provider.call_count == 3
-    second_call_messages = provider.calls[1]
-    assert any(
-        m.get("role") == "user"
-        and isinstance(m.get("content"), str)
-        and "Execution request detected" in m["content"]
-        for m in second_call_messages
-    )
-
-
-async def test_loop_stops_after_one_retry_when_no_tool_calls(monkeypatch, tmp_path: Path) -> None:
+async def test_execution_intent_without_tools_uses_required_and_stops(
+    monkeypatch, tmp_path: Path
+) -> None:
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     monkeypatch.setattr(
         "nanobot.agent.loop.load_config",
@@ -85,27 +50,24 @@ async def test_loop_stops_after_one_retry_when_no_tool_calls(monkeypatch, tmp_pa
             LLMResponse(
                 content=(
                     "已开始执行。下一步我会按以下步骤处理：\n"
-                    "1. 读取文件\n2. 跑命令\n3. 汇总结果\n"
-                    "请确认后我继续。"
+                    "1. 读取文件\n2. 运行命令\n3. 汇总结果\n"
+                    "如果你同意我将继续。"
                 )
-            ),
-            LLMResponse(
-                content=(
-                    "继续执行中。我将继续分步处理并回报。\n"
-                    "1. 继续检查\n2. 继续验证\n3. 输出结论"
-                )
-            ),
+            )
         ]
     )
-
     loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path)
+
     reply = await loop.process_direct("开始执行", channel="telegram", chat_id="43")
 
-    assert "连续未调用任何工具" in reply
-    assert provider.call_count == 2
+    assert "未产生有效工具调用" in reply
+    assert provider.call_count == 1
+    assert provider.tool_choices == ["required"]
 
 
-async def test_loop_stops_when_only_trivial_exec_was_called(monkeypatch, tmp_path: Path) -> None:
+async def test_meaningful_tool_call_switches_later_rounds_to_auto(
+    monkeypatch, tmp_path: Path
+) -> None:
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     monkeypatch.setattr(
         "nanobot.agent.loop.load_config",
@@ -119,34 +81,79 @@ async def test_loop_stops_when_only_trivial_exec_was_called(monkeypatch, tmp_pat
                 content=None,
                 tool_calls=[
                     ToolCallRequest(
-                        id="tc_exec",
-                        name="exec",
-                        arguments={"command": "whoami"},
+                        id="tc1",
+                        name="read_file",
+                        arguments={"path": "README.md"},
                     )
                 ],
             ),
-            LLMResponse(
-                content=(
-                    "已开始执行，下一步我会继续处理并很快给你结果，请继续等待：\n"
-                    "1. 继续检查\n2. 继续验证\n3. 输出结论"
-                )
-            ),
-            LLMResponse(
-                content=(
-                    "继续执行中，我将马上给你最终结果。"
-                )
-            ),
+            LLMResponse(content="已读取文件并完成。"),
         ]
     )
-
     loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path)
 
     async def _fake_execute(name: str, arguments: dict[str, Any]) -> str:
-        assert name == "exec"
-        return "tester"
+        assert name == "read_file"
+        return "ok"
 
     monkeypatch.setattr(loop.tools, "execute", _fake_execute)
-
     reply = await loop.process_direct("开始执行", channel="telegram", chat_id="44")
-    assert "连续未调用任何工具" in reply
-    assert provider.call_count == 3
+
+    assert "已读取文件并完成" in reply
+    assert provider.tool_choices == ["required", "auto"]
+
+
+async def test_required_tool_choice_error_falls_back_to_auto_once(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "nanobot.agent.loop.load_config",
+        lambda: (_ for _ in ()).throw(ConfigError("test config missing")),
+    )
+    monkeypatch.setattr("nanobot.agent.loop.supports_function_calling", lambda model: True)
+
+    provider = SequencedProvider(
+        [
+            LLMResponse(content="Error calling LLM: unsupported tool_choice", finish_reason="error"),
+            LLMResponse(
+                content=None,
+                tool_calls=[
+                    ToolCallRequest(
+                        id="tc1",
+                        name="read_file",
+                        arguments={"path": "README.md"},
+                    )
+                ],
+            ),
+            LLMResponse(content="回退后执行成功。"),
+        ]
+    )
+    loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path)
+
+    async def _fake_execute(name: str, arguments: dict[str, Any]) -> str:
+        assert name == "read_file"
+        return "ok"
+
+    monkeypatch.setattr(loop.tools, "execute", _fake_execute)
+    reply = await loop.process_direct("开始执行", channel="telegram", chat_id="45")
+
+    assert "回退后执行成功" in reply
+    assert provider.tool_choices == ["required", "auto", "auto"]
+
+
+async def test_non_execution_intent_keeps_tool_choice_auto(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "nanobot.agent.loop.load_config",
+        lambda: (_ for _ in ()).throw(ConfigError("test config missing")),
+    )
+    monkeypatch.setattr("nanobot.agent.loop.supports_function_calling", lambda model: True)
+
+    provider = SequencedProvider([LLMResponse(content="这是问答，不需要执行工具。")])
+    loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path)
+
+    reply = await loop.process_direct("为什么这样设计？", channel="telegram", chat_id="46")
+
+    assert "这是问答" in reply
+    assert provider.tool_choices == ["auto"]

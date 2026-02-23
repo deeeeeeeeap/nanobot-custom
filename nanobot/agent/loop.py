@@ -544,8 +544,6 @@ class AgentLoop:
         tools_used: list[str] = []
         tools_were_called = False  # Track whether any tool was actually called.
         meaningful_tools_called = False
-        idle_retry_used = False
-        forced_idle_stop = False
         execution_intent = _is_execution_intent(msg.content)
 
         # Check whether the current model supports function-calling.
@@ -559,11 +557,42 @@ class AgentLoop:
             is_codex = "codex" in current_model.lower()
             await reporter.report(StatusMessage.thinking(is_codex=is_codex))
 
+            tools_definitions = self.tools.get_definitions() if model_supports_tools else None
+            requested_tool_choice = (
+                "required"
+                if (
+                    self.idle_intervention
+                    and execution_intent
+                    and model_supports_tools
+                    and not meaningful_tools_called
+                )
+                else "auto"
+            )
+            logger.debug(
+                "Tool choice decision: execution_intent={}, meaningful_tools_called={}, tool_choice={}",
+                execution_intent,
+                meaningful_tools_called,
+                requested_tool_choice,
+            )
+
             response = await self.provider.chat(
                 messages=messages,
-                tools=self.tools.get_definitions() if model_supports_tools else None,
-                model=self.model
+                tools=tools_definitions,
+                tool_choice=requested_tool_choice,
+                model=self.model,
             )
+            actual_tool_choice = requested_tool_choice
+            if requested_tool_choice == "required" and response.finish_reason == "error":
+                logger.warning(
+                    "[E_TOOL_CHOICE_FALLBACK] tool_choice=required failed, retrying with auto once"
+                )
+                response = await self.provider.chat(
+                    messages=messages,
+                    tools=tools_definitions,
+                    tool_choice="auto",
+                    model=self.model,
+                )
+                actual_tool_choice = "auto"
 
             # Handle tool calls.
             if response.has_tool_calls:
@@ -607,64 +636,53 @@ class AgentLoop:
                     tools_were_called = True
                 messages.append({"role": "user", "content": "Based on tool results, proceed with next action. Call tools directly, do not restate plans."})
             else:
-                intervene = (
+                lazy = _is_lazy_response(response.content or "", msg.content) if response.content else False
+                if lazy:
+                    logger.warning("Lazy response observed (monitor-only): iteration={}", iteration)
+                hallucination = detect_hallucination(
+                    response.content or "",
+                    tools_were_called=False,
+                    model_supports_tools=model_supports_tools,
+                ) if response.content else None
+                if hallucination and hallucination.is_hallucination:
+                    logger.warning(
+                        "Hallucination signal observed (monitor-only): pattern={}, confidence={:.2f}",
+                        hallucination.pattern_name,
+                        hallucination.confidence,
+                    )
+                suspicious_response = lazy or (hallucination.is_hallucination if hallucination else False)
+                if (
                     self.idle_intervention
                     and model_supports_tools
                     and execution_intent
-                    and response.content
                     and not meaningful_tools_called
-                )
-                if intervene:
-                    if idle_retry_used:
-                        logger.warning(
-                            "Idle intervention level=2 (stop): still no tool calls after one forced retry"
-                        )
-                        forced_idle_stop = True
-                        final_content = (
-                            "⚠️ 检测到你当前请求是执行型任务，但模型连续未调用任何工具。\n"
-                            "本次已停止空转以节省成本。\n\n"
-                            "请直接发送可执行指令（例如：先 read_file/list_dir，再执行下一步），"
-                            "我会立即执行并只回传实测结果。"
-                        )
-                        break
-
-                    lazy = _is_lazy_response(response.content, msg.content)
-                    hallucination = detect_hallucination(
-                        response.content,
-                        tools_were_called=False,
-                        model_supports_tools=True,
+                    and suspicious_response
+                ):
+                    logger.warning(
+                        "[E_IDLE_EXEC_NO_MEANINGFUL_TOOL] tool_choice={}, stopping idle execution path",
+                        actual_tool_choice,
                     )
-                    should_intervene = lazy or hallucination.is_hallucination
-                    if should_intervene and not idle_retry_used and iteration < self.max_iterations:
-                        logger.warning(
-                            "Idle intervention level=1 (retry once): lazy={}, hallucination={}, pattern={}",
-                            lazy,
-                            hallucination.is_hallucination,
-                            hallucination.pattern_name or "n/a",
-                        )
-                        messages = self.context.add_assistant_message(messages, response.content)
-                        nudge = (
-                            "[System directive] Execution request detected. You must call tools in your next reply "
-                            "(for example: read_file/list_dir/exec) before any summary. "
-                            "Do not ask for confirmation, do not restate plans."
-                        )
-                        messages = self.context.add_user_nudge(messages, nudge)
-                        idle_retry_used = True
-                        continue
+                    final_content = (
+                        "⚠️ 检测到你当前请求是执行型任务，但模型未产生有效工具调用。\n"
+                        "本次已停止空转以节省成本。\n\n"
+                        "请直接发送可执行指令（例如：先 read_file/list_dir，再执行下一步），"
+                        "我会立即执行并只回传实测结果。"
+                    )
+                    break
 
                 # No tool call; use model content as final output.
                 final_content = response.content
                 break
 
         if not final_content:
-            final_content = "锛堜换鍔″凡鎵ц瀹屾瘯锛屼絾妯″瀷鏈敓鎴愬洖澶嶆枃鏈€傦級"
+            final_content = "（任务已执行完毕，但模型未生成回复文本。）"
 
         # Run hallucination checks when tools are unavailable or not used.
         should_check_hallucination = (
             not model_supports_tools
             or (model_supports_tools and not tools_were_called)  # model supports tools, but none were called
         )
-        if should_check_hallucination and not forced_idle_stop:
+        if should_check_hallucination:
             hallucination = detect_hallucination(
                 final_content,
                 tools_were_called=tools_were_called,
@@ -743,6 +761,7 @@ class AgentLoop:
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
+                tool_choice="auto",
                 model=self.model
             )
 
@@ -954,6 +973,7 @@ Respond with ONLY valid JSON, no markdown fences."""
                     {"role": "system", "content": "You are a memory consolidation agent. Respond only with valid JSON."},
                     {"role": "user", "content": prompt},
                 ],
+                tool_choice="auto",
                 model=self.model,
             )
             text = (response.content or "").strip()

@@ -131,6 +131,7 @@ class SubagentManager:
                 response = await self.provider.chat(
                     messages=messages,
                     tools=tools.get_definitions(),
+                    tool_choice="auto",
                     model=self.model,
                 )
                 

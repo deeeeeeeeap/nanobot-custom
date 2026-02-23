@@ -12,6 +12,7 @@ class _Provider(LLMProvider):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
@@ -74,4 +75,3 @@ async def test_session_compressor_create_and_summary(tmp_path: Path) -> None:
     assert result.created == 1
     assert result.summary == "会话摘要"
     assert "会话摘要" in memory_store.history_file.read_text(encoding="utf-8")
-

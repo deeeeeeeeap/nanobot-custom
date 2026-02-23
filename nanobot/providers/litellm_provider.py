@@ -138,6 +138,7 @@ class LiteLLMProvider(LLMProvider):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
@@ -169,13 +170,14 @@ class LiteLLMProvider(LLMProvider):
             kwargs["extra_headers"] = self.extra_headers
         if tools:
             kwargs["tools"] = tools
-            kwargs["tool_choice"] = "auto"
+            kwargs["tool_choice"] = tool_choice
 
         try:
             logger.debug(
-                "LLM request: model={}, tools={}, api_base={}",
+                "LLM request: model={}, tools={}, tool_choice={}, api_base={}",
                 model,
                 len(tools) if tools else 0,
+                kwargs.get("tool_choice", "n/a"),
                 kwargs.get("api_base", "default"),
             )
             response = await acompletion(**kwargs)

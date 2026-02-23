@@ -27,14 +27,8 @@ HALLUCINATION_PATTERNS: list[tuple[str, str, float]] = [
     ("fake_search_claim", r"根据(我的)?(搜索|查询|检索|web_search|网络搜索).{0,80}(找到|发现|显示|结果)", 0.8),
     # Claimed file-read evidence.
     ("fake_file_content", r"(文件内容|file content)[:：]?\\s*\\n?\\s*```", 0.8),
-    ("fake_file_read", r"读取.*?文件.*?[:：]", 0.7),
     # Claimed system status evidence.
     ("fake_system_status", r"(系统状态|system status)[:：]?\\s*\\n.*?(cpu|memory|disk|负载)", 0.8),
-    (
-        "fake_table_status",
-        r"\|\s*项目\s*\|\s*状态\s*\|[\s\S]{0,200}\|\s*(正常|异常|running|stopped|✅|❌)\s*\|",
-        0.7,
-    ),
     # Claimed execution without tools.
     (
         "claimed_execution",
@@ -46,9 +40,7 @@ HALLUCINATION_PATTERNS: list[tuple[str, str, float]] = [
     ("fake_path_listing", r"(\\d+(\\.\\d+)?[KMGT]?\\s+/[\\w./-]+\\n){3,}", 0.85),
     # URL / account fabrication indicators.
     ("fabricated_x_url", r"https?://(?:x\\.com|twitter\\.com)/\\w+/status/\\d{15,}", 0.85),
-    ("fabricated_social_account", r"@[A-Za-z_][A-Za-z0-9_]{2,14}\\s*[-—]\\s*[^\\n]+", 0.65),
     ("overconfident_verification", r"(我已|我刚刚|通过.*?)(验证|确认|检查|核实).{0,20}(存在|真实|有效)", 0.75),
-    ("fabricated_demo_link", r"(Demo|演示|视频)链接[:：]?\\s*https?://", 0.7),
 ]
 
 

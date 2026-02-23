@@ -23,7 +23,7 @@
 - 🌐 **Antigravity 网关** — 多 Google 账号轮换，免费用 Claude & Gemini
 - 🧬 **思维链支持** — DeepSeek-R1、Claude Thinking 推理过程可视化
 - 🔄 **交错思维链** — 工具执行后自动反思，提升多步推理质量
-- ⚡ **反空转干预** — 模型说了"我将要做"但没调工具？2 级渐进式干预（提醒→终止）
+- ⚡ **反空转干预** — 执行型请求 `tool_choice=required` 源头阻断空转，模型必须调工具
 - 💰 **Prompt Caching** — Anthropic/Claude 自动注入缓存标记，节省 token 成本
 
 </td>
@@ -186,17 +186,19 @@ cd /opt/nanobot && git pull && systemctl restart nanobot
 - 即使模型支持工具但选择不用，也会触发检测
 - URL 真实性验证，拦截虚构链接
 
-### 反空转干预（2 级渐进式）
+### 反空转干预（v3 — `tool_choice` 源头阻断）
 
 ```
-模型首轮: "我将使用 exec 工具来执行 curl..."  (has_tool_calls=False)
-碳核 Level 1: 检测到懒惰回复 → 注入强制工具指令 → 重试 1 次
-碳核 Level 2: 仍无工具调用 → 直接终止空转，返回可执行指令模板
+执行型请求 → tool_choice="required" → API 层强制模型必须调工具
+问答型请求 → tool_choice="auto"      → 正常对话不干预
+已有工具调用 → tool_choice="auto"      → 后续自由总结
+required 失败 → 自动回退 auto 一次    → 记录 [E_TOOL_CHOICE_FALLBACK] 告警
 ```
 
 - 自动判断执行型 vs 问答型请求（默认执行型，排除明显问答）
-- 中英双语懒惰模式识别（"下一步我会..." / "If you agree, I will..."）
-- 每个请求最多额外 1 次 LLM 调用，成本可控
+- `tool_choice=required`：从 API 层阻断纯文本回复，模型无法绕过
+- 分阶段启用：当前对 Gemini / Codex 系列生效，其他模型保持 `auto`
+- 最小兜底：`required` 回退后仍检测 lazy/hallucination 作为安全网
 - 可通过 `idle_intervention: false` 关闭
 
 ### Shell $() 受控放行

@@ -45,11 +45,10 @@ def test_windows_path_is_not_false_positive_for_fake_table_status() -> None:
     assert result.is_hallucination is False
 
 
-def test_fake_table_status_with_header_and_status_cell_is_detected() -> None:
+def test_markdown_table_status_is_not_detected_after_pattern_cleanup() -> None:
     text = (
         "| 项目 | 状态 |\n"
         "| 服务A | running |\n"
     )
     result = detect_hallucination(text, tools_were_called=False, model_supports_tools=True)
-    assert result.is_hallucination is True
-    assert result.pattern_name == "fake_table_status"
+    assert result.is_hallucination is False
