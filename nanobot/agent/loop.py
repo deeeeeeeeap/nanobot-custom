@@ -655,6 +655,26 @@ class AgentLoop:
                     if _is_meaningful_tool_call(tool_call.name, tool_call.arguments):
                         meaningful_tools_called = True
                     tools_were_called = True
+
+                # 如果本轮所有工具调用都是 exempt（如 message），且之前已做过正事 → 结束循环
+                all_exempt = all(
+                    not _is_meaningful_tool_call(tc.name, tc.arguments)
+                    for tc in response.tool_calls
+                )
+                if all_exempt and meaningful_tools_called:
+                    logger.info(
+                        "All tool calls in this round are exempt (e.g. message) and meaningful work already done, stopping loop"
+                    )
+                    # 用 message 内容或 response.content 作为最终输出
+                    last_msg_content = None
+                    for tc in reversed(response.tool_calls):
+                        if tc.name in ("message", "send_message"):
+                            last_msg_content = (tc.arguments or {}).get("content")
+                            if last_msg_content:
+                                break
+                    final_content = response.content or last_msg_content or ""
+                    break
+
                 messages.append({"role": "user", "content": "Based on tool results, proceed with next action or summarize results. Do not restate plans without acting."})
             else:
                 lazy = _is_lazy_response(response.content or "", msg.content) if response.content else False
