@@ -229,6 +229,18 @@ class AgentDefaults(BaseModel):
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     max_tool_iterations: int = Field(default=20, ge=1, le=100)
     idle_intervention: bool = True
+    loop_detection_enabled: bool = True
+    loop_window: int = Field(default=30, ge=6, le=200)
+    loop_warn_threshold: int = Field(default=8, ge=2, le=200)
+    loop_critical_threshold: int = Field(default=12, ge=2, le=200)
+    loop_break_threshold: int = Field(default=18, ge=3, le=200)
+    model_fallbacks: list[str] = Field(default_factory=list)
+    failover_retry_once: bool = True
+    context_guard_min_tokens: int = Field(default=16000, ge=1024, le=1_000_000)
+    context_guard_warn_tokens: int = Field(default=32000, ge=1024, le=1_000_000)
+    tool_result_max_chars: int = Field(default=12000, ge=1000, le=200_000)
+    compaction_enabled: bool = True
+    compaction_target_ratio: float = Field(default=0.45, ge=0.1, le=0.9)
 
     @field_validator("workspace")
     @classmethod
@@ -237,6 +249,30 @@ class AgentDefaults(BaseModel):
         if not raw:
             raise ValueError("workspace cannot be empty")
         return raw
+
+    @field_validator("model_fallbacks")
+    @classmethod
+    def normalize_fallback_models(cls, value: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for model in value:
+            candidate = model.strip()
+            if not candidate:
+                continue
+            key = candidate.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(candidate)
+        return cleaned
+
+    @model_validator(mode="after")
+    def validate_loop_thresholds(self):
+        if self.loop_warn_threshold > self.loop_critical_threshold:
+            raise ValueError("loop_warn_threshold must be <= loop_critical_threshold")
+        if self.loop_critical_threshold > self.loop_break_threshold:
+            raise ValueError("loop_critical_threshold must be <= loop_break_threshold")
+        return self
 
 
 class AgentsConfig(BaseModel):
@@ -338,6 +374,23 @@ class MemoryConfig(BaseModel):
     dedup_min_score: float = Field(default=0.15, ge=0.0, le=1.0)
 
 
+class LoggingConfig(BaseModel):
+    """Runtime logging behavior."""
+
+    level: str = "INFO"
+    max_file_bytes: int = Field(default=500 * 1024 * 1024, ge=1 * 1024 * 1024, le=2 * 1024**3)
+    max_files: int = Field(default=5, ge=1, le=50)
+
+    @field_validator("level")
+    @classmethod
+    def normalize_level(cls, value: str) -> str:
+        level = value.strip().upper()
+        allowed = {"TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"}
+        if level not in allowed:
+            raise ValueError(f"logging.level must be one of: {', '.join(sorted(allowed))}")
+        return level
+
+
 class Config(BaseSettings):
     """Root configuration for nanobot."""
     model_config = SettingsConfigDict(
@@ -352,6 +405,7 @@ class Config(BaseSettings):
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     search: SearchConfig = Field(default_factory=SearchConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
     
     @property
     def workspace_path(self) -> Path:

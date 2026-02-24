@@ -15,6 +15,28 @@ async def test_provider_chat_returns_error_response_on_runtime_failure(monkeypat
     assert resp.finish_reason == "error"
     assert resp.content is not None
     assert "Error calling LLM:" in resp.content
+    assert resp.error_type == "unknown"
+
+
+async def test_provider_chat_classifies_timeout_error(monkeypatch) -> None:
+    async def _boom(**kwargs):
+        raise TimeoutError("request timed out")
+
+    monkeypatch.setattr("nanobot.providers.litellm_provider.acompletion", _boom)
+
+    provider = LiteLLMProvider(api_key="k", default_model="openai/gpt-4o-mini")
+    resp = await provider.chat(messages=[{"role": "user", "content": "hi"}])
+
+    assert resp.finish_reason == "error"
+    assert resp.error_type == "timeout"
+
+
+def test_provider_classify_error_uses_precise_format_phrases() -> None:
+    assert (
+        LiteLLMProvider._classify_error(None, "invalid json schema for tool arguments")
+        == "format"
+    )
+    assert LiteLLMProvider._classify_error(None, "unsupported format image/webp") == "unknown"
 
 
 def test_provider_gateway_prefix_resolution() -> None:

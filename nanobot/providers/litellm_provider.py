@@ -134,6 +134,38 @@ class LiteLLMProvider(LLMProvider):
                 kwargs.update(overrides)
                 return
 
+    @staticmethod
+    def _classify_error(status_code: int | None, message: str, code: str | None = None) -> str:
+        """Classify provider/network failures into a stable error category."""
+        text = f"{message} {code or ''}".lower()
+        if status_code == 402 or "billing" in text or "quota" in text:
+            return "billing"
+        if status_code == 429 or "rate limit" in text or "too many requests" in text:
+            return "rate_limit"
+        if status_code in {401, 403} or "unauthorized" in text or "forbidden" in text:
+            return "auth"
+        if status_code in {502, 503, 504}:
+            return "timeout"
+        if status_code == 404 and "model" in text:
+            return "model_not_found"
+        if any(k in text for k in ("etimedout", "timeout", "timed out", "econnreset", "econnaborted")):
+            return "timeout"
+        if any(k in text for k in ("model not found", "unknown model", "does not exist")):
+            return "model_not_found"
+        if any(
+            k in text
+            for k in (
+                "invalid tool",
+                "tool_choice",
+                "json schema",
+                "invalid json",
+                "malformed json",
+                "tool format",
+            )
+        ):
+            return "format"
+        return "unknown"
+
     async def chat(
         self,
         messages: list[dict[str, Any]],
@@ -193,16 +225,43 @@ class LiteLLMProvider(LLMProvider):
             return self._parse_response(response)
         except (TypeError, ValueError, OSError, TimeoutError) as e:
             err = ProviderError(f"LLM request failed: {e}")
+            error_type = self._classify_error(
+                getattr(e, "status_code", None),
+                str(e),
+                getattr(e, "code", None),
+            )
             logger.error(str(err))
-            return LLMResponse(content=f"Error calling LLM: {err}", finish_reason="error")
+            return LLMResponse(
+                content=f"Error calling LLM: {err}",
+                finish_reason="error",
+                error_type=error_type,
+            )
         except RuntimeError as e:
             err = ProviderError(f"LLM runtime failure: {e}")
+            error_type = self._classify_error(
+                getattr(e, "status_code", None),
+                str(e),
+                getattr(e, "code", None),
+            )
             logger.error(str(err))
-            return LLMResponse(content=f"Error calling LLM: {err}", finish_reason="error")
+            return LLMResponse(
+                content=f"Error calling LLM: {err}",
+                finish_reason="error",
+                error_type=error_type,
+            )
         except Exception as e:
             err = ProviderError(f"Unexpected LLM failure: {e}")
+            error_type = self._classify_error(
+                getattr(e, "status_code", None),
+                str(e),
+                getattr(e, "code", None),
+            )
             logger.exception(str(err))
-            return LLMResponse(content=f"Error calling LLM: {err}", finish_reason="error")
+            return LLMResponse(
+                content=f"Error calling LLM: {err}",
+                finish_reason="error",
+                error_type=error_type,
+            )
 
     def _parse_response(self, response: Any) -> LLMResponse:
         """Parse LiteLLM response into project-standard format."""

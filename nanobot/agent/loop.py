@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
+from collections import Counter, deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -159,6 +162,188 @@ def _is_meaningful_tool_call(tool_name: str, arguments: dict | None = None) -> b
     return True
 
 
+_STOP_SIGNALS = frozenset(
+    {
+        "/stop",
+        "stop",
+        "cancel",
+        "abort",
+        "quit",
+        "停止",
+        "取消",
+        "终止",
+        "停下",
+        "算了",
+        "parar",
+        "detener",
+        "arreter",
+        "arrêter",
+        "anhalten",
+        # Mixed-script homograph (Latin "o") kept intentionally for keyboard-layout mistakes.
+        "останoвить",
+        "остановить",
+        "停止して",
+        "やめて",
+        "إيقاف",
+    }
+)
+
+
+def _normalize_signal(text: str) -> str:
+    normalized = re.sub(r"[\s\W_]+", "", text.lower(), flags=re.UNICODE)
+    return normalized
+
+
+_NORMALIZED_STOP_SIGNALS = frozenset(_normalize_signal(v) for v in _STOP_SIGNALS)
+
+
+def _is_stop_signal(text: str) -> bool:
+    candidate = (text or "").strip().lower()
+    if not candidate:
+        return False
+    if candidate in _STOP_SIGNALS:
+        return True
+    return _normalize_signal(candidate) in _NORMALIZED_STOP_SIGNALS
+
+
+@dataclass
+class _ToolLoopSignal:
+    kind: str
+    count: int
+    severity: str
+    should_break: bool
+
+
+class _ToolLoopDetector:
+    """Detect repeated tool-call patterns that indicate a likely dead loop."""
+
+    def __init__(
+        self,
+        *,
+        window: int,
+        warn_threshold: int,
+        critical_threshold: int,
+        break_threshold: int,
+    ) -> None:
+        self.window = max(6, window)
+        self.warn_threshold = max(2, warn_threshold)
+        self.critical_threshold = max(self.warn_threshold, critical_threshold)
+        self.break_threshold = max(self.critical_threshold, break_threshold)
+        self._history: deque[tuple[str, str, str]] = deque(maxlen=self.window)
+
+    @staticmethod
+    def _hash_tool_call(tool_name: str, arguments: dict | None) -> str:
+        payload = json.dumps(arguments or {}, sort_keys=True, ensure_ascii=False)
+        digest = hashlib.sha1(f"{tool_name}:{payload}".encode("utf-8")).hexdigest()
+        return digest[:16]
+
+    @staticmethod
+    def _hash_result(result: str) -> str:
+        digest = hashlib.sha1(result.encode("utf-8", errors="replace")).hexdigest()
+        return digest[:16]
+
+    def _severity(self, count: int) -> str | None:
+        if count >= self.break_threshold:
+            return "circuit_breaker"
+        if count >= self.critical_threshold:
+            return "critical"
+        if count >= self.warn_threshold:
+            return "warning"
+        return None
+
+    def _check_generic_repeat(self) -> _ToolLoopSignal | None:
+        if not self._history:
+            return None
+        counts = Counter(item[1] for item in self._history)
+        max_count = max(counts.values())
+        severity = self._severity(max_count)
+        if not severity:
+            return None
+        return _ToolLoopSignal(
+            kind="generic_repeat",
+            count=max_count,
+            severity=severity,
+            should_break=max_count >= self.break_threshold,
+        )
+
+    def _check_poll_no_progress(self) -> _ToolLoopSignal | None:
+        if not self._history:
+            return None
+        tail = list(self._history)
+        last = tail[-1]
+        same_tail = 0
+        for item in reversed(tail):
+            if item[1] == last[1] and item[2] == last[2]:
+                same_tail += 1
+                continue
+            break
+        # Exclude the latest entry itself; we only care about repeated no-progress calls.
+        repeat_count = max(0, same_tail - 1)
+        severity = self._severity(repeat_count)
+        if not severity:
+            return None
+        return _ToolLoopSignal(
+            kind="known_poll_no_progress",
+            count=repeat_count,
+            severity=severity,
+            should_break=repeat_count >= self.break_threshold,
+        )
+
+    def _check_ping_pong(self) -> _ToolLoopSignal | None:
+        if len(self._history) < 4:
+            return None
+        calls = [item[1] for item in self._history]
+        a = calls[-2]
+        b = calls[-1]
+        if a == b:
+            return None
+        streak = 0
+        expected = b
+        for value in reversed(calls):
+            if value != expected:
+                break
+            streak += 1
+            expected = a if expected == b else b
+        if streak < 4:
+            return None
+
+        warn = max(4, self.warn_threshold // 2 * 2)
+        critical = max(warn, self.critical_threshold // 2 * 2)
+        breaker = max(critical, self.break_threshold // 2 * 2)
+        severity = None
+        should_break = False
+        if streak >= breaker:
+            severity = "circuit_breaker"
+            should_break = True
+        elif streak >= critical:
+            severity = "critical"
+        elif streak >= warn:
+            severity = "warning"
+        if not severity:
+            return None
+        return _ToolLoopSignal(
+            kind="ping_pong",
+            count=streak,
+            severity=severity,
+            should_break=should_break,
+        )
+
+    def observe(self, tool_name: str, arguments: dict | None, result: str) -> _ToolLoopSignal | None:
+        tool_hash = self._hash_tool_call(tool_name, arguments)
+        result_hash = self._hash_result(result)
+        self._history.append((tool_name, tool_hash, result_hash))
+
+        signals = [
+            self._check_generic_repeat(),
+            self._check_poll_no_progress(),
+            self._check_ping_pong(),
+        ]
+        signals = [signal for signal in signals if signal is not None]
+        if not signals:
+            return None
+        return max(signals, key=lambda x: x.count)
+
+
 class AgentLoop:
     """
     The agent loop is the core processing engine.
@@ -188,6 +373,18 @@ class AgentLoop:
         session_manager: SessionManager | None = None,
         reporter_factory: Callable[[str, str], StatusReporter] | None = None,
         idle_intervention: bool = True,
+        loop_detection_enabled: bool = True,
+        loop_window: int = 30,
+        loop_warn_threshold: int = 8,
+        loop_critical_threshold: int = 12,
+        loop_break_threshold: int = 18,
+        model_fallbacks: list[str] | None = None,
+        failover_retry_once: bool = True,
+        context_guard_min_tokens: int = 16000,
+        context_guard_warn_tokens: int = 32000,
+        tool_result_max_chars: int = 12000,
+        compaction_enabled: bool = True,
+        compaction_target_ratio: float = 0.45,
     ):
         self.bus = bus
         self.provider = provider
@@ -203,6 +400,21 @@ class AgentLoop:
         self.restrict_to_workspace = restrict_to_workspace
         self.reporter_factory = reporter_factory  # Optional status reporter factory.
         self.idle_intervention = idle_intervention
+        self.loop_detection_enabled = loop_detection_enabled
+        self.loop_window = max(6, loop_window)
+        self.loop_warn_threshold = max(2, loop_warn_threshold)
+        self.loop_critical_threshold = max(self.loop_warn_threshold, loop_critical_threshold)
+        self.loop_break_threshold = max(self.loop_critical_threshold, loop_break_threshold)
+        self.model_fallbacks = model_fallbacks or []
+        self.failover_retry_once = failover_retry_once
+        self.context_guard_min_tokens = max(1024, context_guard_min_tokens)
+        self.context_guard_warn_tokens = max(
+            self.context_guard_min_tokens,
+            context_guard_warn_tokens,
+        )
+        self.tool_result_max_chars = max(1000, tool_result_max_chars)
+        self.compaction_enabled = compaction_enabled
+        self.compaction_target_ratio = min(0.9, max(0.1, compaction_target_ratio))
         self.search_store = None
         self.search_indexer = None
         self.search_embedder = None
@@ -434,6 +646,443 @@ class AgentLoop:
         # Always update api_base so model switching resets provider endpoint correctly.
         self.provider.api_base = api_base
 
+    def _refresh_runtime_options(self, config) -> None:
+        """Refresh loop controls from latest config without recreating the loop."""
+        defaults = config.agents.defaults
+        self.idle_intervention = defaults.idle_intervention
+        self.loop_detection_enabled = defaults.loop_detection_enabled
+        self.loop_window = max(6, defaults.loop_window)
+        self.loop_warn_threshold = max(2, defaults.loop_warn_threshold)
+        self.loop_critical_threshold = max(
+            self.loop_warn_threshold,
+            defaults.loop_critical_threshold,
+        )
+        self.loop_break_threshold = max(
+            self.loop_critical_threshold,
+            defaults.loop_break_threshold,
+        )
+        self.model_fallbacks = list(defaults.model_fallbacks)
+        self.failover_retry_once = defaults.failover_retry_once
+        self.context_guard_min_tokens = max(1024, defaults.context_guard_min_tokens)
+        self.context_guard_warn_tokens = max(
+            self.context_guard_min_tokens,
+            defaults.context_guard_warn_tokens,
+        )
+        self.tool_result_max_chars = max(1000, defaults.tool_result_max_chars)
+        self.compaction_enabled = defaults.compaction_enabled
+        self.compaction_target_ratio = min(0.9, max(0.1, defaults.compaction_target_ratio))
+
+    @staticmethod
+    def _estimate_context_window_tokens(model: str) -> int:
+        lower = model.lower()
+        if "gemini" in lower:
+            return 1_000_000
+        if "claude" in lower:
+            return 200_000
+        if "gpt-5" in lower:
+            return 256_000
+        if "gpt-4" in lower:
+            return 128_000
+        if "deepseek" in lower:
+            return 64_000
+        if "qwen" in lower or "llama" in lower:
+            return 32_000
+        return 32_000
+
+    @staticmethod
+    def _estimate_text_tokens(text: str) -> int:
+        if not text:
+            return 0
+        # Use UTF-8 byte length to stay conservative for CJK-heavy content.
+        return max(1, len(text.encode("utf-8", errors="ignore")) // 4)
+
+    def _estimate_message_tokens(self, message: dict) -> int:
+        content = message.get("content")
+        if isinstance(content, str):
+            return self._estimate_text_tokens(content)
+        if isinstance(content, list):
+            total = 0
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "text":
+                    total += self._estimate_text_tokens(str(item.get("text", "")))
+                else:
+                    total += 256
+            return total
+        return self._estimate_text_tokens(str(content))
+
+    def _estimate_messages_tokens(self, messages: list[dict]) -> int:
+        return sum(self._estimate_message_tokens(msg) for msg in messages)
+
+    def _truncate_text(self, text: str, max_chars: int) -> str:
+        if len(text) <= max_chars:
+            return text
+        if max_chars <= 64:
+            return text[:max_chars]
+        head = max_chars // 2
+        tail = max_chars - head - 24
+        if tail <= 0:
+            return text[:max_chars]
+        omitted = len(text) - head - tail
+        return f"{text[:head]}...[省略 {omitted} 字符]...{text[-tail:]}"
+
+    def _trim_messages_to_budget(self, messages: list[dict], budget: int) -> list[dict]:
+        system_msgs = [m for m in messages if m.get("role") == "system"]
+        non_system = [m for m in messages if m.get("role") != "system"]
+        kept: list[dict] = []
+        used = self._estimate_messages_tokens(system_msgs)
+
+        for msg in reversed(non_system):
+            msg_tokens = self._estimate_message_tokens(msg)
+            if used + msg_tokens > budget and kept:
+                continue
+            if used + msg_tokens > budget and not kept:
+                shrunk = dict(msg)
+                content = shrunk.get("content")
+                if isinstance(content, str):
+                    max_chars = max(500, (budget - used) * 4)
+                    shrunk["content"] = self._truncate_text(content, max_chars=max_chars)
+                kept.append(shrunk)
+                used += self._estimate_message_tokens(shrunk)
+                continue
+            kept.append(msg)
+            used += msg_tokens
+
+        return [*system_msgs, *reversed(kept)]
+
+    def _message_to_compaction_text(self, msg: dict) -> str:
+        role = str(msg.get("role", "unknown")).upper()
+        content = msg.get("content")
+        if isinstance(content, str):
+            body = content
+        elif isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    parts.append(str(item.get("text", "")))
+            body = "\n".join(parts) if parts else "[non-text content]"
+        else:
+            body = str(content or "")
+        body = self._truncate_text(body.strip(), max_chars=2000)
+        return f"[{role}] {body}"
+
+    def _split_messages_for_compaction(
+        self,
+        messages: list[dict],
+        *,
+        target_chunk_tokens: int,
+        max_chunks: int = 3,
+    ) -> list[list[dict]]:
+        if not messages:
+            return []
+        chunks: list[list[dict]] = []
+        current: list[dict] = []
+        current_tokens = 0
+
+        for msg in messages:
+            msg_tokens = self._estimate_message_tokens(msg)
+            if current and current_tokens + msg_tokens > target_chunk_tokens and len(chunks) < max_chunks - 1:
+                chunks.append(current)
+                current = [msg]
+                current_tokens = msg_tokens
+                continue
+            current.append(msg)
+            current_tokens += msg_tokens
+
+        if current:
+            chunks.append(current)
+        return chunks
+
+    def _fallback_chunk_summary(self, chunk: list[dict], index: int) -> str:
+        tail = chunk[-4:] if len(chunk) > 4 else chunk
+        lines = [self._message_to_compaction_text(msg) for msg in tail]
+        body = "\n".join(lines)
+        return f"片段 {index}（降级摘要）:\n{self._truncate_text(body, max_chars=1200)}"
+
+    async def _summarize_compaction_text(
+        self,
+        *,
+        source_text: str,
+        active_model: str,
+        runtime_config=None,
+    ) -> tuple[str | None, str]:
+        prompt_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是会话上下文压缩器。请输出简洁、可检索的摘要，保留：关键目标、"
+                    "已执行操作、失败原因、待办项、重要路径/命令。输出纯文本，不要 Markdown。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "请压缩以下历史对话内容，限制在 8-12 行内：\n\n"
+                    f"{source_text}"
+                ),
+            },
+        ]
+
+        try:
+            response, used_model = await asyncio.wait_for(
+                self._chat_with_failover(
+                    messages=prompt_messages,
+                    tools=None,
+                    tool_choice="auto",
+                    primary_model=active_model,
+                    runtime_config=runtime_config,
+                ),
+                timeout=30,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Compaction summary timed out (model={})", active_model)
+            return None, active_model
+        if not response or response.finish_reason == "error":
+            return None, used_model
+        text = (response.content or "").strip()
+        if not text:
+            return None, used_model
+        return self._truncate_text(text, max_chars=2000), used_model
+
+    async def _compact_messages_for_context(
+        self,
+        messages: list[dict],
+        model: str,
+        runtime_config=None,
+    ) -> tuple[list[dict], str]:
+        if not self.compaction_enabled:
+            return self._guard_context_window(messages, model), model
+
+        window = self._estimate_context_window_tokens(model)
+        budget = int(window * 0.9)
+        estimated = self._estimate_messages_tokens(messages)
+        if estimated <= budget:
+            return messages, model
+
+        system_msgs = [m for m in messages if m.get("role") == "system"]
+        non_system = [m for m in messages if m.get("role") != "system"]
+        if len(non_system) < 4:
+            return self._guard_context_window(messages, model), model
+
+        recent_budget = int(budget * (1.0 - self.compaction_target_ratio))
+        recent: list[dict] = []
+        recent_tokens = 0
+        for msg in reversed(non_system):
+            msg_tokens = self._estimate_message_tokens(msg)
+            if recent and recent_tokens + msg_tokens > recent_budget:
+                break
+            recent.append(msg)
+            recent_tokens += msg_tokens
+        recent = list(reversed(recent))
+        old_count = len(non_system) - len(recent)
+        if old_count <= 0:
+            return self._guard_context_window(messages, model), model
+
+        old_messages = non_system[:old_count]
+        chunk_target = max(800, int((budget * self.compaction_target_ratio) / 2))
+        chunks = self._split_messages_for_compaction(
+            old_messages,
+            target_chunk_tokens=chunk_target,
+            max_chunks=3,
+        )
+        if not chunks:
+            return self._guard_context_window(messages, model), model
+
+        active_model = model
+        summaries: list[str] = []
+        calls_used = 0
+        max_calls = 3
+        for idx, chunk in enumerate(chunks, start=1):
+            if calls_used >= max_calls:
+                break
+            chunk_text = "\n".join(self._message_to_compaction_text(msg) for msg in chunk)
+            summary, used_model = await self._summarize_compaction_text(
+                source_text=chunk_text,
+                active_model=active_model,
+                runtime_config=runtime_config,
+            )
+            active_model = used_model
+            calls_used += 1
+            if summary:
+                summaries.append(f"片段 {idx}: {summary}")
+            else:
+                summaries.append(self._fallback_chunk_summary(chunk, idx))
+
+        if len(summaries) > 1 and calls_used < max_calls:
+            merged_source = "\n\n".join(summaries)
+            merged, used_model = await self._summarize_compaction_text(
+                source_text=merged_source,
+                active_model=active_model,
+                runtime_config=runtime_config,
+            )
+            active_model = used_model
+            calls_used += 1
+            if merged:
+                summaries = [merged]
+
+        summary_text = "\n".join(summaries).strip()
+        if not summary_text:
+            return self._guard_context_window(messages, model), model
+
+        summary_message = {
+            "role": "system",
+            "content": (
+                "# 会话压缩摘要\n"
+                "以下为较早对话的压缩摘要，请与近期消息一起使用：\n"
+                f"{summary_text}"
+            ),
+        }
+        candidate = [*system_msgs, summary_message, *recent]
+        compacted = self._trim_messages_to_budget(candidate, budget)
+        logger.info(
+            "Context compaction applied: model={}, before_tokens={}, after_tokens={}, calls_used={}, old_messages={}",
+            model,
+            estimated,
+            self._estimate_messages_tokens(compacted),
+            calls_used,
+            old_count,
+        )
+        return compacted, active_model
+
+    def _guard_context_window(self, messages: list[dict], model: str) -> list[dict]:
+        window = self._estimate_context_window_tokens(model)
+        if window < self.context_guard_min_tokens:
+            raise NanobotError(
+                f"[E_CONTEXT_WINDOW] 模型上下文窗口过小: {window} < {self.context_guard_min_tokens}"
+            )
+        if window < self.context_guard_warn_tokens:
+            logger.warning(
+                "Model {} has a small context window ({}) below warn threshold {}",
+                model,
+                window,
+                self.context_guard_warn_tokens,
+            )
+
+        budget = int(window * 0.9)
+        estimated = self._estimate_messages_tokens(messages)
+        if estimated <= budget:
+            return messages
+
+        trimmed = self._trim_messages_to_budget(messages, budget)
+        logger.warning(
+            "Context guard pruned messages: model={}, before_tokens={}, after_tokens={}, removed={}",
+            model,
+            estimated,
+            self._estimate_messages_tokens(trimmed),
+            max(0, len(messages) - len(trimmed)),
+        )
+        return trimmed
+
+    def _truncate_tool_result(self, result: str) -> str:
+        if len(result) <= self.tool_result_max_chars:
+            return result
+
+        head = 4000
+        tail = 2000
+        if self.tool_result_max_chars < head + tail:
+            head = int(self.tool_result_max_chars * 0.67)
+            tail = max(0, self.tool_result_max_chars - head)
+        omitted = len(result) - head - tail
+        tail_text = result[-tail:] if tail > 0 else ""
+        return f"{result[:head]}\n[...省略 {omitted} 字符...]\n{tail_text}"
+
+    @staticmethod
+    def _classify_response_error(response) -> str:
+        if response.error_type:
+            return response.error_type
+        text = str(response.content or "").lower()
+        if any(term in text for term in ("rate limit", "too many requests", "429")):
+            return "rate_limit"
+        if any(term in text for term in ("unauthorized", "forbidden", "invalid api key", "401", "403")):
+            return "auth"
+        if any(term in text for term in ("billing", "quota", "402")):
+            return "billing"
+        if any(term in text for term in ("timeout", "timed out", "etimedout", "econnreset", "econnaborted", "502", "503", "504")):
+            return "timeout"
+        if any(term in text for term in ("model not found", "unknown model", "does not exist")):
+            return "model_not_found"
+        if any(
+            term in text
+            for term in (
+                "invalid tool",
+                "tool_choice",
+                "json schema",
+                "invalid json",
+                "malformed json",
+                "tool format",
+            )
+        ):
+            return "format"
+        return "unknown"
+
+    def _should_retry_same_model(self, error_type: str) -> bool:
+        return error_type in {"timeout", "rate_limit"}
+
+    async def _chat_with_failover(
+        self,
+        *,
+        messages: list[dict],
+        tools: list[dict] | None,
+        tool_choice: str,
+        primary_model: str,
+        runtime_config=None,
+    ):
+        candidates = [primary_model]
+        for fallback in self.model_fallbacks:
+            if fallback and fallback not in candidates:
+                candidates.append(fallback)
+
+        last_response = None
+        active_model = primary_model
+        for model_name in candidates:
+            if runtime_config is not None:
+                self._update_provider_env(
+                    model_name,
+                    runtime_config.get_api_key(model_name),
+                    runtime_config.get_api_base(model_name),
+                )
+
+            retries_left = 1 if self.failover_retry_once else 0
+            while True:
+                response = await self.provider.chat(
+                    messages=messages,
+                    tools=tools,
+                    tool_choice=tool_choice,
+                    model=model_name,
+                )
+                last_response = response
+                active_model = model_name
+                if response.finish_reason != "error":
+                    return response, active_model
+
+                error_type = self._classify_response_error(response)
+                if retries_left > 0 and self._should_retry_same_model(error_type):
+                    retries_left -= 1
+                    logger.warning(
+                        "LLM call failed on {} with {}. Retrying once.",
+                        model_name,
+                        error_type,
+                    )
+                    continue
+                logger.warning("LLM call failed on {} with {}.", model_name, error_type)
+                break
+
+            if model_name != candidates[-1]:
+                logger.warning("Switching to fallback model after failure: {}", model_name)
+
+        return last_response, active_model
+
+    def _build_tool_loop_break_text(self, signal: _ToolLoopSignal, tool_name: str) -> str:
+        return (
+            "⚠️ 检测到工具调用可能进入死循环，已自动中断以节省成本。\n\n"
+            f"- 检测类型: {signal.kind}\n"
+            f"- 工具: {tool_name}\n"
+            f"- 重复次数: {signal.count}\n"
+            f"- 级别: {signal.severity}\n\n"
+            "建议：调整指令约束、减少轮询类调用，或提供更明确的停止条件。"
+        )
+
     async def _process_message(
         self,
         msg: InboundMessage,
@@ -460,15 +1109,17 @@ class AgentLoop:
 
         # Reload config dynamically so `/model` changes take effect immediately.
         current_model = self.model
+        runtime_config = None
         try:
-            current_config = load_config()
-            current_model = current_config.agents.defaults.model
+            runtime_config = load_config()
+            current_model = runtime_config.agents.defaults.model
+            self._refresh_runtime_options(runtime_config)
+            api_key = runtime_config.get_api_key(current_model)
+            api_base = runtime_config.get_api_base(current_model)
+            self._update_provider_env(current_model, api_key, api_base)
             if current_model != self.model:
                 logger.info(f"Model changed from {self.model} to {current_model}")
                 self.model = current_model
-                api_key = current_config.get_api_key(current_model)
-                api_base = current_config.get_api_base(current_model)
-                self._update_provider_env(current_model, api_key, api_base)
                 self._setup_memory_compressor()
         except (ConfigError, ValueError, OSError) as e:
             logger.warning(f"Failed to reload config: {e}, using cached model")
@@ -480,6 +1131,12 @@ class AgentLoop:
         # Handle slash commands.
         raw_cmd = msg.content.strip()
         cmd = raw_cmd.lower()
+        if _is_stop_signal(raw_cmd):
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="已收到停止指令，本次请求已中断。",
+            )
         if cmd == "/new":
             msg_count = len(session.messages)
             result = await self._compress_session_for_new(session)
@@ -528,6 +1185,7 @@ class AgentLoop:
                 "nanobot 命令：\n\n"
                 "/new - 开始新会话并整合记忆\n"
                 "/clear - 清空当前会话历史\n"
+                "/stop - 停止当前请求\n"
                 "/model <name> - 切换模型\n"
                 "/status - 查看运行状态\n"
                 "/help - 显示帮助"
@@ -555,6 +1213,11 @@ class AgentLoop:
             channel=msg.channel,
             chat_id=msg.chat_id,
         )
+        messages, current_model = await self._compact_messages_for_context(
+            messages,
+            current_model,
+            runtime_config=runtime_config,
+        )
 
         # Main agent loop.
         iteration = 0
@@ -566,16 +1229,28 @@ class AgentLoop:
         required_no_tool_blocked = False
         required_no_tool_streak = int(session.metadata.get("required_no_tool_streak", 0))
         execution_intent = _is_execution_intent(msg.content)
+        active_model = current_model
+        loop_detector = (
+            _ToolLoopDetector(
+                window=self.loop_window,
+                warn_threshold=self.loop_warn_threshold,
+                critical_threshold=self.loop_critical_threshold,
+                break_threshold=self.loop_break_threshold,
+            )
+            if self.loop_detection_enabled
+            else None
+        )
 
         # Check whether the current model supports function-calling.
-        model_supports_tools = supports_function_calling(self.model)
+        model_supports_tools = supports_function_calling(active_model)
         if not model_supports_tools:
-            logger.warning(f"Model {self.model} does not support function calling, tools disabled")
+            logger.warning(f"Model {active_model} does not support function calling, tools disabled")
 
         while iteration < self.max_iterations:
             iteration += 1
 
-            is_codex = "codex" in current_model.lower()
+            model_supports_tools = supports_function_calling(active_model)
+            is_codex = "codex" in active_model.lower()
             await reporter.report(StatusMessage.thinking(is_codex=is_codex))
 
             tools_definitions = self.tools.get_definitions() if model_supports_tools else None
@@ -596,23 +1271,29 @@ class AgentLoop:
                 requested_tool_choice,
             )
 
-            response = await self.provider.chat(
+            response, used_model = await self._chat_with_failover(
                 messages=messages,
                 tools=tools_definitions,
                 tool_choice=requested_tool_choice,
-                model=self.model,
+                primary_model=active_model,
+                runtime_config=runtime_config,
             )
+            if used_model != active_model:
+                logger.warning("Using fallback model for this request: {} -> {}", active_model, used_model)
+                active_model = used_model
             actual_tool_choice = requested_tool_choice
             if requested_tool_choice == "required" and response.finish_reason == "error":
                 logger.warning(
                     "[E_TOOL_CHOICE_FALLBACK] tool_choice=required failed, retrying with auto once"
                 )
-                response = await self.provider.chat(
+                response, used_model = await self._chat_with_failover(
                     messages=messages,
                     tools=tools_definitions,
                     tool_choice="auto",
-                    model=self.model,
+                    primary_model=active_model,
+                    runtime_config=runtime_config,
                 )
+                active_model = used_model
                 actual_tool_choice = "auto"
 
             # Handle tool calls.
@@ -634,6 +1315,7 @@ class AgentLoop:
                 )
 
                 # Execute tool call.
+                tool_loop_break = False
                 for tool_call in response.tool_calls:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
@@ -644,17 +1326,41 @@ class AgentLoop:
                     ))
 
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    result_text = self._truncate_tool_result(str(result))
 
-                    success = not (isinstance(result, str) and result.startswith("Error"))
+                    success = not (isinstance(result_text, str) and result_text.startswith("Error"))
                     await reporter.report(StatusMessage.tool_done(tool_call.name, success))
 
                     messages = self.context.add_tool_result(
-                        messages, tool_call.id, tool_call.name, result
+                        messages, tool_call.id, tool_call.name, result_text
                     )
                     tools_used.append(tool_call.name)
                     if _is_meaningful_tool_call(tool_call.name, tool_call.arguments):
                         meaningful_tools_called = True
                     tools_were_called = True
+                    if loop_detector is not None:
+                        signal = loop_detector.observe(
+                            tool_call.name,
+                            tool_call.arguments,
+                            result_text,
+                        )
+                        if signal:
+                            logger.warning(
+                                "Tool loop signal: kind={}, severity={}, count={}",
+                                signal.kind,
+                                signal.severity,
+                                signal.count,
+                            )
+                            if signal.should_break:
+                                final_content = self._build_tool_loop_break_text(
+                                    signal,
+                                    tool_call.name,
+                                )
+                                tool_loop_break = True
+                                break
+
+                if tool_loop_break:
+                    break
 
                 # 如果本轮所有工具调用都是 exempt（如 message），且之前已做过正事 → 结束循环
                 all_exempt = all(
@@ -677,6 +1383,12 @@ class AgentLoop:
 
                 messages.append({"role": "user", "content": "Based on tool results, proceed with next action or summarize results. Do not restate plans without acting."})
             else:
+                if response.finish_reason == "error":
+                    error_type = self._classify_response_error(response)
+                    logger.warning(
+                        "LLM response ended with error after failover attempts: type={}",
+                        error_type,
+                    )
                 lazy = _is_lazy_response(response.content or "", msg.content) if response.content else False
                 if lazy:
                     logger.warning("Lazy response observed (monitor-only): iteration={}", iteration)
@@ -825,19 +1537,35 @@ class AgentLoop:
             channel=origin_channel,
             chat_id=origin_chat_id,
         )
+        messages, active_system_model = await self._compact_messages_for_context(
+            messages,
+            self.model,
+        )
 
         iteration = 0
         final_content = None
+        active_model = active_system_model
+        loop_detector = (
+            _ToolLoopDetector(
+                window=self.loop_window,
+                warn_threshold=self.loop_warn_threshold,
+                critical_threshold=self.loop_critical_threshold,
+                break_threshold=self.loop_break_threshold,
+            )
+            if self.loop_detection_enabled
+            else None
+        )
 
         while iteration < self.max_iterations:
             iteration += 1
 
-            response = await self.provider.chat(
+            response, used_model = await self._chat_with_failover(
                 messages=messages,
                 tools=self.tools.get_definitions(),
                 tool_choice="auto",
-                model=self.model
+                primary_model=active_model,
             )
+            active_model = used_model
 
             if response.has_tool_calls:
                 tool_call_dicts = [
@@ -856,13 +1584,41 @@ class AgentLoop:
                     reasoning_content=response.reasoning_content,
                 )
 
+                tool_loop_break = False
                 for tool_call in response.tool_calls:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    result_text = self._truncate_tool_result(str(result))
                     messages = self.context.add_tool_result(
-                        messages, tool_call.id, tool_call.name, result
+                        messages, tool_call.id, tool_call.name, result_text
                     )
+                    if loop_detector is not None:
+                        signal = loop_detector.observe(
+                            tool_call.name,
+                            tool_call.arguments,
+                            result_text,
+                        )
+                        if signal:
+                            logger.warning(
+                                "System message tool loop signal: kind={}, severity={}, count={}",
+                                signal.kind,
+                                signal.severity,
+                                signal.count,
+                            )
+                            if signal.should_break:
+                                final_content = self._build_tool_loop_break_text(
+                                    signal,
+                                    tool_call.name,
+                                )
+                                tool_loop_break = True
+                                break
+                if tool_loop_break:
+                    break
+                messages, active_model = await self._compact_messages_for_context(
+                    messages,
+                    active_model,
+                )
             else:
                 final_content = response.content
                 break
@@ -891,7 +1647,13 @@ class AgentLoop:
             f"- Function calling: {fc}\n"
             f"- 已注册工具: {tools}\n"
             f"- 会话消息数: {len(session.messages)}\n"
-            f"- 记忆自动压缩: {'开启' if self.memory_config.auto_compress else '关闭'}"
+            f"- 记忆自动压缩: {'开启' if self.memory_config.auto_compress else '关闭'}\n"
+            f"- Loop detection: {'开启' if self.loop_detection_enabled else '关闭'} "
+            f"(break={self.loop_break_threshold})\n"
+            f"- Model failover: {'开启' if bool(self.model_fallbacks) else '关闭'}\n"
+            f"- Context compaction: {'开启' if self.compaction_enabled else '关闭'} "
+            f"(ratio={self.compaction_target_ratio:.2f})\n"
+            f"- Tool 输出预算: {self.tool_result_max_chars} chars"
         )
 
     def _handle_model_command(self, raw_cmd: str) -> str:

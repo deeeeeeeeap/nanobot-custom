@@ -37,6 +37,7 @@ _HISTORY_HOOK_REGISTERED = False
 _USING_LIBEDIT = False
 _SAVED_TERM_ATTRS = None  # original termios settings, restored on exit
 _GLOBAL_EXCEPTION_HOOKS_INSTALLED = False
+_LOGGING_CONFIGURED = False
 
 
 def _flush_pending_tty_input() -> None:
@@ -198,6 +199,37 @@ def _install_global_exception_hooks() -> None:
     _GLOBAL_EXCEPTION_HOOKS_INSTALLED = True
 
 
+def _configure_logging() -> None:
+    """Configure stderr + rotating file logs from config when available."""
+    global _LOGGING_CONFIGURED
+    if _LOGGING_CONFIGURED:
+        return
+
+    logger.remove()
+    logger.add(sys.stderr, level="INFO", colorize=True)
+
+    try:
+        from nanobot.config.loader import get_data_dir, load_config
+
+        config = load_config()
+        log_dir = get_data_dir() / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        logger.add(
+            log_dir / "nanobot.log",
+            level=config.logging.level,
+            rotation=config.logging.max_file_bytes,
+            retention=config.logging.max_files,
+            encoding="utf-8",
+            enqueue=False,
+            backtrace=False,
+            diagnose=False,
+        )
+    except Exception as e:
+        logger.debug(f"Logging file sink not configured: {e}")
+
+    _LOGGING_CONFIGURED = True
+
+
 def _run_async(coro):
     """Run async entrypoints with loop-level exception handling."""
     loop = asyncio.new_event_loop()
@@ -227,6 +259,7 @@ def main(
 ):
     """nanobot - Personal AI Assistant."""
     _install_global_exception_hooks()
+    _configure_logging()
 
 
 # ============================================================================
@@ -419,6 +452,18 @@ def gateway(
         restrict_to_workspace=config.tools.restrict_to_workspace,
         session_manager=session_manager,
         idle_intervention=config.agents.defaults.idle_intervention,
+        loop_detection_enabled=config.agents.defaults.loop_detection_enabled,
+        loop_window=config.agents.defaults.loop_window,
+        loop_warn_threshold=config.agents.defaults.loop_warn_threshold,
+        loop_critical_threshold=config.agents.defaults.loop_critical_threshold,
+        loop_break_threshold=config.agents.defaults.loop_break_threshold,
+        model_fallbacks=config.agents.defaults.model_fallbacks,
+        failover_retry_once=config.agents.defaults.failover_retry_once,
+        context_guard_min_tokens=config.agents.defaults.context_guard_min_tokens,
+        context_guard_warn_tokens=config.agents.defaults.context_guard_warn_tokens,
+        tool_result_max_chars=config.agents.defaults.tool_result_max_chars,
+        compaction_enabled=config.agents.defaults.compaction_enabled,
+        compaction_target_ratio=config.agents.defaults.compaction_target_ratio,
     )
     # Setup cron callbacks (agent mode and direct-delivery mode)
     async def on_cron_job(job: CronJob) -> str | None:
@@ -570,6 +615,18 @@ def agent(
         memory_config=config.memory,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         idle_intervention=config.agents.defaults.idle_intervention,
+        loop_detection_enabled=config.agents.defaults.loop_detection_enabled,
+        loop_window=config.agents.defaults.loop_window,
+        loop_warn_threshold=config.agents.defaults.loop_warn_threshold,
+        loop_critical_threshold=config.agents.defaults.loop_critical_threshold,
+        loop_break_threshold=config.agents.defaults.loop_break_threshold,
+        model_fallbacks=config.agents.defaults.model_fallbacks,
+        failover_retry_once=config.agents.defaults.failover_retry_once,
+        context_guard_min_tokens=config.agents.defaults.context_guard_min_tokens,
+        context_guard_warn_tokens=config.agents.defaults.context_guard_warn_tokens,
+        tool_result_max_chars=config.agents.defaults.tool_result_max_chars,
+        compaction_enabled=config.agents.defaults.compaction_enabled,
+        compaction_target_ratio=config.agents.defaults.compaction_target_ratio,
     )
     
     # Show spinner when logs are off (no output to miss); skip when logs are on
@@ -1386,6 +1443,18 @@ def memory_compress(
         memory_config=config.memory,
         exec_config=config.tools.exec,
         idle_intervention=config.agents.defaults.idle_intervention,
+        loop_detection_enabled=config.agents.defaults.loop_detection_enabled,
+        loop_window=config.agents.defaults.loop_window,
+        loop_warn_threshold=config.agents.defaults.loop_warn_threshold,
+        loop_critical_threshold=config.agents.defaults.loop_critical_threshold,
+        loop_break_threshold=config.agents.defaults.loop_break_threshold,
+        model_fallbacks=config.agents.defaults.model_fallbacks,
+        failover_retry_once=config.agents.defaults.failover_retry_once,
+        context_guard_min_tokens=config.agents.defaults.context_guard_min_tokens,
+        context_guard_warn_tokens=config.agents.defaults.context_guard_warn_tokens,
+        tool_result_max_chars=config.agents.defaults.tool_result_max_chars,
+        compaction_enabled=config.agents.defaults.compaction_enabled,
+        compaction_target_ratio=config.agents.defaults.compaction_target_ratio,
     )
 
     async def run():

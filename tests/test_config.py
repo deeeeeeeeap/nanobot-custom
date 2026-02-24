@@ -70,6 +70,12 @@ def test_search_config_defaults_and_validation() -> None:
     assert cfg.search.vector_enabled is False
     assert cfg.memory.auto_compress is True
     assert cfg.memory.compress_threshold == 10
+    assert cfg.agents.defaults.loop_break_threshold == 18
+    assert cfg.agents.defaults.model_fallbacks == []
+    assert cfg.agents.defaults.compaction_enabled is True
+    assert cfg.agents.defaults.compaction_target_ratio == 0.45
+    assert cfg.logging.max_file_bytes == 500 * 1024 * 1024
+    assert cfg.logging.max_files == 5
 
     with pytest.raises(ValidationError):
         Config.model_validate({"search": {"default_limit": 0}})
@@ -79,3 +85,18 @@ def test_search_config_defaults_and_validation() -> None:
         Config.model_validate({"search": {"embedding_batch_size": 0}})
     with pytest.raises(ValidationError):
         Config.model_validate({"memory": {"compress_threshold": 0}})
+    with pytest.raises(ValidationError):
+        Config.model_validate(
+            {
+                "agents": {
+                    "defaults": {
+                        "loop_warn_threshold": 12,
+                        "loop_critical_threshold": 8,
+                    }
+                }
+            }
+        )
+    with pytest.raises(ValidationError):
+        Config.model_validate({"logging": {"level": "nope"}})
+    with pytest.raises(ValidationError):
+        Config.model_validate({"agents": {"defaults": {"compaction_target_ratio": 1.2}}})
