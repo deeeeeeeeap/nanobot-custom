@@ -451,11 +451,10 @@ class Config(BaseSettings):
         p, name = self._match_provider(model)
         if p and p.api_base:
             return p.api_base
-        # Only gateways get a default api_base here. Standard providers
-        # (like Moonshot) set their base URL via env vars in _setup_env
-        # to avoid polluting the global litellm.api_base.
+        # 所有有 default_api_base 的 provider 都应返回，
+        # 否则 litellm 可能无法正确路由（如 MiniMax）。
         if name:
             spec = find_by_name(name)
-            if spec and spec.is_gateway and spec.default_api_base:
+            if spec and spec.default_api_base:
                 return spec.default_api_base
         return None

@@ -616,34 +616,25 @@ class AgentLoop:
         logger.info("Agent loop stopping")
 
     def _update_provider_env(self, model: str, api_key: str | None, api_base: str | None) -> None:
-        """Update provider API key/base and sync provider-specific env vars after model changes."""
+        """根据 registry 设置 provider 环境变量，避免硬编码。"""
         import os
+        from nanobot.providers.registry import find_by_model
 
         if api_key:
             self.provider.api_key = api_key
-            model_lower = model.lower()
 
-            env_mapping = {
-                "gemini": "GEMINI_API_KEY",
-                "anthropic": "ANTHROPIC_API_KEY",
-                "claude": "ANTHROPIC_API_KEY",
-                "openai": "OPENAI_API_KEY",
-                "gpt": "OPENAI_API_KEY",
-                "deepseek": "DEEPSEEK_API_KEY",
-                "groq": "GROQ_API_KEY",
-            }
+            # 通过 registry 查找正确的 env_key 和 env_extras
+            spec = find_by_model(model)
+            if spec:
+                os.environ[spec.env_key] = api_key
+                logger.debug(f"Set {spec.env_key} for model {model}")
+                resolved_base = api_base or spec.default_api_base or ""
+                for env_name, template in spec.env_extras:
+                    value = template.replace("{api_key}", api_key).replace("{api_base}", resolved_base)
+                    os.environ[env_name] = value
+                    logger.debug(f"Set {env_name} for model {model}")
 
-            for keyword, env_var in env_mapping.items():
-                if keyword in model_lower:
-                    os.environ[env_var] = api_key
-                    logger.debug(f"Set {env_var} for model {model}")
-                    break
-
-            if "minimax" in model_lower:
-                os.environ["ANTHROPIC_API_KEY"] = api_key
-                os.environ["ANTHROPIC_BASE_URL"] = api_base or "https://api.minimaxi.com/anthropic"
-
-        # Always update api_base so model switching resets provider endpoint correctly.
+        # 始终更新 api_base，确保切换模型后 provider endpoint 正确重置
         self.provider.api_base = api_base
 
     def _refresh_runtime_options(self, config) -> None:
