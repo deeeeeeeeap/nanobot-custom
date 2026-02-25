@@ -13,6 +13,15 @@ from loguru import logger
 
 from nanobot.utils.helpers import ensure_dir, safe_filename
 
+_HISTORY_KEYS = (
+    "role",
+    "content",
+    "tool_calls",
+    "tool_call_id",
+    "name",
+    "reasoning_content",
+)
+
 
 @dataclass
 class Session:
@@ -52,8 +61,20 @@ class Session:
         # Get recent messages
         recent = self.messages[-max_messages:] if len(self.messages) > max_messages else self.messages
         
-        # Convert to LLM format (just role and content)
-        return [{"role": m["role"], "content": m["content"]} for m in recent]
+        history: list[dict[str, Any]] = []
+        for msg in recent:
+            item: dict[str, Any] = {}
+            for key in _HISTORY_KEYS:
+                value = msg.get(key)
+                if value is not None:
+                    item[key] = value
+
+            # Keep compatibility with older entries.
+            if "role" not in item:
+                continue
+            item.setdefault("content", "")
+            history.append(item)
+        return history
     
     def clear(self) -> None:
         """Clear all messages in the session."""

@@ -37,6 +37,66 @@ class DummyProvider(LLMProvider):
         return "openai/gpt-4o-mini"
 
 
+class ToolThenAnswerProvider(LLMProvider):
+    def __init__(self):
+        super().__init__(api_key=None, api_base=None)
+        self.calls = 0
+        self.max_tokens_seen: list[int] = []
+        self.temperature_seen: list[float] = []
+
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+    ) -> LLMResponse:
+        self.calls += 1
+        self.max_tokens_seen.append(max_tokens)
+        self.temperature_seen.append(temperature)
+        if self.calls == 1:
+            return LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="tc-1",
+                        name="read_file",
+                        arguments={"path": "note.txt"},
+                    )
+                ],
+                finish_reason="tool_calls",
+                reasoning_content="先读取文件确认内容。",
+            )
+        return LLMResponse(content="处理完成", finish_reason="stop")
+
+    def get_default_model(self) -> str:
+        return "openai/gpt-4o-mini"
+
+
+class NoToolProvider(LLMProvider):
+    def __init__(self, reply: str = "这是正常输出"):
+        super().__init__(api_key=None, api_base=None)
+        self.reply = reply
+        self.calls = 0
+
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+    ) -> LLMResponse:
+        self.calls += 1
+        return LLMResponse(content=self.reply, finish_reason="stop")
+
+    def get_default_model(self) -> str:
+        return "openai/gpt-4o-mini"
+
+
 class FallbackProvider(LLMProvider):
     def __init__(self):
         super().__init__(api_key=None, api_base=None)
@@ -370,6 +430,56 @@ async def test_auto_compress_background_trigger(monkeypatch, tmp_path: Path) -> 
     await loop.process_direct("trigger", channel="telegram", chat_id="99")
     await asyncio.sleep(0)
     assert called["value"] is True
+
+
+async def test_process_direct_persists_tool_chain_and_reasoning(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "nanobot.agent.loop.load_config",
+        lambda: (_ for _ in ()).throw(ConfigError("test config missing")),
+    )
+    monkeypatch.setattr("nanobot.agent.loop.detect_hallucination", lambda *a, **k: _NoHallucination())
+
+    (tmp_path / "note.txt").write_text("hello", encoding="utf-8")
+    provider = ToolThenAnswerProvider()
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        max_tokens=1234,
+        temperature=0.2,
+    )
+
+    reply = await loop.process_direct("读取并总结", channel="telegram", chat_id="500")
+    assert reply == "处理完成"
+    assert provider.max_tokens_seen[0] == 1234
+    assert provider.temperature_seen[0] == 0.2
+
+    session = loop.sessions.get_or_create("telegram:500")
+    history = session.get_history()
+    assert [m["role"] for m in history] == ["user", "assistant", "tool", "assistant"]
+    assert history[1]["tool_calls"][0]["function"]["name"] == "read_file"
+    assert history[1]["reasoning_content"] == "先读取文件确认内容。"
+    assert history[2]["tool_call_id"] == "tc-1"
+    assert history[2]["name"] == "read_file"
+
+
+async def test_execution_intent_without_tool_call_no_longer_hard_blocks(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "nanobot.agent.loop.load_config",
+        lambda: (_ for _ in ()).throw(ConfigError("test config missing")),
+    )
+    monkeypatch.setattr("nanobot.agent.loop.detect_hallucination", lambda *a, **k: _NoHallucination())
+
+    provider = NoToolProvider("我已完成分析并给出结论。")
+    loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path, idle_intervention=True)
+
+    reply = await loop.process_direct("开始执行", channel="telegram", chat_id="501")
+    assert "请直接发送可执行指令" not in reply
+    assert "检测到你当前请求是执行型任务" not in reply
+    assert "我已完成分析并给出结论。" in reply
+    assert provider.calls >= 2  # one retry nudge is still expected
 
 
 async def test_process_direct_stop_signal(monkeypatch, tmp_path: Path) -> None:

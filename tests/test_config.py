@@ -70,6 +70,7 @@ def test_search_config_defaults_and_validation() -> None:
     assert cfg.search.vector_enabled is False
     assert cfg.memory.auto_compress is True
     assert cfg.memory.compress_threshold == 10
+    assert cfg.agents.defaults.max_tool_iterations == 30
     assert cfg.agents.defaults.loop_break_threshold == 18
     assert cfg.agents.defaults.model_fallbacks == []
     assert cfg.agents.defaults.compaction_enabled is True

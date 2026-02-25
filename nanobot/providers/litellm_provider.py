@@ -300,6 +300,7 @@ class LiteLLMProvider(LLMProvider):
 
     def _parse_response(self, response: Any) -> LLMResponse:
         """Parse LiteLLM response into project-standard format."""
+        logger.info("LLM 实际返回模型: {}", getattr(response, "model", "unknown"))
         choice = response.choices[0]
         message = choice.message
 

@@ -362,7 +362,9 @@ class AgentLoop:
         provider: LLMProvider,
         workspace: Path,
         model: str | None = None,
-        max_iterations: int = 20,
+        max_iterations: int = 30,
+        max_tokens: int = 8192,
+        temperature: float = 0.7,
         memory_window: int = 50,
         brave_api_key: str | None = None,
         exec_config: ExecToolConfig | None = None,
@@ -391,6 +393,8 @@ class AgentLoop:
         self.workspace = workspace
         self.model = model or provider.get_default_model()
         self.max_iterations = max_iterations
+        self.max_tokens = max(1, max_tokens)
+        self.temperature = temperature
         self.memory_window = memory_window
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
@@ -642,6 +646,8 @@ class AgentLoop:
     def _refresh_runtime_options(self, config) -> None:
         """Refresh loop controls from latest config without recreating the loop."""
         defaults = config.agents.defaults
+        self.max_tokens = max(1, defaults.max_tokens)
+        self.temperature = defaults.temperature
         self.idle_intervention = defaults.idle_intervention
         self.loop_detection_enabled = defaults.loop_detection_enabled
         self.loop_window = max(6, defaults.loop_window)
@@ -1063,6 +1069,8 @@ class AgentLoop:
                     tools=tools,
                     tool_choice=tool_choice,
                     model=model_name,
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature,
                 )
                 last_response = response
                 active_model = model_name
@@ -1259,7 +1267,7 @@ class AgentLoop:
         tools_were_called = False  # Track whether any tool was actually called.
         meaningful_tools_called = False
         required_retry_used = False
-        required_no_tool_blocked = False
+        required_no_tool_observed = False
         required_no_tool_streak = int(session.metadata.get("required_no_tool_streak", 0))
         execution_intent = _is_execution_intent(msg.content)
         active_model = current_model
@@ -1278,6 +1286,9 @@ class AgentLoop:
         model_supports_tools = supports_function_calling(active_model)
         if not model_supports_tools:
             logger.warning(f"Model {active_model} does not support function calling, tools disabled")
+
+        # Persist the inbound user message before tool/assistant chain to preserve full chronology.
+        session.add_message("user", msg.content)
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -1346,6 +1357,12 @@ class AgentLoop:
                     messages, response.content, tool_call_dicts,
                     reasoning_content=response.reasoning_content,
                 )
+                session.add_message(
+                    "assistant",
+                    response.content or "",
+                    tool_calls=tool_call_dicts if tool_call_dicts else None,
+                    reasoning_content=response.reasoning_content or None,
+                )
 
                 # Execute tool call.
                 tool_loop_break = False
@@ -1368,6 +1385,12 @@ class AgentLoop:
 
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result_text
+                    )
+                    session.add_message(
+                        "tool",
+                        result_text,
+                        tool_call_id=tool_call.id,
+                        name=tool_call.name,
                     )
                     tools_used.append(tool_call.name)
                     if _is_meaningful_tool_call(tool_call.name, tool_call.arguments):
@@ -1416,7 +1439,15 @@ class AgentLoop:
                     final_content = response.content or last_msg_content or ""
                     break
 
-                messages.append({"role": "user", "content": "Based on tool results, proceed with next action or summarize results. Do not restate plans without acting."})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "根据工具返回结果决定下一步：可继续调用工具执行、"
+                            "先分析后调整方案，或在任务完成时给出总结。"
+                        ),
+                    }
+                )
             else:
                 if response.finish_reason == "error":
                     error_type = self._classify_response_error(response)
@@ -1454,38 +1485,20 @@ class AgentLoop:
                             messages, response.content, reasoning_content=response.reasoning_content
                         )
                         nudge = (
-                            "[System directive] Execution request detected. "
-                            "In your next reply, call tools directly first (read_file/list_dir/exec). "
-                            "Do not ask for confirmation and do not restate plans."
+                            "检测到执行型请求。下一轮请优先直接调用工具（read_file/list_dir/exec），"
+                            "不要先征求确认。"
                         )
                         messages = self.context.add_user_nudge(messages, nudge)
                         required_retry_used = True
                         continue
 
-                    required_no_tool_blocked = True
+                    required_no_tool_observed = True
                     required_no_tool_streak += 1
                     logger.warning(
-                        "[E_IDLE_EXEC_NO_MEANINGFUL_TOOL] tool_choice={}, streak={}, stopping idle execution path",
+                        "[E_IDLE_EXEC_NO_MEANINGFUL_TOOL] tool_choice={}, streak={}, allowing normal output",
                         actual_tool_choice,
                         required_no_tool_streak,
                     )
-                    if required_no_tool_streak >= 2:
-                        final_content = (
-                            "⚠️ 执行型请求连续两次未触发有效工具调用。\n"
-                            "这通常是当前模型/网关未稳定支持工具调用导致。\n\n"
-                            "建议：\n"
-                            "1) 切换到已验证支持工具调用的模型；\n"
-                            "2) 保持请求不变再试一次；\n"
-                            "3) 若仍失败，请检查 provider 对 tool_choice=required 的兼容性。"
-                        )
-                    else:
-                        final_content = (
-                            "⚠️ 检测到你当前请求是执行型任务，但模型未产生有效工具调用。\n"
-                            "本次已停止空转以节省成本。\n\n"
-                            "请直接发送可执行指令（例如：先 read_file/list_dir，再执行下一步），"
-                            "我会立即执行并只回传实测结果。"
-                        )
-                    break
 
                 # No tool call; use model content as final output.
                 final_content = response.content
@@ -1516,13 +1529,15 @@ class AgentLoop:
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
 
         # Persist conversation; include used tools for later memory consolidation.
-        if required_no_tool_blocked:
+        if required_no_tool_observed:
             session.metadata["required_no_tool_streak"] = required_no_tool_streak
         else:
             session.metadata["required_no_tool_streak"] = 0
-        session.add_message("user", msg.content)
-        session.add_message("assistant", final_content,
-                            tools_used=tools_used if tools_used else None)
+        session.add_message(
+            "assistant",
+            final_content,
+            tools_used=tools_used if tools_used else None,
+        )
         self._maybe_schedule_session_compression(session)
         self.sessions.save(session)
 

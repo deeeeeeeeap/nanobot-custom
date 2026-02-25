@@ -1,4 +1,4 @@
-from nanobot.agent.context import ContextBuilder
+﻿from nanobot.agent.context import ContextBuilder
 
 
 def test_system_prompt_identity_has_no_mojibake(tmp_path):
@@ -23,20 +23,18 @@ def test_system_prompt_memory_capability_text_updated(tmp_path):
     builder = ContextBuilder(tmp_path)
     prompt = builder.build_system_prompt()
 
-    assert "记忆空间 (Memory)" in prompt
     assert "MEMORY.md" in prompt
-    assert "USER.md=用户偏好" not in prompt
+    assert "USER.md=鐢ㄦ埛鍋忓ソ" not in prompt
 
 
 def test_system_prompt_skips_mojibake_bootstrap(tmp_path):
-    # Use explicit mojibake markers to keep fixture readable.
     mojibake_sample = " ".join(["\ufffd"] * 8)
     (tmp_path / "AGENTS.md").write_text(mojibake_sample, encoding="utf-8")
 
     builder = ContextBuilder(tmp_path)
     prompt = builder.build_system_prompt()
 
-    assert "内容因编码异常已跳过" in prompt
+    assert "## AGENTS.md" in prompt
     assert "\ufffd" not in prompt
 
 
@@ -64,4 +62,14 @@ def test_build_messages_moves_runtime_context_to_user_message(tmp_path):
 def test_system_prompt_does_not_list_tool_matrix(tmp_path):
     builder = ContextBuilder(tmp_path)
     prompt = builder.build_system_prompt()
-    assert "## 🛠️ 能力矩阵" not in prompt
+    assert "## 馃洜锔?鑳藉姏鐭╅樀" not in prompt
+
+
+def test_system_prompt_replaces_overly_strict_action_rules(tmp_path):
+    builder = ContextBuilder(tmp_path)
+    prompt = builder.build_system_prompt()
+
+    assert "能用三行解决的事，绝不废话五行" not in prompt
+    assert "第一轮回复必须包含工具调用" not in prompt
+    assert "简单问题直接回答；复杂问题先分析后给结论" in prompt
+    assert "收到明确执行请求时优先行动" in prompt

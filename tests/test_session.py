@@ -79,3 +79,32 @@ def test_session_save_concurrent_writes_keep_jsonl_valid(monkeypatch, tmp_path: 
     assert parsed[0].get("_type") == "metadata"
     assert len(parsed) == 2
     assert parsed[1]["role"] == "user"
+
+
+def test_session_get_history_keeps_tool_and_reasoning_fields() -> None:
+    session = Session(key="telegram:demo")
+    session.add_message("user", "请读取文件")
+    session.add_message(
+        "assistant",
+        "",
+        tool_calls=[
+            {
+                "id": "tc-1",
+                "type": "function",
+                "function": {"name": "read_file", "arguments": "{\"path\":\"README.md\"}"},
+            }
+        ],
+        reasoning_content="先读取文件。",
+    )
+    session.add_message(
+        "tool",
+        "ok",
+        tool_call_id="tc-1",
+        name="read_file",
+    )
+
+    history = session.get_history()
+    assert history[1]["tool_calls"][0]["function"]["name"] == "read_file"
+    assert history[1]["reasoning_content"] == "先读取文件。"
+    assert history[2]["tool_call_id"] == "tc-1"
+    assert history[2]["name"] == "read_file"

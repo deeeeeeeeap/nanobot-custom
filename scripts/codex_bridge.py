@@ -154,7 +154,7 @@ def convert_to_responses_api(data: dict) -> dict:
     """
     messages = data.get("messages", [])
 
-    instructions = CARBON_CORE_IDENTITY
+    system_sections = [CARBON_CORE_IDENTITY]
     input_items = []
 
     for msg in messages:
@@ -165,7 +165,7 @@ def convert_to_responses_api(data: dict) -> dict:
         if role == "system":
             sys_text = extract_text(content)
             if sys_text:
-                instructions = sys_text + "\n\n" + CARBON_CORE_IDENTITY
+                system_sections.append(sys_text)
             continue
 
         # tool → function_call_output（工具执行结果）
@@ -209,6 +209,8 @@ def convert_to_responses_api(data: dict) -> dict:
             "content": [{"type": "input_text", "text": extract_text(content)}],
         })
 
+    instructions = "\n\n---\n\n".join(section for section in system_sections if section)
+
     # 构造 Responses API 请求体
     result = {
         "model": data.get("model", "gpt-5.3-codex"),
@@ -216,6 +218,8 @@ def convert_to_responses_api(data: dict) -> dict:
         "input": input_items,
         "stream": True,
         "store": False,
+        "max_output_tokens": data.get("max_tokens", 8192),
+        "temperature": data.get("temperature", 0.7),
     }
 
     # tools 格式转换：Chat Completions 嵌套格式 → Responses API 扁平格式
