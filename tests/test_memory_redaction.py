@@ -3,8 +3,8 @@ from nanobot.agent.memory import MemoryStore
 
 def test_memory_context_redacts_known_secrets(tmp_path):
     store = MemoryStore(tmp_path)
-    hex_token = "4b6c2a1ba38be4296efb741acca715c7010e3a3f"
-    tg_token = "8275668745:AAGaxh9ztcPmbVpEVo2oCbv3BkRzmzJO7no"
+    hex_token = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef00"
+    tg_token = "1234567890:AAFakeTokenForTestingPurposesOnly"
     store.write_long_term(
         "\n".join(
             [
