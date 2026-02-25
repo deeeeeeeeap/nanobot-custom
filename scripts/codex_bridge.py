@@ -510,6 +510,142 @@ def chat():
     return handle_chat(request.json)
 
 
+@app.route("/responses", methods=["POST"])
+@app.route("/v1/responses", methods=["POST"])
+def responses_api():
+    """兼容 litellm Responses API 格式。
+
+    新版 litellm 对含 'codex' 的模型名强制使用 Responses API，
+    发送到 /responses 而非 /chat/completions。
+    此路由将 Responses API 格式转换为 Chat Completions 格式后复用现有逻辑。
+    """
+    data = request.json or {}
+
+    # 将 Responses API 的 input 字段转为 Chat Completions 的 messages 格式
+    messages = []
+    instructions = data.get("instructions", "")
+    if instructions:
+        messages.append({"role": "system", "content": instructions})
+
+    for item in data.get("input", []):
+        item_type = item.get("type", "")
+        if item_type == "message":
+            role = item.get("role", "user")
+            # 提取文本内容
+            content_parts = item.get("content", [])
+            text_parts = []
+            for part in content_parts:
+                if isinstance(part, dict):
+                    text_parts.append(part.get("text", ""))
+                elif isinstance(part, str):
+                    text_parts.append(part)
+            messages.append({"role": role, "content": "\n".join(text_parts)})
+        elif item_type == "function_call":
+            messages.append({
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": item.get("call_id", ""),
+                    "type": "function",
+                    "function": {
+                        "name": item.get("name", ""),
+                        "arguments": item.get("arguments", "{}"),
+                    },
+                }],
+            })
+        elif item_type == "function_call_output":
+            # litellm 将 output 转为列表格式 [{"type": "input_text", "text": "..."}]
+            # 需要从列表中提取文本，同时兼容字符串格式
+            raw_output = item.get("output", "")
+            if isinstance(raw_output, list):
+                text_parts = []
+                for part in raw_output:
+                    if isinstance(part, dict):
+                        text_parts.append(part.get("text", ""))
+                    elif isinstance(part, str):
+                        text_parts.append(part)
+                output_text = "\n".join(text_parts)
+            else:
+                output_text = str(raw_output) if raw_output else ""
+            messages.append({
+                "role": "tool",
+                "tool_call_id": item.get("call_id", ""),
+                "content": output_text,
+            })
+
+    # 转换 tools 格式（Responses API 扁平 → Chat Completions 嵌套）
+    tools = None
+    raw_tools = data.get("tools")
+    if raw_tools:
+        tools = []
+        for t in raw_tools:
+            if t.get("type") == "function":
+                tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": t.get("name", ""),
+                        "description": t.get("description", ""),
+                        "parameters": t.get("parameters", {}),
+                    },
+                })
+
+    chat_data = {
+        "model": data.get("model", "gpt-5.3-codex"),
+        "messages": messages,
+        "max_tokens": data.get("max_output_tokens", 8192),
+        "temperature": data.get("temperature", 0.7),
+    }
+    if tools:
+        chat_data["tools"] = tools
+        chat_data["tool_choice"] = data.get("tool_choice", "auto")
+
+    # 复用 handle_chat 获取 Chat Completions 格式响应
+    chat_response = handle_chat(chat_data)
+    chat_json = chat_response.get_json()
+
+    # 将 Chat Completions 响应转为 Responses API 格式
+    choice = (chat_json.get("choices") or [{}])[0]
+    msg = choice.get("message", {})
+
+    output = []
+    # 处理 tool_calls
+    for tc in msg.get("tool_calls", []):
+        func = tc.get("function", {})
+        output.append({
+            "type": "function_call",
+            "id": f"fc_{uuid.uuid4().hex[:8]}",
+            "call_id": tc.get("id", ""),
+            "name": func.get("name", ""),
+            "arguments": func.get("arguments", "{}"),
+            "status": "completed",
+        })
+    # 处理文本内容
+    text = msg.get("content")
+    if text:
+        output.append({
+            "type": "message",
+            "id": f"msg_{uuid.uuid4().hex[:8]}",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": text}],
+        })
+
+    resp_id = f"resp_{uuid.uuid4().hex[:12]}"
+    return jsonify({
+        "id": resp_id,
+        "object": "response",
+        "created_at": int(time.time()),
+        "model": chat_data["model"],
+        "status": "completed",
+        "output": output,
+        "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+        },
+    })
+
+
 @app.route("/v1/models", methods=["GET"])
 def models():
     """模型列表端点。"""
