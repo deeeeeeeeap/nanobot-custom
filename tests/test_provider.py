@@ -173,3 +173,84 @@ async def test_provider_chat_omits_tool_choice_without_tools(monkeypatch) -> Non
     kwargs = captured["kwargs"]
     assert isinstance(kwargs, dict)
     assert "tool_choice" not in kwargs
+
+
+def test_provider_sanitize_messages_whitelist_and_assistant_content() -> None:
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [{"id": "x"}],
+            "extra": "drop",
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "abc",
+            "name": "read_file",
+            "content": "ok",
+            "metadata": {"x": 1},
+        },
+    ]
+
+    sanitized = LiteLLMProvider._sanitize_messages(messages)
+    assert sanitized[0]["role"] == "assistant"
+    assert sanitized[0]["content"] is None
+    assert "extra" not in sanitized[0]
+    assert sanitized[1]["name"] == "read_file"
+    assert "metadata" not in sanitized[1]
+
+
+def test_provider_sanitize_empty_content_blocks() -> None:
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": ""},
+                {"type": "text", "text": "   "},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+            ],
+        }
+    ]
+    sanitized = LiteLLMProvider._sanitize_empty_content(messages)
+    assert isinstance(sanitized[0]["content"], list)
+    assert len(sanitized[0]["content"]) == 1
+    assert sanitized[0]["content"][0]["type"] == "image_url"
+
+
+def test_provider_parse_response_normalizes_empty_reasoning_content() -> None:
+    provider = LiteLLMProvider(api_key="k")
+    fake_response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                finish_reason="stop",
+                message=SimpleNamespace(content="ok", reasoning_content="", tool_calls=None),
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+    )
+
+    parsed = provider._parse_response(fake_response)
+    assert parsed.reasoning_content is None
+
+
+async def test_provider_chat_clamps_max_tokens(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def _fake_completion(**kwargs):
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(content="ok", reasoning_content=None, tool_calls=None),
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+
+    monkeypatch.setattr("nanobot.providers.litellm_provider.acompletion", _fake_completion)
+    provider = LiteLLMProvider(api_key="k", default_model="openai/gpt-4o-mini")
+    await provider.chat(messages=[{"role": "user", "content": "hi"}], max_tokens=0)
+
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs["max_tokens"] == 1

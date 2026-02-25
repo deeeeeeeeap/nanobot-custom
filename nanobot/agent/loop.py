@@ -420,6 +420,8 @@ class AgentLoop:
         self.search_embedder = None
         self.memory_compressor: SessionCompressor | None = None
         self._compression_tasks: set[asyncio.Task] = set()
+        self._session_compression_locks: dict[str, asyncio.Lock] = {}
+        self._sessions_compressing: set[str] = set()
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -978,6 +980,26 @@ class AgentLoop:
         tail_text = result[-tail:] if tail > 0 else ""
         return f"{result[:head]}\n[...省略 {omitted} 字符...]\n{tail_text}"
 
+    def _get_session_compression_lock(self, session_key: str) -> asyncio.Lock:
+        lock = self._session_compression_locks.get(session_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_compression_locks[session_key] = lock
+        return lock
+
+    @staticmethod
+    def _add_tool_error_hint(result_text: str) -> str:
+        """Append actionable hint for tool failures."""
+        if not isinstance(result_text, str):
+            return str(result_text)
+        if not result_text.startswith("Error"):
+            return result_text
+        hint = (
+            "\nHint: 请根据错误调整参数后重试；"
+            "路径类错误先调用 list_dir/read_file 确认目标是否存在且有权限。"
+        )
+        return result_text if hint.strip() in result_text else result_text + hint
+
     @staticmethod
     def _classify_response_error(response) -> str:
         if response.error_type:
@@ -1130,7 +1152,27 @@ class AgentLoop:
             )
         if cmd == "/new":
             msg_count = len(session.messages)
-            result = await self._compress_session_for_new(session)
+            lock = self._get_session_compression_lock(session.key)
+            async with lock:
+                if session.key in self._sessions_compressing:
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content="会话正在进行记忆整合，请稍后重试 /new。",
+                    )
+                self._sessions_compressing.add(session.key)
+                try:
+                    result = await self._compress_session_for_new(session)
+                finally:
+                    self._sessions_compressing.discard(session.key)
+
+            if result is None and msg_count > 0:
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="记忆整合失败，已保留当前会话。请稍后重试 /new。",
+                )
+
             session.clear()
             self.sessions.save(session)
             if result is not None:
@@ -1317,7 +1359,9 @@ class AgentLoop:
                     ))
 
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
-                    result_text = self._truncate_tool_result(str(result))
+                    result_text = self._add_tool_error_hint(
+                        self._truncate_tool_result(str(result))
+                    )
 
                     success = not (isinstance(result_text, str) and result_text.startswith("Error"))
                     await reporter.report(StatusMessage.tool_done(tool_call.name, success))
@@ -1580,7 +1624,9 @@ class AgentLoop:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
-                    result_text = self._truncate_tool_result(str(result))
+                    result_text = self._add_tool_error_hint(
+                        self._truncate_tool_result(str(result))
+                    )
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result_text
                     )
@@ -1702,6 +1748,8 @@ class AgentLoop:
             or self.memory_config.compress_threshold <= 0
         ):
             return
+        if session.key in self._sessions_compressing:
+            return
 
         current_count = len(session.messages)
         last_count = int(session.metadata.get("last_compressed_count", 0))
@@ -1715,8 +1763,16 @@ class AgentLoop:
         task.add_done_callback(self._compression_tasks.discard)
 
     async def _compress_session_background(self, session_key: str, message_count: int) -> None:
-        session = self.sessions.get_or_create(session_key)
-        result = await self._compress_session_for_new(session)
+        lock = self._get_session_compression_lock(session_key)
+        async with lock:
+            if session_key in self._sessions_compressing:
+                return
+            self._sessions_compressing.add(session_key)
+            try:
+                session = self.sessions.get_or_create(session_key)
+                result = await self._compress_session_for_new(session)
+            finally:
+                self._sessions_compressing.discard(session_key)
         if result is None:
             return
         session.metadata["last_compressed_count"] = message_count
@@ -1803,10 +1859,24 @@ Respond with ONLY valid JSON, no markdown fences."""
                 tool_choice="auto",
                 model=self.model,
             )
-            text = (response.content or "").strip()
-            if text.startswith("```"):
-                text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-            result = json.loads(text)
+            result: dict
+            if response.has_tool_calls and response.tool_calls:
+                args = response.tool_calls[0].arguments
+                if isinstance(args, dict):
+                    result = args
+                elif isinstance(args, str):
+                    result = json.loads(args)
+                else:
+                    logger.warning(
+                        "Unexpected memory consolidation tool arguments type: {}",
+                        type(args).__name__,
+                    )
+                    result = {}
+            else:
+                text = (response.content or "").strip()
+                if text.startswith("```"):
+                    text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+                result = json.loads(text)
 
             history_added = False
             memory_updated = False

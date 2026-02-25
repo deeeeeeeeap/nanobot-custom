@@ -12,6 +12,10 @@ from nanobot.exceptions import ProviderError
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.providers.registry import find_by_model, find_gateway
 
+_ALLOWED_MSG_KEYS = frozenset(
+    {"role", "content", "tool_calls", "tool_call_id", "name", "reasoning_content"}
+)
+
 
 class LiteLLMProvider(LLMProvider):
     """
@@ -135,6 +139,36 @@ class LiteLLMProvider(LLMProvider):
                 return
 
     @staticmethod
+    def _sanitize_empty_content(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Filter empty text blocks that can trigger strict provider 400 errors."""
+        sanitized: list[dict[str, Any]] = []
+        for msg in messages:
+            clean = dict(msg)
+            content = clean.get("content")
+            if isinstance(content, list):
+                blocks: list[Any] = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text = str(block.get("text", ""))
+                        if not text.strip():
+                            continue
+                    blocks.append(block)
+                clean["content"] = blocks or None
+            sanitized.append(clean)
+        return sanitized
+
+    @staticmethod
+    def _sanitize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Strip non-standard top-level message keys before sending to providers."""
+        sanitized: list[dict[str, Any]] = []
+        for msg in messages:
+            clean = {k: v for k, v in msg.items() if k in _ALLOWED_MSG_KEYS}
+            if clean.get("role") == "assistant" and "content" not in clean:
+                clean["content"] = None
+            sanitized.append(clean)
+        return sanitized
+
+    @staticmethod
     def _classify_error(status_code: int | None, message: str, code: str | None = None) -> str:
         """Classify provider/network failures into a stable error category."""
         text = f"{message} {code or ''}".lower()
@@ -186,9 +220,10 @@ class LiteLLMProvider(LLMProvider):
         if self._supports_cache_control(original_model):
             messages, tools = self._apply_cache_control(messages, tools)
 
+        max_tokens = max(1, max_tokens)
         kwargs: dict[str, Any] = {
             "model": model,
-            "messages": messages,
+            "messages": self._sanitize_messages(self._sanitize_empty_content(messages)),
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
@@ -276,6 +311,8 @@ class LiteLLMProvider(LLMProvider):
                     args = json.loads(args)
                 except json.JSONDecodeError:
                     args = {"raw": args}
+            elif not isinstance(args, dict):
+                args = {"raw": str(args)}
             tool_calls.append(
                 ToolCallRequest(
                     id=tc.id,
@@ -297,7 +334,7 @@ class LiteLLMProvider(LLMProvider):
             tool_calls=tool_calls,
             finish_reason=choice.finish_reason or "stop",
             usage=usage,
-            reasoning_content=getattr(message, "reasoning_content", None),
+            reasoning_content=getattr(message, "reasoning_content", None) or None,
         )
 
     def get_default_model(self) -> str:

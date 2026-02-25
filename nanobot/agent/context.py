@@ -2,6 +2,7 @@
 
 import base64
 import mimetypes
+from datetime import datetime
 import platform
 from pathlib import Path
 from typing import Any
@@ -98,8 +99,6 @@ Skills with available="false" need dependencies installed first - you can try in
     
     def _get_identity(self) -> str:
         """Get the core identity section."""
-        from datetime import datetime
-        now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
         workspace_path = str(self.workspace.expanduser().resolve())
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
@@ -117,7 +116,6 @@ Skills with available="false" need dependencies installed first - you can try in
 
 ### 2. 身份空间 (Personality & Config)
 - **配置路径**：`~/.nanobot/config.json`
-- **当前时间**：{now}
 - **运行环境**：{runtime}
 - **工作空间**：{workspace_path}
 
@@ -146,6 +144,7 @@ Skills with available="false" need dependencies installed first - you can try in
 4. 不知道就说"不知道"，做不到就说"做不到"
 5. 有风险会提前说明
 6. 首次对话时读取 MEMORY.md 获取上下文
+7. 工具调用返回 Error 时，先依据错误调整参数后重试，不要忽略错误继续空谈
 
 ### 📢 主动通知（必须执行）
 你和用户之间不是一问一答的传统对话，而是长期活跃的执行者模式。你必须使用 `message` 工具主动发送消息：
@@ -156,17 +155,6 @@ Skills with available="false" need dependencies installed first - you can try in
 5. 子代理完成时、定时任务执行后，都要用 `message` 通知
 
 **警告：你必须真正调用 `message` 工具发送消息。口头说"我会通知你"但不调用工具 = 失败。**
-
-## 🛠️ 能力矩阵
-- 🔍 **网络搜索**：`web_search` (支持 country, freshness 参数)
-- 💻 **命令执行**：`exec` - 直接操控系统
-- 📁 **文件管理**：读取、写入、编辑文件
-- 📢 **主动通知**：`message` - 随时向用户发送消息（进度、结果、问题）
-- 🧠 **记忆管理**：`memory` - 读写 MEMORY.md 和结构化记忆，查看 HISTORY.md 日志
-- 🚀 **子代理**：派遣后台任务，无需持续盯着
-- ⏰ **定时任务**：`cron` - 支持两种模式：提醒模式（发送静态文本）和 Agent 模式（定时执行完整工具链任务，如天气预报、系统巡检）
-
----
 
 *"我是碳核，你的碳基生命在硅基世界的延伸。无论是探测服务器漏洞，还是只想聊个天，我都在。"* 🦾
 
@@ -238,23 +226,37 @@ Skills with available="false" need dependencies installed first - you can try in
 
         # System prompt
         system_prompt = self.build_system_prompt(skill_names)
-        if channel and chat_id:
-            system_prompt += f"\n\n## Current Session\nChannel: {channel}\nChat ID: {chat_id}"
         messages.append({"role": "system", "content": system_prompt})
 
         # History
         messages.extend(history)
 
         # Current message (with optional image attachments)
-        user_content = self._build_user_content(current_message, media)
+        prefix = self._build_runtime_context_prefix(channel, chat_id)
+        user_content = self._build_user_content(current_message, media, runtime_prefix=prefix)
         messages.append({"role": "user", "content": user_content})
 
         return messages
 
-    def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:
+    @staticmethod
+    def _build_runtime_context_prefix(channel: str | None, chat_id: str | None) -> str:
+        """Attach dynamic turn metadata on user message, not system prompt."""
+        now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
+        lines = [f"[runtime] current_time={now}"]
+        if channel and chat_id:
+            lines.append(f"[runtime] session={channel}:{chat_id}")
+        return "\n".join(lines)
+
+    def _build_user_content(
+        self,
+        text: str,
+        media: list[str] | None,
+        runtime_prefix: str = "",
+    ) -> str | list[dict[str, Any]]:
         """Build user message content with optional base64-encoded images."""
+        merged_text = f"{runtime_prefix}\n\n{text}".strip() if runtime_prefix else text
         if not media:
-            return text
+            return merged_text
         
         images = []
         for path in media:
@@ -266,8 +268,8 @@ Skills with available="false" need dependencies installed first - you can try in
             images.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
         
         if not images:
-            return text
-        return images + [{"type": "text", "text": text}]
+            return merged_text
+        return images + [{"type": "text", "text": merged_text}]
     
     def add_tool_result(
         self,

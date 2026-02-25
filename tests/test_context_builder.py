@@ -23,7 +23,8 @@ def test_system_prompt_memory_capability_text_updated(tmp_path):
     builder = ContextBuilder(tmp_path)
     prompt = builder.build_system_prompt()
 
-    assert "读写 MEMORY.md 和结构化记忆" in prompt
+    assert "记忆空间 (Memory)" in prompt
+    assert "MEMORY.md" in prompt
     assert "USER.md=用户偏好" not in prompt
 
 
@@ -41,3 +42,26 @@ def test_system_prompt_skips_mojibake_bootstrap(tmp_path):
 
 def test_mojibake_detector_does_not_flag_repeated_fang_character():
     assert ContextBuilder._looks_mojibake("\u9983" * 8) is False
+
+
+def test_build_messages_moves_runtime_context_to_user_message(tmp_path):
+    builder = ContextBuilder(tmp_path)
+    messages = builder.build_messages(
+        history=[],
+        current_message="执行检查",
+        channel="telegram",
+        chat_id="42",
+    )
+
+    system_msg = messages[0]
+    user_msg = messages[-1]
+    assert system_msg["role"] == "system"
+    assert "## Current Session" not in system_msg["content"]
+    assert user_msg["role"] == "user"
+    assert "[runtime] session=telegram:42" in user_msg["content"]
+
+
+def test_system_prompt_does_not_list_tool_matrix(tmp_path):
+    builder = ContextBuilder(tmp_path)
+    prompt = builder.build_system_prompt()
+    assert "## 🛠️ 能力矩阵" not in prompt

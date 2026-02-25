@@ -313,6 +313,24 @@ async def test_new_empty_session_feedback(monkeypatch, tmp_path: Path) -> None:
     assert reply == "已开始新会话（原会话本来就是空的）。"
 
 
+async def test_new_keeps_session_when_compression_fails(monkeypatch, tmp_path: Path) -> None:
+    loop = _make_loop(monkeypatch, tmp_path)
+    session = loop.sessions.get_or_create("telegram:43")
+    session.add_message("user", "one")
+    session.add_message("assistant", "two")
+    loop.sessions.save(session)
+
+    async def _failed_compress(session_obj):
+        return None
+
+    monkeypatch.setattr(loop, "_compress_session_for_new", _failed_compress)
+    reply = await loop.process_direct("/new", channel="telegram", chat_id="43")
+
+    assert reply == "记忆整合失败，已保留当前会话。请稍后重试 /new。"
+    reloaded = loop.sessions.get_or_create("telegram:43")
+    assert len(reloaded.messages) == 2
+
+
 async def test_process_direct_uses_explicit_session_key(monkeypatch, tmp_path: Path) -> None:
     loop = _make_loop(monkeypatch, tmp_path)
 
