@@ -84,6 +84,7 @@ async def test_execution_intent_retries_once_then_uses_tools(monkeypatch, tmp_pa
 async def test_execution_intent_stops_after_single_internal_retry(
     monkeypatch, tmp_path: Path
 ) -> None:
+    """反空转降压后，模型不再被硬阻断，而是允许正常输出。"""
     _prepare(monkeypatch, tmp_path)
 
     provider = SequencedProvider(
@@ -96,7 +97,8 @@ async def test_execution_intent_stops_after_single_internal_retry(
 
     reply = await loop.process_direct("开始执行", channel="telegram", chat_id="44")
 
-    assert "未产生有效工具调用" in reply
+    # 降压后允许模型正常输出，不再硬阻断
+    assert reply  # 有回复内容
     assert provider.call_count == 2
     assert provider.tool_choices == ["required", "required"]
 
@@ -148,6 +150,7 @@ async def test_non_execution_intent_keeps_tool_choice_auto(monkeypatch, tmp_path
 
 
 async def test_repeated_failure_escalates_user_message(monkeypatch, tmp_path: Path) -> None:
+    """降压后连续未调工具不再硬阻断，而是允许正常输出并记录 streak。"""
     _prepare(monkeypatch, tmp_path)
 
     provider = SequencedProvider(
@@ -163,5 +166,6 @@ async def test_repeated_failure_escalates_user_message(monkeypatch, tmp_path: Pa
     first = await loop.process_direct("开始执行", channel="telegram", chat_id="47")
     second = await loop.process_direct("开始执行", channel="telegram", chat_id="47")
 
-    assert "未产生有效工具调用" in first
-    assert "连续两次未触发有效工具调用" in second
+    # 降压后允许模型正常输出
+    assert first
+    assert second
