@@ -328,6 +328,22 @@ class _ToolLoopDetector:
             should_break=should_break,
         )
 
+    def _check_tool_name_frequency(self) -> _ToolLoopSignal | None:
+        """Detect high-frequency calls to the same tool regardless of arguments."""
+        if not self._history:
+            return None
+        name_counts = Counter(item[0] for item in self._history)
+        _, max_count = name_counts.most_common(1)[0]
+        severity = self._severity(max_count)
+        if not severity:
+            return None
+        return _ToolLoopSignal(
+            kind="tool_name_frequency",
+            count=max_count,
+            severity=severity,
+            should_break=max_count >= self.break_threshold,
+        )
+
     def observe(self, tool_name: str, arguments: dict | None, result: str) -> _ToolLoopSignal | None:
         tool_hash = self._hash_tool_call(tool_name, arguments)
         result_hash = self._hash_result(result)
@@ -337,6 +353,7 @@ class _ToolLoopDetector:
             self._check_generic_repeat(),
             self._check_poll_no_progress(),
             self._check_ping_pong(),
+            self._check_tool_name_frequency(),
         ]
         signals = [signal for signal in signals if signal is not None]
         if not signals:
@@ -1263,12 +1280,19 @@ class AgentLoop:
         # Main agent loop.
         iteration = 0
         final_content = None
+        loop_exit_reason = "unknown"
+        final_tool_choice = "auto"
         tools_used: list[str] = []
         tools_were_called = False  # Track whether any tool was actually called.
         meaningful_tools_called = False
         required_retry_used = False
+        required_downgraded = False
         required_no_tool_observed = False
         required_no_tool_streak = int(session.metadata.get("required_no_tool_streak", 0))
+        consecutive_exempt_rounds = 0
+        max_exempt_rounds = 2
+        message_tool_count = 0
+        max_message_calls = 2
         execution_intent = _is_execution_intent(msg.content)
         active_model = current_model
         loop_detector = (
@@ -1298,20 +1322,28 @@ class AgentLoop:
             await reporter.report(StatusMessage.thinking(is_codex=is_codex))
 
             tools_definitions = self.tools.get_definitions() if model_supports_tools else None
+            should_force_required = (
+                self.idle_intervention
+                and execution_intent
+                and model_supports_tools
+                and not meaningful_tools_called
+            )
+            required_downgraded_this_round = should_force_required and consecutive_exempt_rounds > 0
+            if required_downgraded_this_round:
+                required_downgraded = True
             requested_tool_choice = (
                 "required"
-                if (
-                    self.idle_intervention
-                    and execution_intent
-                    and model_supports_tools
-                    and not meaningful_tools_called
-                )
+                if (should_force_required and consecutive_exempt_rounds == 0)
                 else "auto"
             )
+            final_tool_choice = requested_tool_choice
             logger.debug(
-                "Tool choice decision: execution_intent={}, meaningful_tools_called={}, tool_choice={}",
+                "Tool choice decision: execution_intent={}, meaningful_tools_called={}, "
+                "exempt_rounds={}, downgraded={}, tool_choice={}",
                 execution_intent,
                 meaningful_tools_called,
+                consecutive_exempt_rounds,
+                required_downgraded_this_round,
                 requested_tool_choice,
             )
 
@@ -1375,7 +1407,39 @@ class AgentLoop:
                         tool_call.arguments
                     ))
 
+                    if (
+                        tool_call.name in _IDLE_EXEMPT_TOOLS
+                        and message_tool_count >= max_message_calls
+                    ):
+                        logger.warning(
+                            "[E_MESSAGE_QUOTA] message tool quota reached: max={}, stopping loop",
+                            max_message_calls,
+                        )
+                        # 补写 tool result 到 messages 和 session，避免断链
+                        quota_err = (
+                            f"本轮已发送 {max_message_calls} 条通知消息，"
+                            "已达上限，后续消息已被拦截。"
+                        )
+                        messages = self.context.add_tool_result(
+                            messages, tool_call.id, tool_call.name, quota_err
+                        )
+                        session.add_message(
+                            "tool",
+                            quota_err,
+                            tool_call_id=tool_call.id,
+                            name=tool_call.name,
+                        )
+                        last_msg_content = str(
+                            (tool_call.arguments or {}).get("content", "")
+                        ).strip()
+                        final_content = response.content or last_msg_content or "任务已完成。"
+                        loop_exit_reason = "message_quota"
+                        tool_loop_break = True
+                        break
+
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    if tool_call.name in _IDLE_EXEMPT_TOOLS:
+                        message_tool_count += 1
                     result_text = self._add_tool_error_hint(
                         self._truncate_tool_result(str(result))
                     )
@@ -1425,27 +1489,43 @@ class AgentLoop:
                     not _is_meaningful_tool_call(tc.name, tc.arguments)
                     for tc in response.tool_calls
                 )
-                if all_exempt and meaningful_tools_called:
-                    logger.info(
-                        "All tool calls in this round are exempt (e.g. message) and meaningful work already done, stopping loop"
+                if all_exempt:
+                    consecutive_exempt_rounds += 1
+                    should_exit = (
+                        meaningful_tools_called
+                        or consecutive_exempt_rounds >= max_exempt_rounds
                     )
-                    # 用 message 内容或 response.content 作为最终输出
-                    last_msg_content = None
-                    for tc in reversed(response.tool_calls):
-                        if tc.name in ("message", "send_message"):
-                            last_msg_content = (tc.arguments or {}).get("content")
-                            if last_msg_content:
-                                break
-                    final_content = response.content or last_msg_content or ""
-                    break
+                    if should_exit:
+                        logger.info(
+                            "Exempt-only round exit: exempt_rounds={}, meaningful_done={}",
+                            consecutive_exempt_rounds,
+                            meaningful_tools_called,
+                        )
+                        last_msg_content = None
+                        for tc in reversed(response.tool_calls):
+                            if tc.name in _IDLE_EXEMPT_TOOLS:
+                                last_msg_content = (tc.arguments or {}).get("content")
+                                if last_msg_content:
+                                    break
+                        final_content = response.content or last_msg_content or ""
+                        loop_exit_reason = "exempt_round_exit"
+                        break
+                else:
+                    consecutive_exempt_rounds = 0
 
+                nudge_text = (
+                    "根据工具返回结果决定下一步：可继续调用工具执行、"
+                    "先分析后调整方案，或在任务完成时给出总结。"
+                )
+                if consecutive_exempt_rounds > 0:
+                    nudge_text = (
+                        "若无必要操作，请直接输出最终结论并停止调用工具。"
+                        "不要再发送状态通知消息。"
+                    )
                 messages.append(
                     {
                         "role": "user",
-                        "content": (
-                            "根据工具返回结果决定下一步：可继续调用工具执行、"
-                            "先分析后调整方案，或在任务完成时给出总结。"
-                        ),
+                        "content": nudge_text,
                     }
                 )
             else:
@@ -1502,10 +1582,12 @@ class AgentLoop:
 
                 # No tool call; use model content as final output.
                 final_content = response.content
+                loop_exit_reason = "model_text_reply"
                 break
 
         if not final_content:
             final_content = "（任务已执行完毕，但模型未生成回复文本。）"
+            loop_exit_reason = "empty_fallback"
 
         # Run hallucination checks when tools are unavailable or not used.
         should_check_hallucination = (
@@ -1524,9 +1606,23 @@ class AgentLoop:
                     f"(confidence: {hallucination.confidence:.2f})"
                 )
                 final_content = create_honest_response(self.model)
+                loop_exit_reason = "hallucination_blocked"
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
+        logger.info(
+            "Agent loop completed: iterations={}, tools_used={}, message_calls={}, "
+            "exempt_rounds={}, meaningful={}, required_downgraded={}, "
+            "final_tool_choice={}, exit_reason={}",
+            iteration,
+            len(tools_used),
+            message_tool_count,
+            consecutive_exempt_rounds,
+            meaningful_tools_called,
+            required_downgraded,
+            final_tool_choice,
+            loop_exit_reason,
+        )
 
         # Persist conversation; include used tools for later memory consolidation.
         if required_no_tool_observed:

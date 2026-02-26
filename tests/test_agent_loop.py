@@ -97,6 +97,165 @@ class NoToolProvider(LLMProvider):
         return "openai/gpt-4o-mini"
 
 
+class MessageOnlyProvider(LLMProvider):
+    """Always emits message tool calls to simulate notify-only loops."""
+
+    def __init__(self) -> None:
+        super().__init__(api_key=None, api_base=None)
+        self.calls = 0
+        self.tool_choices: list[str] = []
+        self.observed_messages: list[list[dict[str, Any]]] = []
+
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+    ) -> LLMResponse:
+        self.calls += 1
+        self.tool_choices.append(tool_choice)
+        self.observed_messages.append(list(messages))
+        return LLMResponse(
+            content=None,
+            tool_calls=[
+                ToolCallRequest(
+                    id=f"tc-msg-{self.calls}",
+                    name="message",
+                    arguments={"content": f"任务状态更新 #{self.calls}"},
+                )
+            ],
+            finish_reason="tool_calls",
+        )
+
+    def get_default_model(self) -> str:
+        return "openai/gpt-4o-mini"
+
+
+class RequiredDowngradeProvider(LLMProvider):
+    """First returns exempt tool call, then returns pure text."""
+
+    def __init__(self) -> None:
+        super().__init__(api_key=None, api_base=None)
+        self.calls = 0
+        self.tool_choices: list[str] = []
+
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+    ) -> LLMResponse:
+        self.calls += 1
+        self.tool_choices.append(tool_choice)
+        if self.calls == 1:
+            return LLMResponse(
+                content=None,
+                tool_calls=[
+                    ToolCallRequest(
+                        id="tc-msg-1",
+                        name="message",
+                        arguments={"content": "已完成第一步通知"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            )
+        return LLMResponse(content="最终结论", finish_reason="stop")
+
+    def get_default_model(self) -> str:
+        return "openai/gpt-4o-mini"
+
+
+class MessageQuotaProvider(LLMProvider):
+    """Includes both exempt and meaningful calls so quota path can be exercised."""
+
+    def __init__(self) -> None:
+        super().__init__(api_key=None, api_base=None)
+        self.calls = 0
+
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+    ) -> LLMResponse:
+        self.calls += 1
+        return LLMResponse(
+            content=None,
+            tool_calls=[
+                ToolCallRequest(
+                    id=f"tc-msg-{self.calls}",
+                    name="message",
+                    arguments={"content": f"任务状态更新 #{self.calls}"},
+                ),
+                ToolCallRequest(
+                    id=f"tc-read-{self.calls}",
+                    name="read_file",
+                    arguments={"path": "note.txt"},
+                ),
+            ],
+            finish_reason="tool_calls",
+        )
+
+    def get_default_model(self) -> str:
+        return "openai/gpt-4o-mini"
+
+
+class MeaningfulThenMessageProvider(LLMProvider):
+    """Ensures old meaningful->message exit path still works."""
+
+    def __init__(self) -> None:
+        super().__init__(api_key=None, api_base=None)
+        self.calls = 0
+
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+    ) -> LLMResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return LLMResponse(
+                content=None,
+                tool_calls=[
+                    ToolCallRequest(
+                        id="tc-read-1",
+                        name="read_file",
+                        arguments={"path": "note.txt"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            )
+        if self.calls == 2:
+            return LLMResponse(
+                content=None,
+                tool_calls=[
+                    ToolCallRequest(
+                        id="tc-msg-2",
+                        name="message",
+                        arguments={"content": "任务完成通知"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            )
+        return LLMResponse(content="unexpected third call", finish_reason="stop")
+
+    def get_default_model(self) -> str:
+        return "openai/gpt-4o-mini"
+
+
 class FallbackProvider(LLMProvider):
     def __init__(self):
         super().__init__(api_key=None, api_base=None)
@@ -480,6 +639,112 @@ async def test_execution_intent_without_tool_call_no_longer_hard_blocks(monkeypa
     assert "检测到你当前请求是执行型任务" not in reply
     assert "我已完成分析并给出结论。" in reply
     assert provider.calls >= 2  # one retry nudge is still expected
+
+
+async def test_message_only_loop_breaks_within_exempt_limit(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "nanobot.agent.loop.load_config",
+        lambda: (_ for _ in ()).throw(ConfigError("test config missing")),
+    )
+    monkeypatch.setattr("nanobot.agent.loop.detect_hallucination", lambda *a, **k: _NoHallucination())
+
+    provider = MessageOnlyProvider()
+    loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path, idle_intervention=True)
+
+    reply = await loop.process_direct("开始执行", channel="telegram", chat_id="610")
+    assert "任务状态更新 #2" in reply
+    assert provider.calls == 2
+    assert provider.calls < loop.max_iterations
+
+
+async def test_required_downgrades_after_exempt_round(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "nanobot.agent.loop.load_config",
+        lambda: (_ for _ in ()).throw(ConfigError("test config missing")),
+    )
+    monkeypatch.setattr("nanobot.agent.loop.detect_hallucination", lambda *a, **k: _NoHallucination())
+
+    provider = RequiredDowngradeProvider()
+    loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path, idle_intervention=True)
+
+    reply = await loop.process_direct("开始执行", channel="telegram", chat_id="611")
+    assert reply == "最终结论"
+    assert provider.tool_choices[:2] == ["required", "auto"]
+    assert provider.calls == 2
+
+
+async def test_message_tool_quota_short_circuit(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "nanobot.agent.loop.load_config",
+        lambda: (_ for _ in ()).throw(ConfigError("test config missing")),
+    )
+    monkeypatch.setattr("nanobot.agent.loop.detect_hallucination", lambda *a, **k: _NoHallucination())
+    (tmp_path / "note.txt").write_text("quota-check", encoding="utf-8")
+
+    provider = MessageQuotaProvider()
+    loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path, idle_intervention=True)
+
+    reply = await loop.process_direct("开始执行", channel="telegram", chat_id="612")
+    assert "任务状态更新 #3" in reply
+    assert provider.calls == 3
+
+
+async def test_nudge_changes_after_exempt_round(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "nanobot.agent.loop.load_config",
+        lambda: (_ for _ in ()).throw(ConfigError("test config missing")),
+    )
+    monkeypatch.setattr("nanobot.agent.loop.detect_hallucination", lambda *a, **k: _NoHallucination())
+
+    provider = MessageOnlyProvider()
+    loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path, idle_intervention=True)
+    await loop.process_direct("开始执行", channel="telegram", chat_id="614")
+    assert len(provider.observed_messages) >= 2
+    assert provider.observed_messages[1][-1]["role"] == "user"
+    assert "若无必要操作，请直接输出最终结论并停止调用工具" in provider.observed_messages[1][-1]["content"]
+
+
+def test_loop_detector_tool_name_frequency() -> None:
+    detector = _ToolLoopDetector(
+        window=10,
+        warn_threshold=3,
+        critical_threshold=4,
+        break_threshold=5,
+    )
+    signal = None
+    for i in range(4):
+        signal = detector.observe("message", {"content": f"state-{i}"}, f"result-{i}")
+    assert signal is not None
+    assert signal.kind == "tool_name_frequency"
+    assert signal.count == 4
+    assert signal.should_break is False
+
+    signal = detector.observe("message", {"content": "state-5"}, "result-5")
+    assert signal is not None
+    assert signal.kind == "tool_name_frequency"
+    assert signal.count == 5
+    assert signal.should_break is True
+
+
+async def test_meaningful_tool_then_message_still_exits(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "nanobot.agent.loop.load_config",
+        lambda: (_ for _ in ()).throw(ConfigError("test config missing")),
+    )
+    monkeypatch.setattr("nanobot.agent.loop.detect_hallucination", lambda *a, **k: _NoHallucination())
+    (tmp_path / "note.txt").write_text("hello", encoding="utf-8")
+
+    provider = MeaningfulThenMessageProvider()
+    loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path, idle_intervention=True)
+
+    reply = await loop.process_direct("开始执行", channel="telegram", chat_id="615")
+    assert "任务完成通知" in reply
+    assert provider.calls == 2
 
 
 async def test_process_direct_stop_signal(monkeypatch, tmp_path: Path) -> None:
