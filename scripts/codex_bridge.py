@@ -143,6 +143,31 @@ def extract_text(content) -> str:
     return str(content)
 
 
+def sanitize_input_items(input_items: list[dict]) -> tuple[list[dict], int]:
+    """Drop orphan function_call_output items whose call_id is missing in function_call."""
+    call_ids = {
+        str(item.get("call_id", "")).strip()
+        for item in input_items
+        if item.get("type") == "function_call" and str(item.get("call_id", "")).strip()
+    }
+    if not call_ids:
+        filtered = [item for item in input_items if item.get("type") != "function_call_output"]
+        return filtered, len(input_items) - len(filtered)
+
+    filtered: list[dict] = []
+    dropped = 0
+    for item in input_items:
+        if item.get("type") != "function_call_output":
+            filtered.append(item)
+            continue
+        call_id = str(item.get("call_id", "")).strip()
+        if call_id in call_ids:
+            filtered.append(item)
+        else:
+            dropped += 1
+    return filtered, dropped
+
+
 def convert_to_responses_api(data: dict) -> dict:
     """将 Chat Completions 请求转换为 Responses API 请求。
 
@@ -210,6 +235,11 @@ def convert_to_responses_api(data: dict) -> dict:
         })
 
     instructions = "\n\n---\n\n".join(section for section in system_sections if section)
+    input_items, dropped_orphans = sanitize_input_items(input_items)
+    if dropped_orphans:
+        print(
+            f"WARN: dropped {dropped_orphans} orphan function_call_output item(s) before /responses forwarding."
+        )
 
     # 构造 Responses API 请求体
     result = {

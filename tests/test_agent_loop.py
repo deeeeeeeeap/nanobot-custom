@@ -782,6 +782,105 @@ def test_context_guard_prunes_large_messages(monkeypatch, tmp_path: Path) -> Non
     assert len(trimmed) < len(messages)
 
 
+def test_trim_messages_drops_partial_tool_chain(monkeypatch, tmp_path: Path) -> None:
+    loop = _make_loop(monkeypatch, tmp_path)
+    messages = [
+        {"role": "system", "content": "sys"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "tc-chain-1",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "tc-chain-1",
+            "name": "read_file",
+            "content": "result " + ("x" * 6000),
+        },
+        {"role": "user", "content": "继续执行"},
+    ]
+    budget = loop._estimate_messages_tokens([messages[0], messages[-1]]) + 32
+    trimmed = loop._trim_messages_to_budget(messages, budget)
+
+    tool_ids = {str(m.get("tool_call_id")) for m in trimmed if m.get("role") == "tool"}
+    assert "tc-chain-1" not in tool_ids
+    assert trimmed[-1]["role"] == "user"
+
+
+def test_trim_messages_keeps_latest_tool_chain_atomic(monkeypatch, tmp_path: Path) -> None:
+    loop = _make_loop(monkeypatch, tmp_path)
+    messages = [
+        {"role": "system", "content": "sys"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "tc-chain-2",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "tc-chain-2",
+            "name": "read_file",
+            "content": "result " + ("y" * 9000),
+        },
+    ]
+    budget = loop._estimate_messages_tokens([messages[0]]) + 32
+    trimmed = loop._trim_messages_to_budget(messages, budget)
+
+    assistant_call_ids = {
+        tc.get("id")
+        for msg in trimmed
+        if msg.get("role") == "assistant"
+        for tc in (msg.get("tool_calls") or [])
+        if isinstance(tc, dict)
+    }
+    tool_ids = {msg.get("tool_call_id") for msg in trimmed if msg.get("role") == "tool"}
+    assert tool_ids
+    assert tool_ids.issubset(assistant_call_ids)
+
+
+def test_align_recent_start_index_moves_to_assistant_origin(monkeypatch, tmp_path: Path) -> None:
+    loop = _make_loop(monkeypatch, tmp_path)
+    non_system = [
+        {"role": "user", "content": "u1"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "tc-origin",
+                    "type": "function",
+                    "function": {"name": "list_dir", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "tc-origin", "content": "ok", "name": "list_dir"},
+        {"role": "user", "content": "u2"},
+    ]
+    assert loop._align_recent_start_index(non_system, 2) == 1
+
+
+def test_align_recent_start_index_skips_orphan_tool(monkeypatch, tmp_path: Path) -> None:
+    loop = _make_loop(monkeypatch, tmp_path)
+    non_system = [
+        {"role": "tool", "tool_call_id": "missing", "content": "orphan", "name": "read_file"},
+        {"role": "tool", "tool_call_id": "missing", "content": "orphan2", "name": "read_file"},
+        {"role": "user", "content": "继续"},
+    ]
+    assert loop._align_recent_start_index(non_system, 0) == 2
+
+
 def test_classify_response_error_not_overmatching_format(monkeypatch, tmp_path: Path) -> None:
     loop = _make_loop(monkeypatch, tmp_path)
     generic = SimpleNamespace(content="unsupported format image/webp", error_type=None)

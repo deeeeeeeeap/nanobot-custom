@@ -743,27 +743,106 @@ class AgentLoop:
         omitted = len(text) - head - tail
         return f"{text[:head]}...[省略 {omitted} 字符]...{text[-tail:]}"
 
+    @staticmethod
+    def _assistant_tool_call_ids(msg: dict) -> set[str]:
+        if msg.get("role") != "assistant":
+            return set()
+        tool_calls = msg.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            return set()
+        call_ids = set()
+        for item in tool_calls:
+            if not isinstance(item, dict):
+                continue
+            call_id = str(item.get("id") or "").strip()
+            if call_id:
+                call_ids.add(call_id)
+        return call_ids
+
+    def _split_non_system_into_atomic_groups(self, messages: list[dict]) -> list[list[dict]]:
+        """Keep assistant(tool_calls)+tool results as one atomic unit."""
+        groups: list[list[dict]] = []
+        idx = 0
+        total = len(messages)
+        while idx < total:
+            msg = messages[idx]
+            group = [msg]
+            idx += 1
+
+            call_ids = self._assistant_tool_call_ids(msg)
+            if not call_ids:
+                groups.append(group)
+                continue
+
+            while idx < total:
+                next_msg = messages[idx]
+                if next_msg.get("role") != "tool":
+                    break
+                tool_call_id = str(next_msg.get("tool_call_id") or "").strip()
+                if tool_call_id and tool_call_id in call_ids:
+                    group.append(next_msg)
+                    idx += 1
+                    continue
+                break
+            groups.append(group)
+
+        return groups
+
+    def _shrink_group_to_budget(self, group: list[dict], budget: int) -> list[dict]:
+        if not group:
+            return []
+        per_message_chars = max(500, (max(1, budget) * 4) // max(1, len(group)))
+        shrunk: list[dict] = []
+        for msg in group:
+            item = dict(msg)
+            content = item.get("content")
+            if isinstance(content, str):
+                item["content"] = self._truncate_text(content, max_chars=per_message_chars)
+            shrunk.append(item)
+        return shrunk
+
+    def _align_recent_start_index(self, messages: list[dict], start_idx: int) -> int:
+        """Avoid starting recent context from orphan tool results."""
+        if not messages:
+            return 0
+        if start_idx < 0:
+            start_idx = 0
+        if start_idx >= len(messages):
+            return len(messages)
+
+        first = messages[start_idx]
+        if first.get("role") != "tool":
+            return start_idx
+
+        call_id = str(first.get("tool_call_id") or "").strip()
+        if call_id:
+            for idx in range(start_idx - 1, -1, -1):
+                if call_id in self._assistant_tool_call_ids(messages[idx]):
+                    return idx
+
+        idx = start_idx
+        while idx < len(messages) and messages[idx].get("role") == "tool":
+            idx += 1
+        return idx
+
     def _trim_messages_to_budget(self, messages: list[dict], budget: int) -> list[dict]:
         system_msgs = [m for m in messages if m.get("role") == "system"]
         non_system = [m for m in messages if m.get("role") != "system"]
         kept: list[dict] = []
         used = self._estimate_messages_tokens(system_msgs)
+        groups = self._split_non_system_into_atomic_groups(non_system)
 
-        for msg in reversed(non_system):
-            msg_tokens = self._estimate_message_tokens(msg)
-            if used + msg_tokens > budget and kept:
+        for group in reversed(groups):
+            group_tokens = self._estimate_messages_tokens(group)
+            if used + group_tokens > budget and kept:
                 continue
-            if used + msg_tokens > budget and not kept:
-                shrunk = dict(msg)
-                content = shrunk.get("content")
-                if isinstance(content, str):
-                    max_chars = max(500, (budget - used) * 4)
-                    shrunk["content"] = self._truncate_text(content, max_chars=max_chars)
-                kept.append(shrunk)
-                used += self._estimate_message_tokens(shrunk)
+            if used + group_tokens > budget and not kept:
+                shrunk_group = self._shrink_group_to_budget(group, budget - used)
+                kept.extend(reversed(shrunk_group))
+                used += self._estimate_messages_tokens(shrunk_group)
                 continue
-            kept.append(msg)
-            used += msg_tokens
+            kept.extend(reversed(group))
+            used += group_tokens
 
         return [*system_msgs, *reversed(kept)]
 
@@ -891,6 +970,10 @@ class AgentLoop:
             recent.append(msg)
             recent_tokens += msg_tokens
         recent = list(reversed(recent))
+        recent_start = len(non_system) - len(recent)
+        aligned_start = self._align_recent_start_index(non_system, recent_start)
+        if aligned_start != recent_start:
+            recent = non_system[aligned_start:]
         old_count = len(non_system) - len(recent)
         if old_count <= 0:
             return self._guard_context_window(messages, model), model
