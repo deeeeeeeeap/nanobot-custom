@@ -782,6 +782,29 @@ def test_context_guard_prunes_large_messages(monkeypatch, tmp_path: Path) -> Non
     assert len(trimmed) < len(messages)
 
 
+def test_sanitize_orphan_tools_fast(monkeypatch, tmp_path: Path) -> None:
+    loop = _make_loop(monkeypatch, tmp_path)
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "name": "read_file", "content": "ok"},
+        {"role": "tool", "tool_call_id": "call_orphan", "name": "read_file", "content": "bad"},
+    ]
+
+    filtered = loop._sanitize_orphan_tools_fast(messages)
+    tool_ids = [msg.get("tool_call_id") for msg in filtered if msg.get("role") == "tool"]
+    assert tool_ids == ["call_1"]
+
+
 def test_trim_messages_drops_partial_tool_chain(monkeypatch, tmp_path: Path) -> None:
     loop = _make_loop(monkeypatch, tmp_path)
     messages = [

@@ -15,10 +15,13 @@ ChatGPT Responses API 格式，发送到 chatgpt.com 后端，
 """
 
 import json
+import logging
 import os
 import time
 import uuid
 import traceback
+
+logger = logging.getLogger(__name__)
 
 import requests as http_requests
 from flask import Flask, request, jsonify
@@ -168,6 +171,40 @@ def sanitize_input_items(input_items: list[dict]) -> tuple[list[dict], int]:
     return filtered, dropped
 
 
+def sanitize_chat_messages(messages: list[dict]) -> tuple[list[dict], int]:
+    """Drop orphan tool messages whose tool_call_id has no assistant.tool_calls match."""
+    call_ids: set[str] = set()
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        tool_calls = msg.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            continue
+        for tc in tool_calls:
+            if not isinstance(tc, dict):
+                continue
+            call_id = str(tc.get("id", "")).strip()
+            if call_id:
+                call_ids.add(call_id)
+
+    if not call_ids:
+        filtered = [msg for msg in messages if msg.get("role") != "tool"]
+        return filtered, len(messages) - len(filtered)
+
+    filtered: list[dict] = []
+    dropped = 0
+    for msg in messages:
+        if msg.get("role") != "tool":
+            filtered.append(msg)
+            continue
+        call_id = str(msg.get("tool_call_id", "")).strip()
+        if call_id in call_ids:
+            filtered.append(msg)
+        else:
+            dropped += 1
+    return filtered, dropped
+
+
 def convert_to_responses_api(data: dict) -> dict:
     """将 Chat Completions 请求转换为 Responses API 请求。
 
@@ -237,8 +274,9 @@ def convert_to_responses_api(data: dict) -> dict:
     instructions = "\n\n---\n\n".join(section for section in system_sections if section)
     input_items, dropped_orphans = sanitize_input_items(input_items)
     if dropped_orphans:
-        print(
-            f"WARN: dropped {dropped_orphans} orphan function_call_output item(s) before /responses forwarding."
+        logger.warning(
+            "已清理 %d 个孤立 function_call_output（/chat → /responses 转换路径）",
+            dropped_orphans,
         )
 
     # 构造 Responses API 请求体
@@ -248,8 +286,6 @@ def convert_to_responses_api(data: dict) -> dict:
         "input": input_items,
         "stream": True,
         "store": False,
-        "max_output_tokens": data.get("max_tokens", 8192),
-        "temperature": data.get("temperature", 0.7),
     }
 
     # tools 格式转换：Chat Completions 嵌套格式 → Responses API 扁平格式
@@ -606,6 +642,13 @@ def responses_api():
                 "tool_call_id": item.get("call_id", ""),
                 "content": output_text,
             })
+
+    messages, dropped_orphans = sanitize_chat_messages(messages)
+    if dropped_orphans:
+        logger.warning(
+            "已清理 %d 个孤立 tool 消息（/responses 路由入口）",
+            dropped_orphans,
+        )
 
     # 转换 tools 格式（Responses API 扁平 → Chat Completions 嵌套）
     tools = None

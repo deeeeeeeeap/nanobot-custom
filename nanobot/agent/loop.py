@@ -759,6 +759,13 @@ class AgentLoop:
                 call_ids.add(call_id)
         return call_ids
 
+    def _sanitize_orphan_tools_fast(self, messages: list[dict]) -> list[dict]:
+        call_ids = {cid for msg in messages for cid in self._assistant_tool_call_ids(msg)}
+        return [
+            msg for msg in messages
+            if msg.get("role") != "tool" or str(msg.get("tool_call_id") or "").strip() in call_ids
+        ]
+
     def _split_non_system_into_atomic_groups(self, messages: list[dict]) -> list[list[dict]]:
         """Keep assistant(tool_calls)+tool results as one atomic unit."""
         groups: list[list[dict]] = []
@@ -1147,6 +1154,7 @@ class AgentLoop:
         primary_model: str,
         runtime_config=None,
     ):
+        messages = self._sanitize_orphan_tools_fast(messages)
         candidates = [primary_model]
         for fallback in self.model_fallbacks:
             if fallback and fallback not in candidates:
