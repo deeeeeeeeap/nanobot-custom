@@ -132,5 +132,5 @@ def test_make_provider_selects_codex_when_enabled(monkeypatch, tmp_path) -> None
             "providers": {"codex": {"enabled": True}},
         }
     )
-    provider = _make_provider(cfg)
+    provider, fallback = _make_provider(cfg)
     assert isinstance(provider, CodexProvider)

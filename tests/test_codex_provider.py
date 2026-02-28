@@ -1,6 +1,7 @@
 from pathlib import Path
 
-from nanobot.providers.codex_provider import CodexProvider
+from nanobot.providers.codex_provider import CodexProvider, _ParsedSSE
+from nanobot.providers.base import ToolCallRequest
 
 
 class _DummyAuth:
@@ -24,14 +25,13 @@ async def test_codex_provider_parses_sse_text_and_tool_calls(tmp_path: Path) -> 
     )
 
     async def _fake_send(payload, headers):
-        return 200, [
-            'data: {"type":"response.output_item.added","item":{"type":"function_call","id":"item_1","call_id":"call_1","name":"read_file"}}',
-            'data: {"type":"response.function_call_arguments.delta","item_id":"item_1","delta":"{\\"path\\":\\"README"}',
-            'data: {"type":"response.function_call_arguments.delta","item_id":"item_1","delta":".md\\"}"}',
-            'data: {"type":"response.output_text.delta","delta":"processing"}',
-            'data: {"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}]}}',
-            "data: [DONE]",
-        ]
+        return 200, _ParsedSSE(
+            content="done",
+            tool_calls=[
+                ToolCallRequest(id="call_1", name="read_file", arguments={"path": "README.md"}),
+            ],
+            reasoning_content=None,
+        )
 
     provider._send_request = _fake_send  # type: ignore[method-assign]
     response = await provider.chat(messages=[{"role": "user", "content": "read file"}])
@@ -58,10 +58,11 @@ async def test_codex_provider_retries_once_on_401(tmp_path: Path) -> None:
         calls["count"] += 1
         if calls["count"] == 1:
             return 401, "unauthorized"
-        return 200, [
-            'data: {"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}}',
-            "data: [DONE]",
-        ]
+        return 200, _ParsedSSE(
+            content="ok",
+            tool_calls=[],
+            reasoning_content=None,
+        )
 
     provider._send_request = _fake_send  # type: ignore[method-assign]
     response = await provider.chat(messages=[{"role": "user", "content": "ping"}])
@@ -88,10 +89,11 @@ async def test_codex_provider_injects_server_compaction_and_sanitizes_orphans(
 
     async def _fake_send(payload, headers):
         captured["payload"] = payload
-        return 200, [
-            'data: {"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}}',
-            "data: [DONE]",
-        ]
+        return 200, _ParsedSSE(
+            content="ok",
+            tool_calls=[],
+            reasoning_content=None,
+        )
 
     provider._send_request = _fake_send  # type: ignore[method-assign]
     messages = [
