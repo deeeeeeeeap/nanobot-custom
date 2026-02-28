@@ -1,0 +1,6 @@
+{
+    "pyre2.enable": false,
+    "pyre2.enabled": false,
+    "pyre-check.enable": false,
+    "pyre.enable": false
+}

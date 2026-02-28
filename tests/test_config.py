@@ -3,9 +3,11 @@ import json
 import pytest
 from pydantic import ValidationError
 
+from nanobot.cli.commands import _make_provider
 from nanobot.config.loader import load_config
 from nanobot.config.schema import Config
 from nanobot.exceptions import ConfigError
+from nanobot.providers.codex_provider import CodexProvider
 
 
 def test_schema_rejects_enabled_telegram_without_token() -> None:
@@ -77,6 +79,9 @@ def test_search_config_defaults_and_validation() -> None:
     assert cfg.agents.defaults.compaction_target_ratio == 0.45
     assert cfg.logging.max_file_bytes == 500 * 1024 * 1024
     assert cfg.logging.max_files == 5
+    assert cfg.providers.codex.enabled is False
+    assert cfg.providers.codex.server_compaction_enabled is False
+    assert cfg.providers.codex.compact_threshold == 80000
 
     with pytest.raises(ValidationError):
         Config.model_validate({"search": {"default_limit": 0}})
@@ -101,3 +106,31 @@ def test_search_config_defaults_and_validation() -> None:
         Config.model_validate({"logging": {"level": "nope"}})
     with pytest.raises(ValidationError):
         Config.model_validate({"agents": {"defaults": {"compaction_target_ratio": 1.2}}})
+    with pytest.raises(ValidationError):
+        Config.model_validate({"providers": {"codex": {"timeout": 5}}})
+
+
+def test_make_provider_selects_codex_when_enabled(monkeypatch, tmp_path) -> None:
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(
+        json.dumps(
+            {
+                "tokens": {
+                    "access_token": "token",
+                    "refresh_token": "refresh",
+                    "account_id": "acct",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+    cfg = Config.model_validate(
+        {
+            "agents": {"defaults": {"model": "openai/gpt-5.3-codex"}},
+            "providers": {"codex": {"enabled": True}},
+        }
+    )
+    provider = _make_provider(cfg)
+    assert isinstance(provider, CodexProvider)

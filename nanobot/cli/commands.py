@@ -384,21 +384,44 @@ This file stores important information that should persist across sessions.
 
 
 def _make_provider(config):
-    """Create LiteLLMProvider from config. Exits if no API key found."""
+    """Create provider from config. Returns (provider, fallback_provider).
+    
+    当主 provider 为 CodexProvider 时，fallback_provider 为 LiteLLMProvider，
+    确保非 codex failover 模型不会被发到 chatgpt.com。
+    """
+    from nanobot.providers.codex_provider import CodexProvider
     from nanobot.providers.litellm_provider import LiteLLMProvider
-    p = config.get_provider()
+
     model = config.agents.defaults.model
-    if not (p and p.api_key) and not model.startswith("bedrock/"):
+    codex_cfg = getattr(config.providers, "codex", None)
+
+    # 构建 LiteLLM provider（可能作为 fallback 使用）
+    p = config.get_provider()
+    litellm_provider = None
+    if p and p.api_key or model.startswith("bedrock/"):
+        litellm_provider = LiteLLMProvider(
+            api_key=p.api_key if p else None,
+            api_base=config.get_api_base(),
+            default_model=model,
+            extra_headers=p.extra_headers if p else None,
+            provider_name=config.get_provider_name(),
+        )
+
+    if codex_cfg and codex_cfg.enabled and "codex" in model.lower():
+        codex_provider = CodexProvider(
+            default_model=model or codex_cfg.model,
+            codex_home=codex_cfg.codex_home,
+            timeout=codex_cfg.timeout,
+            server_compaction_enabled=codex_cfg.server_compaction_enabled,
+            compact_threshold=codex_cfg.compact_threshold,
+        )
+        return codex_provider, litellm_provider
+
+    if litellm_provider is None:
         console.print("[red]Error: No API key configured.[/red]")
         console.print("Set one in ~/.nanobot/config.json under providers section")
         raise typer.Exit(1)
-    return LiteLLMProvider(
-        api_key=p.api_key if p else None,
-        api_base=config.get_api_base(),
-        default_model=model,
-        extra_headers=p.extra_headers if p else None,
-        provider_name=config.get_provider_name(),
-    )
+    return litellm_provider, None
 
 
 # ============================================================================
@@ -430,7 +453,7 @@ def gateway(
     
     config = load_config()
     bus = MessageBus()
-    provider = _make_provider(config)
+    provider, fallback_provider = _make_provider(config)
     session_manager = SessionManager(config.workspace_path)
     
     # Create cron service first (callback set after agent creation)
@@ -441,6 +464,7 @@ def gateway(
     agent = AgentLoop(
         bus=bus,
         provider=provider,
+        fallback_provider=fallback_provider,
         workspace=config.workspace_path,
         model=config.agents.defaults.model,
         max_iterations=config.agents.defaults.max_tool_iterations,
@@ -631,7 +655,7 @@ def agent(
     config = load_config()
     
     bus = MessageBus()
-    provider = _make_provider(config)
+    provider, fallback_provider = _make_provider(config)
 
     if logs:
         logger.enable("nanobot")
@@ -641,6 +665,7 @@ def agent(
     agent_loop = AgentLoop(
         bus=bus,
         provider=provider,
+        fallback_provider=fallback_provider,
         workspace=config.workspace_path,
         model=config.agents.defaults.model,
         max_iterations=config.agents.defaults.max_tool_iterations,
@@ -1470,10 +1495,11 @@ def memory_compress(
         console.print("[yellow]Session is empty, nothing to compress.[/yellow]")
         return
 
-    provider = _make_provider(config)
+    provider, fallback_provider = _make_provider(config)
     loop = AgentLoop(
         bus=MessageBus(),
         provider=provider,
+        fallback_provider=fallback_provider,
         workspace=config.workspace_path,
         model=config.agents.defaults.model,
         max_iterations=config.agents.defaults.max_tool_iterations,

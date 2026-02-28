@@ -404,9 +404,11 @@ class AgentLoop:
         tool_result_max_chars: int = 12000,
         compaction_enabled: bool = True,
         compaction_target_ratio: float = 0.45,
+        fallback_provider: LLMProvider | None = None,
     ):
         self.bus = bus
         self.provider = provider
+        self.fallback_provider = fallback_provider  # 非 codex 模型的 fallback provider
         self.workspace = workspace
         self.model = model or provider.get_default_model()
         self.max_iterations = max_iterations
@@ -1145,6 +1147,22 @@ class AgentLoop:
     def _should_retry_same_model(self, error_type: str) -> bool:
         return error_type in {"timeout", "rate_limit"}
 
+    def _pick_provider_for_model(self, model_name: str) -> LLMProvider:
+        """根据模型名选择合适的 provider：codex 模型走 CodexProvider，其他走 fallback/primary。"""
+        from nanobot.providers.codex_provider import CodexProvider
+        is_codex_model = "codex" in model_name.lower()
+        if is_codex_model and isinstance(self.provider, CodexProvider):
+            return self.provider
+        if not is_codex_model and isinstance(self.provider, CodexProvider):
+            # 非 codex 模型不应走 CodexProvider，使用 fallback_provider
+            if self.fallback_provider is not None:
+                return self.fallback_provider
+            logger.warning(
+                "非 codex 模型 {} 没有可用的 fallback_provider，退回主 provider",
+                model_name,
+            )
+        return self.provider
+
     async def _chat_with_failover(
         self,
         *,
@@ -1170,9 +1188,11 @@ class AgentLoop:
                     runtime_config.get_api_base(model_name),
                 )
 
+            # 根据模型名选择正确的 provider
+            provider = self._pick_provider_for_model(model_name)
             retries_left = 1 if self.failover_retry_once else 0
             while True:
-                response = await self.provider.chat(
+                response = await provider.chat(
                     messages=messages,
                     tools=tools,
                     tool_choice=tool_choice,

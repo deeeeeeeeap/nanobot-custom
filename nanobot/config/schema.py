@@ -302,6 +302,33 @@ class ProviderConfig(BaseModel):
         return _validate_url(raw, "api_base", {"http", "https"})
 
 
+class CodexProviderConfig(BaseModel):
+    """Native Codex provider configuration."""
+
+    enabled: bool = False
+    codex_home: str = "~/.codex"
+    model: str = "gpt-5.3-codex"
+    timeout: int = Field(default=300, ge=30, le=600)
+    server_compaction_enabled: bool = False
+    compact_threshold: int = Field(default=80000, ge=1000, le=500000)
+
+    @field_validator("codex_home")
+    @classmethod
+    def normalize_codex_home(cls, value: str) -> str:
+        raw = value.strip()
+        if not raw:
+            raise ValueError("codex_home cannot be empty")
+        return raw
+
+    @field_validator("model")
+    @classmethod
+    def normalize_model(cls, value: str) -> str:
+        raw = value.strip()
+        if not raw:
+            raise ValueError("model cannot be empty")
+        return raw
+
+
 class ProvidersConfig(BaseModel):
     """Configuration for LLM providers."""
     anthropic: ProviderConfig = Field(default_factory=ProviderConfig)
@@ -317,6 +344,7 @@ class ProvidersConfig(BaseModel):
     minimax: ProviderConfig = Field(default_factory=ProviderConfig)  # MiniMax
     aihubmix: ProviderConfig = Field(default_factory=ProviderConfig)  # AiHubMix API gateway
     antigravity: ProviderConfig = Field(default_factory=ProviderConfig)  # Antigravity gateway (multi-account routing)
+    codex: CodexProviderConfig = Field(default_factory=CodexProviderConfig)
 
 class GatewayConfig(BaseModel):
     """Gateway/server configuration."""

@@ -1,0 +1,138 @@
+from pathlib import Path
+
+from nanobot.providers.codex_provider import CodexProvider
+
+
+class _DummyAuth:
+    def __init__(self) -> None:
+        self.ensure_calls: list[bool] = []
+
+    async def ensure_valid(self, force: bool = False) -> None:
+        self.ensure_calls.append(force)
+
+    @staticmethod
+    def get_headers() -> dict[str, str]:
+        return {"Authorization": "Bearer token"}
+
+
+async def test_codex_provider_parses_sse_text_and_tool_calls(tmp_path: Path) -> None:
+    auth = _DummyAuth()
+    provider = CodexProvider(
+        default_model="openai/gpt-5.3-codex",
+        auth=auth,
+        responses_url="http://localhost:8081/v1/responses",
+    )
+
+    async def _fake_send(payload, headers):
+        return 200, [
+            'data: {"type":"response.output_item.added","item":{"type":"function_call","id":"item_1","call_id":"call_1","name":"read_file"}}',
+            'data: {"type":"response.function_call_arguments.delta","item_id":"item_1","delta":"{\\"path\\":\\"README"}',
+            'data: {"type":"response.function_call_arguments.delta","item_id":"item_1","delta":".md\\"}"}',
+            'data: {"type":"response.output_text.delta","delta":"processing"}',
+            'data: {"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}]}}',
+            "data: [DONE]",
+        ]
+
+    provider._send_request = _fake_send  # type: ignore[method-assign]
+    response = await provider.chat(messages=[{"role": "user", "content": "read file"}])
+
+    assert response.finish_reason == "tool_calls"
+    assert response.content == "done"
+    assert response.tool_calls[0].id == "call_1"
+    assert response.tool_calls[0].name == "read_file"
+    assert response.tool_calls[0].arguments["path"] == "README.md"
+    assert auth.ensure_calls == [False]
+
+
+async def test_codex_provider_retries_once_on_401(tmp_path: Path) -> None:
+    auth = _DummyAuth()
+    provider = CodexProvider(
+        default_model="gpt-5.3-codex",
+        auth=auth,
+        responses_url="http://localhost:8081/v1/responses",
+    )
+
+    calls = {"count": 0}
+
+    async def _fake_send(payload, headers):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return 401, "unauthorized"
+        return 200, [
+            'data: {"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}}',
+            "data: [DONE]",
+        ]
+
+    provider._send_request = _fake_send  # type: ignore[method-assign]
+    response = await provider.chat(messages=[{"role": "user", "content": "ping"}])
+
+    assert response.finish_reason == "stop"
+    assert response.content == "ok"
+    assert calls["count"] == 2
+    assert auth.ensure_calls == [False, True]
+
+
+async def test_codex_provider_injects_server_compaction_and_sanitizes_orphans(
+    tmp_path: Path,
+) -> None:
+    auth = _DummyAuth()
+    provider = CodexProvider(
+        default_model="gpt-5.3-codex",
+        auth=auth,
+        responses_url="http://localhost:8081/v1/responses",
+        server_compaction_enabled=True,
+        compact_threshold=12345,
+    )
+
+    captured: dict[str, object] = {}
+
+    async def _fake_send(payload, headers):
+        captured["payload"] = payload
+        return 200, [
+            'data: {"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}}',
+            "data: [DONE]",
+        ]
+
+    provider._send_request = _fake_send  # type: ignore[method-assign]
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "name": "read_file", "content": "ok"},
+        {"role": "tool", "tool_call_id": "call_orphan", "name": "read_file", "content": "bad"},
+    ]
+    await provider.chat(messages=messages)
+
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    assert "context_management" in payload
+    assert payload["context_management"][0]["compact_threshold"] == 12345
+    outputs = [item for item in payload["input"] if item["type"] == "function_call_output"]
+    assert len(outputs) == 1
+    assert outputs[0]["call_id"] == "call_1"
+
+
+async def test_codex_provider_classifies_orphan_call_error_as_format(tmp_path: Path) -> None:
+    auth = _DummyAuth()
+    provider = CodexProvider(
+        default_model="gpt-5.3-codex",
+        auth=auth,
+        responses_url="http://localhost:8081/v1/responses",
+    )
+
+    async def _fake_send(payload, headers):
+        return 400, "No tool call found for function call output with call_id call_1."
+
+    provider._send_request = _fake_send  # type: ignore[method-assign]
+    response = await provider.chat(messages=[{"role": "user", "content": "hi"}])
+
+    assert response.finish_reason == "error"
+    assert response.error_type == "format"
