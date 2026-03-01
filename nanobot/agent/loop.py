@@ -5,10 +5,11 @@ import asyncio
 import hashlib
 import json
 import re
+import weakref
 from collections import Counter, deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from loguru import logger
 
@@ -143,14 +144,45 @@ _IDLE_EXEMPT_TOOLS = frozenset({"message", "send_message"})
 _IDLE_EXEMPT_EXEC_COMMANDS = frozenset({"date", "pwd", "whoami", "hostname"})
 
 
-def _is_meaningful_tool_call(tool_name: str, arguments: dict | None = None) -> bool:
+def _normalize_tool_arguments(arguments: object) -> dict:
+    """Normalize tool-call arguments into a dict with defensive fallbacks."""
+    normalized = arguments
+    if isinstance(normalized, list):
+        normalized = normalized[0] if normalized else {}
+    if isinstance(normalized, dict):
+        return normalized
+    if isinstance(normalized, str):
+        payload = normalized.strip()
+        if not payload:
+            return {}
+        try:
+            decoded = json.loads(payload)
+        except json.JSONDecodeError:
+            logger.warning("Unexpected tool arguments string, fallback to empty dict")
+            return {}
+        if isinstance(decoded, dict):
+            return decoded
+        logger.warning(
+            "Unexpected decoded tool arguments type: {}",
+            type(decoded).__name__,
+        )
+        return {}
+    if normalized is not None:
+        logger.warning(
+            "Unexpected tool arguments type: {}",
+            type(normalized).__name__,
+        )
+    return {}
+
+
+def _is_meaningful_tool_call(tool_name: str, arguments: object = None) -> bool:
     """Return whether this tool call should count as meaningful progress."""
     if tool_name in _IDLE_EXEMPT_TOOLS:
         return False
     if tool_name != "exec":
         return True
 
-    command = str((arguments or {}).get("command", "")).strip().lower()
+    command = str(_normalize_tool_arguments(arguments).get("command", "")).strip().lower()
     if not command:
         return False
     # If command chains multiple operations, treat it as meaningful.
@@ -232,8 +264,12 @@ class _ToolLoopDetector:
         self._history: deque[tuple[str, str, str]] = deque(maxlen=self.window)
 
     @staticmethod
-    def _hash_tool_call(tool_name: str, arguments: dict | None) -> str:
-        payload = json.dumps(arguments or {}, sort_keys=True, ensure_ascii=False)
+    def _hash_tool_call(tool_name: str, arguments: object) -> str:
+        payload = json.dumps(
+            _normalize_tool_arguments(arguments),
+            sort_keys=True,
+            ensure_ascii=False,
+        )
         digest = hashlib.sha1(f"{tool_name}:{payload}".encode("utf-8")).hexdigest()
         return digest[:16]
 
@@ -344,7 +380,7 @@ class _ToolLoopDetector:
             should_break=max_count >= self.break_threshold,
         )
 
-    def observe(self, tool_name: str, arguments: dict | None, result: str) -> _ToolLoopSignal | None:
+    def observe(self, tool_name: str, arguments: object, result: str) -> _ToolLoopSignal | None:
         tool_hash = self._hash_tool_call(tool_name, arguments)
         result_hash = self._hash_result(result)
         self._history.append((tool_name, tool_hash, result_hash))
@@ -382,6 +418,7 @@ class AgentLoop:
         max_iterations: int = 30,
         max_tokens: int = 8192,
         temperature: float = 0.7,
+        reasoning_effort: str = "medium",
         memory_window: int = 50,
         brave_api_key: str | None = None,
         exec_config: ExecToolConfig | None = None,
@@ -416,6 +453,7 @@ class AgentLoop:
         self.max_iterations = max_iterations
         self.max_tokens = max(1, max_tokens)
         self.temperature = temperature
+        self.reasoning_effort = self._normalize_reasoning_effort(reasoning_effort)
         self.memory_window = memory_window
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
@@ -454,7 +492,9 @@ class AgentLoop:
         self.search_embedder = None
         self.memory_compressor: SessionCompressor | None = None
         self._compression_tasks: set[asyncio.Task] = set()
-        self._session_compression_locks: dict[str, asyncio.Lock] = {}
+        self._session_compression_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+            weakref.WeakValueDictionary()
+        )
         self._sessions_compressing: set[str] = set()
 
         self.context = ContextBuilder(workspace)
@@ -490,6 +530,14 @@ class AgentLoop:
             critical = min(critical, breaker)
             warn = min(warn, critical)
         return window, warn, critical, breaker
+
+    @staticmethod
+    def _normalize_reasoning_effort(value: str | None) -> str:
+        effort = (value or "medium").strip().lower()
+        if effort in {"low", "medium", "high"}:
+            return effort
+        logger.warning("Invalid reasoning_effort={}, fallback to medium", value)
+        return "medium"
 
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
@@ -708,6 +756,7 @@ class AgentLoop:
         self.max_iterations = max(1, defaults.max_tool_iterations)
         self.max_tokens = max(1, defaults.max_tokens)
         self.temperature = defaults.temperature
+        self.reasoning_effort = self._normalize_reasoning_effort(defaults.reasoning_effort)
         self.idle_intervention = defaults.idle_intervention
         self.loop_detection_enabled = defaults.loop_detection_enabled
         (
@@ -811,6 +860,66 @@ class AgentLoop:
             msg for msg in messages
             if msg.get("role") != "tool" or str(msg.get("tool_call_id") or "").strip() in call_ids
         ]
+
+    @staticmethod
+    def _is_data_image_base64_url(url: str) -> bool:
+        return bool(re.match(r"^data:image/[a-zA-Z0-9.+-]+;base64,", url.strip(), flags=re.IGNORECASE))
+
+    @classmethod
+    def _is_base64_image_content_item(cls, item: dict) -> bool:
+        image_url = item.get("image_url")
+        if isinstance(image_url, dict):
+            nested = image_url.get("url")
+            if isinstance(nested, str) and cls._is_data_image_base64_url(nested):
+                return True
+
+        if isinstance(image_url, str) and cls._is_data_image_base64_url(image_url):
+            return True
+
+        direct_url = item.get("url")
+        if isinstance(direct_url, str) and cls._is_data_image_base64_url(direct_url):
+            return True
+
+        return False
+
+    def _sanitize_user_session_content(self, content):
+        if not isinstance(content, list):
+            return content
+
+        sanitized = []
+        for item in content:
+            if isinstance(item, dict) and self._is_base64_image_content_item(item):
+                sanitized.append({"type": "text", "text": "[image]"})
+            else:
+                sanitized.append(item)
+        return sanitized
+
+    def _persist_user_session_message(self, session, content) -> None:
+        # 防御性过滤：运行时元数据不应入历史（减少 token 消耗和幻觉）
+        if isinstance(content, str) and content.startswith(ContextBuilder._RUNTIME_CONTEXT_TAG):
+            return
+        session.add_message("user", self._sanitize_user_session_content(content))
+
+    @staticmethod
+    def _should_persist_assistant_session_message(
+        content: str | None,
+        tool_calls: list[dict] | None = None,
+    ) -> bool:
+        if tool_calls:
+            return True
+        return bool((content or "").strip())
+
+    def _persist_assistant_session_message(
+        self,
+        session,
+        content: str | None,
+        **kwargs,
+    ) -> None:
+        tool_calls = kwargs.get("tool_calls")
+        if not self._should_persist_assistant_session_message(content, tool_calls):
+            logger.debug("Skip empty assistant message persistence (no tool_calls)")
+            return
+        session.add_message("assistant", content or "", **kwargs)
 
     def _split_non_system_into_atomic_groups(self, messages: list[dict]) -> list[list[dict]]:
         """Keep assistant(tool_calls)+tool results as one atomic unit."""
@@ -1188,6 +1297,12 @@ class AgentLoop:
             return "format"
         return "unknown"
 
+    @staticmethod
+    def _friendly_response_error_text(error_type: str) -> str:
+        if error_type in {"timeout", "rate_limit"}:
+            return "抱歉，模型服务暂时不可用，请稍后再试。"
+        return "抱歉，请求处理失败，请稍后再试。"
+
     def _should_retry_same_model(self, error_type: str) -> bool:
         return error_type in {"timeout", "rate_limit"}
 
@@ -1236,14 +1351,23 @@ class AgentLoop:
             provider = self._pick_provider_for_model(model_name)
             retries_left = 1 if self.failover_retry_once else 0
             while True:
-                response = await provider.chat(
-                    messages=messages,
-                    tools=tools,
-                    tool_choice=tool_choice,
-                    model=model_name,
-                    max_tokens=self.max_tokens,
-                    temperature=self.temperature,
-                )
+                chat_kwargs = {
+                    "messages": messages,
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                    "model": model_name,
+                    "max_tokens": self.max_tokens,
+                    "temperature": self.temperature,
+                    "reasoning_effort": self.reasoning_effort,
+                }
+                try:
+                    response = await provider.chat(**chat_kwargs)
+                except TypeError as exc:
+                    # Backward compatibility for providers/tests not yet upgraded.
+                    if "reasoning_effort" not in str(exc):
+                        raise
+                    chat_kwargs.pop("reasoning_effort", None)
+                    response = await provider.chat(**chat_kwargs)
                 last_response = response
                 active_model = model_name
                 if response.finish_reason != "error":
@@ -1325,10 +1449,14 @@ class AgentLoop:
         raw_cmd = msg.content.strip()
         cmd = raw_cmd.lower()
         if _is_stop_signal(raw_cmd):
+            cancelled_count = self.subagents.cancel_by_session(effective_session_key)
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
-                content="已收到停止指令，本次请求已中断。",
+                content=(
+                    "已收到停止指令，本次请求已中断。"
+                    f"已取消子代理任务 {cancelled_count} 个。"
+                ),
             )
         if cmd == "/new":
             msg_count = len(session.messages)
@@ -1439,6 +1567,9 @@ class AgentLoop:
         final_tool_choice = "auto"
         tools_used: list[str] = []
         tools_were_called = False  # Track whether any tool was actually called.
+        persist_final_assistant = True
+        final_reasoning_content: str | None = None
+        final_thinking_blocks: list[dict[str, Any]] | None = None
         meaningful_tools_called = False
         required_retry_used = False
         required_downgraded = False
@@ -1467,7 +1598,7 @@ class AgentLoop:
             logger.warning(f"Model {active_model} does not support function calling, tools disabled")
 
         # Persist the inbound user message before tool/assistant chain to preserve full chronology.
-        session.add_message("user", msg.content)
+        self._persist_user_session_message(session, msg.content)
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -1527,6 +1658,17 @@ class AgentLoop:
                 active_model = used_model
                 actual_tool_choice = "auto"
 
+            if response.finish_reason == "error":
+                error_type = self._classify_response_error(response)
+                logger.warning(
+                    "LLM response ended with error after failover attempts: type={}",
+                    error_type,
+                )
+                final_content = self._friendly_response_error_text(error_type)
+                loop_exit_reason = "model_error"
+                persist_final_assistant = False
+                break
+
             # Handle tool calls.
             if response.has_tool_calls:
                 tool_call_dicts = [
@@ -1535,7 +1677,7 @@ class AgentLoop:
                         "type": "function",
                         "function": {
                             "name": tc.name,
-                            "arguments": json.dumps(tc.arguments)
+                            "arguments": json.dumps(_normalize_tool_arguments(tc.arguments))
                         }
                     }
                     for tc in response.tool_calls
@@ -1543,23 +1685,26 @@ class AgentLoop:
                 messages = self.context.add_assistant_message(
                     messages, response.content, tool_call_dicts,
                     reasoning_content=response.reasoning_content,
+                    thinking_blocks=response.thinking_blocks or None,
                 )
-                session.add_message(
-                    "assistant",
+                self._persist_assistant_session_message(
+                    session,
                     response.content or "",
                     tool_calls=tool_call_dicts if tool_call_dicts else None,
                     reasoning_content=response.reasoning_content or None,
+                    thinking_blocks=response.thinking_blocks or None,
                 )
 
                 # Execute tool call.
                 tool_loop_break = False
                 for tool_call in response.tool_calls:
-                    args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                    normalized_args = _normalize_tool_arguments(tool_call.arguments)
+                    args_str = json.dumps(normalized_args, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
 
                     await reporter.report(StatusMessage.tool_start(
                         tool_call.name,
-                        tool_call.arguments
+                        normalized_args
                     ))
 
                     if (
@@ -1584,15 +1729,15 @@ class AgentLoop:
                             tool_call_id=tool_call.id,
                             name=tool_call.name,
                         )
-                        last_msg_content = str(
-                            (tool_call.arguments or {}).get("content", "")
-                        ).strip()
+                        last_msg_content = str(normalized_args.get("content", "")).strip()
                         final_content = response.content or last_msg_content or "任务已完成。"
+                        final_reasoning_content = response.reasoning_content or None
+                        final_thinking_blocks = response.thinking_blocks or None
                         loop_exit_reason = "message_quota"
                         tool_loop_break = True
                         break
 
-                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    result = await self.tools.execute(tool_call.name, normalized_args)
                     if tool_call.name in _IDLE_EXEMPT_TOOLS:
                         message_tool_count += 1
                     result_text = self._add_tool_error_hint(
@@ -1612,13 +1757,13 @@ class AgentLoop:
                         name=tool_call.name,
                     )
                     tools_used.append(tool_call.name)
-                    if _is_meaningful_tool_call(tool_call.name, tool_call.arguments):
+                    if _is_meaningful_tool_call(tool_call.name, normalized_args):
                         meaningful_tools_called = True
                     tools_were_called = True
                     if loop_detector is not None:
                         signal = loop_detector.observe(
                             tool_call.name,
-                            tool_call.arguments,
+                            normalized_args,
                             result_text,
                         )
                         if signal:
@@ -1641,7 +1786,7 @@ class AgentLoop:
 
                 # 如果本轮所有工具调用都是 exempt（如 message），且之前已做过正事 → 结束循环
                 all_exempt = all(
-                    not _is_meaningful_tool_call(tc.name, tc.arguments)
+                    not _is_meaningful_tool_call(tc.name, _normalize_tool_arguments(tc.arguments))
                     for tc in response.tool_calls
                 )
                 if all_exempt:
@@ -1659,10 +1804,12 @@ class AgentLoop:
                         last_msg_content = None
                         for tc in reversed(response.tool_calls):
                             if tc.name in _IDLE_EXEMPT_TOOLS:
-                                last_msg_content = (tc.arguments or {}).get("content")
+                                last_msg_content = _normalize_tool_arguments(tc.arguments).get("content")
                                 if last_msg_content:
                                     break
                         final_content = response.content or last_msg_content or ""
+                        final_reasoning_content = response.reasoning_content or None
+                        final_thinking_blocks = response.thinking_blocks or None
                         loop_exit_reason = "exempt_round_exit"
                         break
                 else:
@@ -1683,12 +1830,6 @@ class AgentLoop:
                     }
                 )
             else:
-                if response.finish_reason == "error":
-                    error_type = self._classify_response_error(response)
-                    logger.warning(
-                        "LLM response ended with error after failover attempts: type={}",
-                        error_type,
-                    )
                 lazy = _is_lazy_response(response.content or "", msg.content) if response.content else False
                 if lazy:
                     logger.warning("Lazy response observed (monitor-only): iteration={}", iteration)
@@ -1716,7 +1857,10 @@ class AgentLoop:
                             "[E_TOOL_CHOICE_IGNORED] tool_choice=required returned no tool_calls, retrying with explicit nudge once"
                         )
                         messages = self.context.add_assistant_message(
-                            messages, response.content, reasoning_content=response.reasoning_content
+                            messages,
+                            response.content,
+                            reasoning_content=response.reasoning_content,
+                            thinking_blocks=response.thinking_blocks or None,
                         )
                         nudge = (
                             "检测到执行型请求。下一轮请优先直接调用工具（read_file/list_dir/exec），"
@@ -1736,6 +1880,8 @@ class AgentLoop:
 
                 # No tool call; use model content as final output.
                 final_content = response.content
+                final_reasoning_content = response.reasoning_content or None
+                final_thinking_blocks = response.thinking_blocks or None
                 loop_exit_reason = "model_text_reply"
                 break
 
@@ -1745,8 +1891,11 @@ class AgentLoop:
 
         # Run hallucination checks when tools are unavailable or not used.
         should_check_hallucination = (
-            not model_supports_tools
-            or (model_supports_tools and not tools_were_called)  # model supports tools, but none were called
+            loop_exit_reason != "model_error"
+            and (
+                not model_supports_tools
+                or (model_supports_tools and not tools_were_called)  # model supports tools, but none were called
+            )
         )
         if should_check_hallucination:
             hallucination = detect_hallucination(
@@ -1760,6 +1909,8 @@ class AgentLoop:
                     f"(confidence: {hallucination.confidence:.2f})"
                 )
                 final_content = create_honest_response(self.model)
+                final_reasoning_content = None
+                final_thinking_blocks = None
                 loop_exit_reason = "hallucination_blocked"
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
@@ -1783,11 +1934,14 @@ class AgentLoop:
             session.metadata["required_no_tool_streak"] = required_no_tool_streak
         else:
             session.metadata["required_no_tool_streak"] = 0
-        session.add_message(
-            "assistant",
-            final_content,
-            tools_used=tools_used if tools_used else None,
-        )
+        if persist_final_assistant:
+            self._persist_assistant_session_message(
+                session,
+                final_content,
+                tools_used=tools_used if tools_used else None,
+                reasoning_content=final_reasoning_content,
+                thinking_blocks=final_thinking_blocks,
+            )
         self._maybe_schedule_session_compression(session)
         self.sessions.save(session)
 
@@ -1844,6 +1998,9 @@ class AgentLoop:
 
         iteration = 0
         final_content = None
+        persist_final_assistant = True
+        final_reasoning_content: str | None = None
+        final_thinking_blocks: list[dict[str, Any]] | None = None
         active_model = active_system_model
         loop_detector = (
             _ToolLoopDetector(
@@ -1867,6 +2024,13 @@ class AgentLoop:
             )
             active_model = used_model
 
+            if response.finish_reason == "error":
+                error_type = self._classify_response_error(response)
+                logger.warning("System message model response error: type={}", error_type)
+                final_content = self._friendly_response_error_text(error_type)
+                persist_final_assistant = False
+                break
+
             if response.has_tool_calls:
                 tool_call_dicts = [
                     {
@@ -1874,7 +2038,7 @@ class AgentLoop:
                         "type": "function",
                         "function": {
                             "name": tc.name,
-                            "arguments": json.dumps(tc.arguments)
+                            "arguments": json.dumps(_normalize_tool_arguments(tc.arguments))
                         }
                     }
                     for tc in response.tool_calls
@@ -1882,13 +2046,15 @@ class AgentLoop:
                 messages = self.context.add_assistant_message(
                     messages, response.content, tool_call_dicts,
                     reasoning_content=response.reasoning_content,
+                    thinking_blocks=response.thinking_blocks or None,
                 )
 
                 tool_loop_break = False
                 for tool_call in response.tool_calls:
-                    args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                    normalized_args = _normalize_tool_arguments(tool_call.arguments)
+                    args_str = json.dumps(normalized_args, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
-                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    result = await self.tools.execute(tool_call.name, normalized_args)
                     result_text = self._add_tool_error_hint(
                         self._truncate_tool_result(str(result))
                     )
@@ -1898,7 +2064,7 @@ class AgentLoop:
                     if loop_detector is not None:
                         signal = loop_detector.observe(
                             tool_call.name,
-                            tool_call.arguments,
+                            normalized_args,
                             result_text,
                         )
                         if signal:
@@ -1923,13 +2089,21 @@ class AgentLoop:
                 )
             else:
                 final_content = response.content
+                final_reasoning_content = response.reasoning_content or None
+                final_thinking_blocks = response.thinking_blocks or None
                 break
 
         if final_content is None:
             final_content = "Background task completed."
 
         session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
-        session.add_message("assistant", final_content)
+        if persist_final_assistant:
+            self._persist_assistant_session_message(
+                session,
+                final_content,
+                reasoning_content=final_reasoning_content,
+                thinking_blocks=final_thinking_blocks,
+            )
         self.sessions.save(session)
 
         return OutboundMessage(
@@ -2126,17 +2300,7 @@ Respond with ONLY valid JSON, no markdown fences."""
             )
             result: dict
             if response.has_tool_calls and response.tool_calls:
-                args = response.tool_calls[0].arguments
-                if isinstance(args, dict):
-                    result = args
-                elif isinstance(args, str):
-                    result = json.loads(args)
-                else:
-                    logger.warning(
-                        "Unexpected memory consolidation tool arguments type: {}",
-                        type(args).__name__,
-                    )
-                    result = {}
+                result = _normalize_tool_arguments(response.tool_calls[0].arguments)
             else:
                 text = (response.content or "").strip()
                 if text.startswith("```"):

@@ -1,4 +1,5 @@
 ﻿import asyncio
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -30,6 +31,7 @@ class DummyProvider(LLMProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         return LLMResponse(content=self.reply, finish_reason="stop")
 
@@ -43,6 +45,7 @@ class ToolThenAnswerProvider(LLMProvider):
         self.calls = 0
         self.max_tokens_seen: list[int] = []
         self.temperature_seen: list[float] = []
+        self.reasoning_effort_seen: list[str | None] = []
 
     async def chat(
         self,
@@ -52,10 +55,12 @@ class ToolThenAnswerProvider(LLMProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         self.calls += 1
         self.max_tokens_seen.append(max_tokens)
         self.temperature_seen.append(temperature)
+        self.reasoning_effort_seen.append(reasoning_effort)
         if self.calls == 1:
             return LLMResponse(
                 content="",
@@ -68,8 +73,13 @@ class ToolThenAnswerProvider(LLMProvider):
                 ],
                 finish_reason="tool_calls",
                 reasoning_content="先读取文件确认内容。",
+                thinking_blocks=[{"type": "thinking", "text": "先读取文件确认内容。"}],
             )
-        return LLMResponse(content="处理完成", finish_reason="stop")
+        return LLMResponse(
+            content="处理完成",
+            finish_reason="stop",
+            thinking_blocks=[{"type": "thinking", "text": "读取结果可直接总结。"}],
+        )
 
     def get_default_model(self) -> str:
         return "openai/gpt-4o-mini"
@@ -89,6 +99,7 @@ class NoToolProvider(LLMProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         self.calls += 1
         return LLMResponse(content=self.reply, finish_reason="stop")
@@ -114,6 +125,7 @@ class MessageOnlyProvider(LLMProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         self.calls += 1
         self.tool_choices.append(tool_choice)
@@ -150,6 +162,7 @@ class RequiredDowngradeProvider(LLMProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         self.calls += 1
         self.tool_choices.append(tool_choice)
@@ -186,6 +199,7 @@ class MessageQuotaProvider(LLMProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         self.calls += 1
         return LLMResponse(
@@ -224,6 +238,7 @@ class MeaningfulThenMessageProvider(LLMProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         self.calls += 1
         if self.calls == 1:
@@ -269,6 +284,7 @@ class FallbackProvider(LLMProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         target = model or "openai/gpt-4o-mini"
         self.models.append(target)
@@ -279,6 +295,30 @@ class FallbackProvider(LLMProvider):
                 error_type="timeout",
             )
         return LLMResponse(content="fallback ok", finish_reason="stop")
+
+    def get_default_model(self) -> str:
+        return "openai/gpt-4o-mini"
+
+
+class ErrorResponseProvider(LLMProvider):
+    def __init__(self):
+        super().__init__(api_key=None, api_base=None)
+
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        reasoning_effort: str | None = None,
+    ) -> LLMResponse:
+        return LLMResponse(
+            content="Error calling LLM: timeout",
+            finish_reason="error",
+            error_type="timeout",
+        )
 
     def get_default_model(self) -> str:
         return "openai/gpt-4o-mini"
@@ -297,6 +337,7 @@ class CompactionProvider(LLMProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         self.calls += 1
         return LLMResponse(content="压缩摘要：用户要求修复脚本并验证输出。", finish_reason="stop")
@@ -318,6 +359,7 @@ class SystemLoopProvider(LLMProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         self.calls += 1
         return LLMResponse(
@@ -329,6 +371,72 @@ class SystemLoopProvider(LLMProvider):
                     arguments={"path": "README.md"},
                 )
             ],
+        )
+
+    def get_default_model(self) -> str:
+        return "openai/gpt-4o-mini"
+
+
+class ListArgumentsToolProvider(LLMProvider):
+    def __init__(self):
+        super().__init__(api_key=None, api_base=None)
+        self.calls = 0
+
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        reasoning_effort: str | None = None,
+    ) -> LLMResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="tc-list-1",
+                        name="read_file",
+                        arguments=[{"path": "note.txt"}],
+                    )
+                ],
+                finish_reason="tool_calls",
+            )
+        return LLMResponse(content="list arguments ok", finish_reason="stop")
+
+    def get_default_model(self) -> str:
+        return "openai/gpt-4o-mini"
+
+
+class MemoryConsolidationListArgumentsProvider(LLMProvider):
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        reasoning_effort: str | None = None,
+    ) -> LLMResponse:
+        return LLMResponse(
+            content=None,
+            tool_calls=[
+                ToolCallRequest(
+                    id="tc-memory-list-1",
+                    name="memory",
+                    arguments=[
+                        {
+                            "history_entry": "[2026-01-01 10:00] Consolidated list arguments.",
+                            "memory_update": "List arguments fallback enabled.",
+                        }
+                    ],
+                )
+            ],
+            finish_reason="tool_calls",
         )
 
     def get_default_model(self) -> str:
@@ -353,6 +461,21 @@ def _make_loop(monkeypatch, tmp_path: Path) -> AgentLoop:
         provider=DummyProvider(),
         workspace=tmp_path,
     )
+
+
+def test_session_compression_lock_uses_weak_container(monkeypatch, tmp_path: Path) -> None:
+    loop = _make_loop(monkeypatch, tmp_path)
+    assert isinstance(loop._session_compression_locks, weakref.WeakValueDictionary)
+
+
+def test_session_compression_lock_reuses_lock_for_same_session(
+    monkeypatch, tmp_path: Path
+) -> None:
+    loop = _make_loop(monkeypatch, tmp_path)
+    first = loop._get_session_compression_lock("telegram:lock-reuse")
+    second = loop._get_session_compression_lock("telegram:lock-reuse")
+
+    assert first is second
 
 
 def test_lazy_detects_empty_promises() -> None:
@@ -591,7 +714,9 @@ async def test_auto_compress_background_trigger(monkeypatch, tmp_path: Path) -> 
     assert called["value"] is True
 
 
-async def test_process_direct_persists_tool_chain_and_reasoning(monkeypatch, tmp_path: Path) -> None:
+async def test_process_direct_persists_tool_chain_reasoning_effort_and_thinking_blocks(
+    monkeypatch, tmp_path: Path
+) -> None:
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     monkeypatch.setattr(
         "nanobot.agent.loop.load_config",
@@ -613,14 +738,69 @@ async def test_process_direct_persists_tool_chain_and_reasoning(monkeypatch, tmp
     assert reply == "处理完成"
     assert provider.max_tokens_seen[0] == 1234
     assert provider.temperature_seen[0] == 0.2
+    assert provider.reasoning_effort_seen[0] == "medium"
 
     session = loop.sessions.get_or_create("telegram:500")
     history = session.get_history()
     assert [m["role"] for m in history] == ["user", "assistant", "tool", "assistant"]
     assert history[1]["tool_calls"][0]["function"]["name"] == "read_file"
     assert history[1]["reasoning_content"] == "先读取文件确认内容。"
+    assert history[1]["thinking_blocks"][0]["type"] == "thinking"
     assert history[2]["tool_call_id"] == "tc-1"
     assert history[2]["name"] == "read_file"
+    assert history[3]["thinking_blocks"][0]["text"] == "读取结果可直接总结。"
+
+
+def test_refresh_runtime_options_updates_reasoning_effort(monkeypatch, tmp_path: Path) -> None:
+    loop = _make_loop(monkeypatch, tmp_path)
+    assert loop.reasoning_effort == "medium"
+
+    defaults = SimpleNamespace(
+        max_tool_iterations=loop.max_iterations,
+        max_tokens=loop.max_tokens,
+        temperature=loop.temperature,
+        reasoning_effort="high",
+        idle_intervention=loop.idle_intervention,
+        loop_detection_enabled=loop.loop_detection_enabled,
+        loop_window=loop.loop_window,
+        loop_warn_threshold=loop.loop_warn_threshold,
+        loop_critical_threshold=loop.loop_critical_threshold,
+        loop_break_threshold=loop.loop_break_threshold,
+        max_exempt_rounds=loop.max_exempt_rounds,
+        max_message_calls_per_turn=loop.max_message_calls_per_turn,
+        model_fallbacks=loop.model_fallbacks,
+        failover_retry_once=loop.failover_retry_once,
+        context_guard_min_tokens=loop.context_guard_min_tokens,
+        context_guard_warn_tokens=loop.context_guard_warn_tokens,
+        tool_result_max_chars=loop.tool_result_max_chars,
+        compaction_enabled=loop.compaction_enabled,
+        compaction_target_ratio=loop.compaction_target_ratio,
+    )
+    config = SimpleNamespace(agents=SimpleNamespace(defaults=defaults))
+    loop._refresh_runtime_options(config)
+
+    assert loop.reasoning_effort == "high"
+
+
+def test_image_session_persistence_redacts_base64_user_content(monkeypatch, tmp_path: Path) -> None:
+    loop = _make_loop(monkeypatch, tmp_path)
+    session = loop.sessions.get_or_create("telegram:image-session")
+
+    base64_payload = "ABCD1234BASE64PAYLOADXYZ"
+    multimodal = [
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_payload}"}},
+        {"type": "text", "text": "请保留这段文本"},
+        {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}},
+    ]
+
+    loop._persist_user_session_message(session, multimodal)
+    stored = session.messages[-1]["content"]
+
+    assert isinstance(stored, list)
+    assert stored[0] == {"type": "text", "text": "[image]"}
+    assert stored[1] == {"type": "text", "text": "请保留这段文本"}
+    assert stored[2] == {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}}
+    assert base64_payload not in str(stored)
 
 
 async def test_execution_intent_without_tool_call_no_longer_hard_blocks(monkeypatch, tmp_path: Path) -> None:
@@ -747,10 +927,34 @@ async def test_meaningful_tool_then_message_still_exits(monkeypatch, tmp_path: P
     assert provider.calls == 2
 
 
-async def test_process_direct_stop_signal(monkeypatch, tmp_path: Path) -> None:
+async def test_process_direct_stop_signal_without_subagents(monkeypatch, tmp_path: Path) -> None:
     loop = _make_loop(monkeypatch, tmp_path)
+    captured: dict[str, str] = {}
+
+    def _fake_cancel(session_key: str) -> int:
+        captured["session_key"] = session_key
+        return 0
+
+    monkeypatch.setattr(loop.subagents, "cancel_by_session", _fake_cancel)
     reply = await loop.process_direct("停止", channel="telegram", chat_id="101")
+    assert captured["session_key"] == "telegram:101"
     assert "已收到停止指令" in reply
+    assert "已取消子代理任务 0 个" in reply
+
+
+async def test_process_direct_stop_signal_with_subagents(monkeypatch, tmp_path: Path) -> None:
+    loop = _make_loop(monkeypatch, tmp_path)
+    captured: dict[str, str] = {}
+
+    def _fake_cancel(session_key: str) -> int:
+        captured["session_key"] = session_key
+        return 2
+
+    monkeypatch.setattr(loop.subagents, "cancel_by_session", _fake_cancel)
+    reply = await loop.process_direct("/stop", channel="telegram", chat_id="102")
+    assert captured["session_key"] == "telegram:102"
+    assert "已收到停止指令" in reply
+    assert "已取消子代理任务 2 个" in reply
 
 
 async def test_failover_switches_to_fallback_model(monkeypatch, tmp_path: Path) -> None:
@@ -771,6 +975,38 @@ async def test_failover_switches_to_fallback_model(monkeypatch, tmp_path: Path) 
     assert reply == "fallback ok"
     assert provider.models[0] == "openai/gpt-4o-mini"
     assert provider.models[1] == "anthropic/claude-3-5-sonnet"
+
+
+async def test_error_response_not_persisted_to_session_and_returns_friendly_text(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "nanobot.agent.loop.load_config",
+        lambda: (_ for _ in ()).throw(ConfigError("test config missing")),
+    )
+    monkeypatch.setattr("nanobot.agent.loop.detect_hallucination", lambda *a, **k: _NoHallucination())
+
+    provider = ErrorResponseProvider()
+    loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path)
+    loop.model_fallbacks = []
+    loop.failover_retry_once = False
+
+    out = await loop._process_message(
+        InboundMessage(
+            channel="telegram",
+            sender_id="u-error",
+            chat_id="103",
+            content="what is 1+1?",
+        )
+    )
+
+    assert out is not None
+    assert out.content == "抱歉，模型服务暂时不可用，请稍后再试。"
+    session = loop.sessions.get_or_create("telegram:103")
+    assert len(session.messages) == 1
+    assert session.messages[0]["role"] == "user"
+    assert session.messages[0]["content"] == "what is 1+1?"
 
 
 def test_context_guard_prunes_large_messages(monkeypatch, tmp_path: Path) -> None:
@@ -959,6 +1195,34 @@ async def test_compaction_summary_timeout_falls_back(monkeypatch, tmp_path: Path
     assert model == "openai/gpt-4o-mini"
 
 
+async def test_empty_assistant_without_tool_calls_not_persisted_to_session(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "nanobot.agent.loop.load_config",
+        lambda: (_ for _ in ()).throw(ConfigError("test config missing")),
+    )
+    monkeypatch.setattr("nanobot.agent.loop.detect_hallucination", lambda *a, **k: _NoHallucination())
+
+    loop = AgentLoop(bus=MessageBus(), provider=NoToolProvider(reply=""), workspace=tmp_path)
+    msg = InboundMessage(
+        channel="system",
+        sender_id="subagent-empty",
+        chat_id="telegram:88",
+        content="continue",
+    )
+
+    out = await loop._process_message(msg)
+
+    assert out is not None
+    assert out.content == ""
+    session = loop.sessions.get_or_create("telegram:88")
+    assert len(session.messages) == 1
+    assert session.messages[0]["role"] == "user"
+    assert session.messages[0]["content"] == "[System: subagent-empty] continue"
+
+
 async def test_system_message_path_uses_loop_detector(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     monkeypatch.setattr(
@@ -986,3 +1250,58 @@ async def test_system_message_path_uses_loop_detector(monkeypatch, tmp_path: Pat
     out = await loop._process_message(msg)
     assert out is not None
     assert "检测到工具调用可能进入死循环" in out.content
+
+
+async def test_arguments_list_tool_call_does_not_crash_and_continues(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "nanobot.agent.loop.load_config",
+        lambda: (_ for _ in ()).throw(ConfigError("test config missing")),
+    )
+    monkeypatch.setattr("nanobot.agent.loop.detect_hallucination", lambda *a, **k: _NoHallucination())
+
+    (tmp_path / "note.txt").write_text("list args content", encoding="utf-8")
+    provider = ListArgumentsToolProvider()
+    loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path)
+
+    reply = await loop.process_direct("读取文件并继续", channel="telegram", chat_id="701")
+
+    assert reply == "list arguments ok"
+    assert provider.calls == 2
+    history = loop.sessions.get_or_create("telegram:701").get_history()
+    assert [m["role"] for m in history] == ["user", "assistant", "tool", "assistant"]
+
+
+async def test_arguments_list_memory_consolidation_uses_first_item(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "nanobot.agent.loop.load_config",
+        lambda: (_ for _ in ()).throw(ConfigError("test config missing")),
+    )
+    monkeypatch.setattr("nanobot.agent.loop.detect_hallucination", lambda *a, **k: _NoHallucination())
+
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=MemoryConsolidationListArgumentsProvider(),
+        workspace=tmp_path,
+    )
+    session = loop.sessions.get_or_create("telegram:memory-list")
+    session.add_message("user", "请整理历史")
+    session.add_message("assistant", "好的")
+    loop.sessions.save(session)
+
+    result = await loop._consolidate_memory(session, archive_all=True)
+
+    assert result is not None
+    assert result["success"] is True
+    assert result["history_added"] is True
+    assert result["memory_updated"] is True
+    assert session.messages == []
+
+
+
+

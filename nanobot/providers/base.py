@@ -21,6 +21,7 @@ class LLMResponse:
     finish_reason: str = "stop"
     usage: dict[str, int] = field(default_factory=dict)
     reasoning_content: str | None = None  # reasoning output from compatible models
+    thinking_blocks: list[dict[str, Any]] = field(default_factory=list)
     error_type: str | None = None
 
     @property
@@ -50,6 +51,7 @@ class LLMProvider(ABC):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         """
         Send a chat completion request.
@@ -61,6 +63,7 @@ class LLMProvider(ABC):
             model: Model identifier (provider-specific).
             max_tokens: Maximum tokens in response.
             temperature: Sampling temperature.
+            reasoning_effort: Optional reasoning level hint (for example: "low"/"medium"/"high").
 
         Returns:
             LLMResponse with content and/or tool calls.

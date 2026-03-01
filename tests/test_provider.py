@@ -175,6 +175,33 @@ async def test_provider_chat_omits_tool_choice_without_tools(monkeypatch) -> Non
     assert "tool_choice" not in kwargs
 
 
+async def test_provider_chat_passes_reasoning_effort(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def _fake_completion(**kwargs):
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(content="ok", reasoning_content=None, tool_calls=None),
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+
+    monkeypatch.setattr("nanobot.providers.litellm_provider.acompletion", _fake_completion)
+    provider = LiteLLMProvider(api_key="k", default_model="openai/gpt-4o-mini")
+    await provider.chat(
+        messages=[{"role": "user", "content": "hi"}],
+        reasoning_effort="high",
+    )
+
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs["reasoning_effort"] == "high"
+
+
 def test_provider_sanitize_messages_whitelist_and_assistant_content() -> None:
     messages = [
         {
@@ -197,6 +224,44 @@ def test_provider_sanitize_messages_whitelist_and_assistant_content() -> None:
     assert "extra" not in sanitized[0]
     assert sanitized[1]["name"] == "read_file"
     assert "metadata" not in sanitized[1]
+
+
+def test_provider_sanitize_messages_keeps_thinking_blocks() -> None:
+    messages = [
+        {
+            "role": "assistant",
+            "content": "ok",
+            "thinking_blocks": [{"type": "thinking", "text": "step"}],
+            "extra": "drop",
+        }
+    ]
+
+    sanitized = LiteLLMProvider._sanitize_messages(messages)
+    assert sanitized[0]["thinking_blocks"] == [{"type": "thinking", "text": "step"}]
+    assert "extra" not in sanitized[0]
+
+
+def test_provider_normalize_short_tool_call_ids_keeps_references_in_sync() -> None:
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "a1",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "a1", "name": "read_file", "content": "ok"},
+    ]
+
+    normalized = LiteLLMProvider._normalize_short_tool_call_ids(messages)
+    assistant_call_id = normalized[0]["tool_calls"][0]["id"]
+    tool_call_id = normalized[1]["tool_call_id"]
+    assert assistant_call_id == tool_call_id
+    assert len(assistant_call_id) >= 8
 
 
 def test_provider_sanitize_empty_content_blocks() -> None:
@@ -230,6 +295,34 @@ def test_provider_parse_response_normalizes_empty_reasoning_content() -> None:
 
     parsed = provider._parse_response(fake_response)
     assert parsed.reasoning_content is None
+
+
+def test_provider_parse_response_extracts_thinking_blocks_and_tool_id_fallback() -> None:
+    provider = LiteLLMProvider(api_key="k")
+    fake_response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                finish_reason="tool_calls",
+                message=SimpleNamespace(
+                    content=None,
+                    reasoning_content=None,
+                    thinking_blocks=[{"type": "thinking", "text": "step"}],
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="x1",
+                            function=SimpleNamespace(name="ping", arguments="{\"x\": 1}"),
+                        )
+                    ],
+                ),
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=2, completion_tokens=1, total_tokens=3),
+    )
+
+    parsed = provider._parse_response(fake_response)
+    assert parsed.thinking_blocks == [{"type": "thinking", "text": "step"}]
+    assert len(parsed.tool_calls) == 1
+    assert len(parsed.tool_calls[0].id) >= 8
 
 
 async def test_provider_chat_clamps_max_tokens(monkeypatch) -> None:

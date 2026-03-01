@@ -1,4 +1,6 @@
+import ast
 import json
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -77,6 +79,7 @@ def test_search_config_defaults_and_validation() -> None:
     assert cfg.agents.defaults.max_exempt_rounds == 4
     assert cfg.agents.defaults.max_message_calls_per_turn == 5
     assert cfg.agents.defaults.model_fallbacks == []
+    assert cfg.agents.defaults.reasoning_effort == "medium"
     assert cfg.agents.defaults.compaction_enabled is True
     assert cfg.agents.defaults.compaction_target_ratio == 0.45
     assert cfg.logging.max_file_bytes == 500 * 1024 * 1024
@@ -126,6 +129,12 @@ def test_search_config_defaults_and_validation() -> None:
                 }
             }
         )
+    cfg_with_reasoning = Config.model_validate(
+        {"agents": {"defaults": {"reasoning_effort": "HIGH"}}}
+    )
+    assert cfg_with_reasoning.agents.defaults.reasoning_effort == "high"
+    with pytest.raises(ValidationError):
+        Config.model_validate({"agents": {"defaults": {"reasoning_effort": "extreme"}}})
     with pytest.raises(ValidationError):
         Config.model_validate({"logging": {"level": "nope"}})
     with pytest.raises(ValidationError):
@@ -158,3 +167,18 @@ def test_make_provider_selects_codex_when_enabled(monkeypatch, tmp_path) -> None
     )
     provider, fallback = _make_provider(cfg)
     assert isinstance(provider, CodexProvider)
+
+
+def test_commands_agentloop_calls_pass_reasoning_effort() -> None:
+    commands_source = Path("nanobot/cli/commands.py").read_text(encoding="utf-8-sig")
+    tree = ast.parse(commands_source)
+
+    agent_loop_calls: list[ast.Call] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "AgentLoop":
+            agent_loop_calls.append(node)
+
+    assert agent_loop_calls
+    for call in agent_loop_calls:
+        keyword_names = {kw.arg for kw in call.keywords if kw.arg is not None}
+        assert "reasoning_effort" in keyword_names

@@ -225,6 +225,7 @@ class AgentDefaults(BaseModel):
     """Default agent configuration."""
     workspace: str = "~/.nanobot/workspace"
     model: str = "anthropic/claude-opus-4-5"
+    reasoning_effort: str = "medium"
     max_tokens: int = Field(default=16384, ge=1, le=262144)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     max_tool_iterations: int = Field(default=50, ge=1, le=200)
@@ -267,6 +268,15 @@ class AgentDefaults(BaseModel):
             seen.add(key)
             cleaned.append(candidate)
         return cleaned
+
+    @field_validator("reasoning_effort")
+    @classmethod
+    def validate_reasoning_effort(cls, value: str) -> str:
+        effort = value.strip().lower()
+        allowed = {"low", "medium", "high"}
+        if effort not in allowed:
+            raise ValueError(f"reasoning_effort must be one of: {', '.join(sorted(allowed))}")
+        return effort
 
     @model_validator(mode="after")
     def validate_loop_thresholds(self):

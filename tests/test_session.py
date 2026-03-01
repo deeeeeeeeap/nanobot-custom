@@ -108,3 +108,16 @@ def test_session_get_history_keeps_tool_and_reasoning_fields() -> None:
     assert history[1]["reasoning_content"] == "先读取文件。"
     assert history[2]["tool_call_id"] == "tc-1"
     assert history[2]["name"] == "read_file"
+
+
+def test_session_get_history_keeps_thinking_blocks() -> None:
+    session = Session(key="telegram:thinking")
+    session.add_message("user", "start")
+    session.add_message(
+        "assistant",
+        "answer",
+        thinking_blocks=[{"type": "thinking", "text": "step-a"}],
+    )
+
+    history = session.get_history()
+    assert history[1]["thinking_blocks"] == [{"type": "thinking", "text": "step-a"}]

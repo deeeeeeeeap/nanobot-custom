@@ -42,21 +42,27 @@ def test_mojibake_detector_does_not_flag_repeated_fang_character():
     assert ContextBuilder._looks_mojibake("\u9983" * 8) is False
 
 
-def test_build_messages_moves_runtime_context_to_user_message(tmp_path):
+def test_build_messages_separates_runtime_and_user_message(tmp_path):
     builder = ContextBuilder(tmp_path)
     messages = builder.build_messages(
-        history=[],
+        history=[{"role": "assistant", "content": "历史回复"}],
         current_message="执行检查",
         channel="telegram",
         chat_id="42",
     )
 
     system_msg = messages[0]
-    user_msg = messages[-1]
+    history_msg = messages[1]
+    runtime_msg = messages[2]
+    user_msg = messages[3]
     assert system_msg["role"] == "system"
     assert "## Current Session" not in system_msg["content"]
+    assert history_msg == {"role": "assistant", "content": "历史回复"}
+    assert runtime_msg["role"] == "user"
+    assert f"{ContextBuilder._RUNTIME_CONTEXT_TAG} current_time=" in runtime_msg["content"]
+    assert f"{ContextBuilder._RUNTIME_CONTEXT_TAG} session=telegram:42" in runtime_msg["content"]
     assert user_msg["role"] == "user"
-    assert "[runtime] session=telegram:42" in user_msg["content"]
+    assert user_msg["content"] == "执行检查"
 
 
 def test_system_prompt_does_not_list_tool_matrix(tmp_path):
@@ -73,3 +79,19 @@ def test_system_prompt_replaces_overly_strict_action_rules(tmp_path):
     assert "第一轮回复必须包含工具调用" not in prompt
     assert "简单问题直接回答；复杂问题先分析后给结论" in prompt
     assert "收到明确执行请求时优先行动" in prompt
+
+
+def test_add_assistant_message_preserves_thinking_blocks(tmp_path):
+    builder = ContextBuilder(tmp_path)
+    messages: list[dict[str, object]] = []
+
+    updated = builder.add_assistant_message(
+        messages=messages,
+        content="done",
+        reasoning_content="brief reasoning",
+        thinking_blocks=[{"type": "thinking", "text": "step-1"}],
+    )
+
+    assert updated[-1]["role"] == "assistant"
+    assert updated[-1]["thinking_blocks"] == [{"type": "thinking", "text": "step-1"}]
+    assert updated[-1]["reasoning_content"] == "brief reasoning"

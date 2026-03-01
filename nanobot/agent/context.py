@@ -22,6 +22,7 @@ class ContextBuilder:
     """
     
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
+    _RUNTIME_CONTEXT_TAG = "[runtime]"
     _MOJIBAKE_MARKERS = ("�", "\ue0ff", "锛", "銆", "鈥")
     
     def __init__(self, workspace: Path):
@@ -231,9 +232,12 @@ Skills with available="false" need dependencies installed first - you can try in
         # History
         messages.extend(history)
 
+        # Runtime metadata is isolated from the actual user input.
+        runtime_context = self._build_runtime_context_prefix(channel, chat_id)
+        messages.append({"role": "user", "content": runtime_context})
+
         # Current message (with optional image attachments)
-        prefix = self._build_runtime_context_prefix(channel, chat_id)
-        user_content = self._build_user_content(current_message, media, runtime_prefix=prefix)
+        user_content = self._build_user_content(current_message, media)
         messages.append({"role": "user", "content": user_content})
 
         return messages
@@ -242,21 +246,19 @@ Skills with available="false" need dependencies installed first - you can try in
     def _build_runtime_context_prefix(channel: str | None, chat_id: str | None) -> str:
         """Attach dynamic turn metadata on user message, not system prompt."""
         now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
-        lines = [f"[runtime] current_time={now}"]
+        lines = [f"{ContextBuilder._RUNTIME_CONTEXT_TAG} current_time={now}"]
         if channel and chat_id:
-            lines.append(f"[runtime] session={channel}:{chat_id}")
+            lines.append(f"{ContextBuilder._RUNTIME_CONTEXT_TAG} session={channel}:{chat_id}")
         return "\n".join(lines)
 
     def _build_user_content(
         self,
         text: str,
         media: list[str] | None,
-        runtime_prefix: str = "",
     ) -> str | list[dict[str, Any]]:
         """Build user message content with optional base64-encoded images."""
-        merged_text = f"{runtime_prefix}\n\n{text}".strip() if runtime_prefix else text
         if not media:
-            return merged_text
+            return text
         
         images = []
         for path in media:
@@ -268,8 +270,8 @@ Skills with available="false" need dependencies installed first - you can try in
             images.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
         
         if not images:
-            return merged_text
-        return images + [{"type": "text", "text": merged_text}]
+            return text
+        return images + [{"type": "text", "text": text}]
     
     def add_tool_result(
         self,
@@ -304,6 +306,7 @@ Skills with available="false" need dependencies installed first - you can try in
         content: str | None,
         tool_calls: list[dict[str, Any]] | None = None,
         reasoning_content: str | None = None,
+        thinking_blocks: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         """
         Add an assistant message to the message list.
@@ -313,6 +316,7 @@ Skills with available="false" need dependencies installed first - you can try in
             content: Message content.
             tool_calls: Optional tool calls.
             reasoning_content: Optional reasoning text from compatible models.
+            thinking_blocks: Optional structured reasoning blocks from compatible models.
         
         Returns:
             Updated message list.
@@ -325,6 +329,10 @@ Skills with available="false" need dependencies installed first - you can try in
         # Preserve provider reasoning text when available.
         if reasoning_content:
             msg["reasoning_content"] = reasoning_content
+
+        # Preserve structured provider thinking blocks when available.
+        if thinking_blocks:
+            msg["thinking_blocks"] = thinking_blocks
         
         messages.append(msg)
         return messages

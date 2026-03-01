@@ -13,8 +13,17 @@ from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.providers.registry import find_by_model, find_gateway
 
 _ALLOWED_MSG_KEYS = frozenset(
-    {"role", "content", "tool_calls", "tool_call_id", "name", "reasoning_content"}
+    {
+        "role",
+        "content",
+        "tool_calls",
+        "tool_call_id",
+        "name",
+        "reasoning_content",
+        "thinking_blocks",
+    }
 )
+_MIN_TOOL_CALL_ID_LEN = 8
 
 
 class LiteLLMProvider(LLMProvider):
@@ -169,6 +178,108 @@ class LiteLLMProvider(LLMProvider):
         return sanitized
 
     @staticmethod
+    def _build_tool_call_id(raw_id: str | None, sequence: int) -> str:
+        """Build a provider-safe fallback tool_call id."""
+        source = (raw_id or "").strip()
+        if len(source) >= _MIN_TOOL_CALL_ID_LEN:
+            return source
+        token = "".join(ch for ch in source if ch.isalnum() or ch in {"_", "-"})
+        token = token or "tool"
+        return f"call_{token}_{sequence:04d}"
+
+    @classmethod
+    def _normalize_short_tool_call_ids(cls, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """
+        Normalize short/missing tool_call ids so strict providers accept tool messages.
+
+        Keeps assistant tool_calls and subsequent tool message references in sync.
+        """
+        normalized: list[dict[str, Any]] = []
+        remap: dict[str, str] = {}
+        sequence = 0
+
+        for msg in messages:
+            clean = dict(msg)
+            role = clean.get("role")
+
+            if role == "assistant":
+                raw_tool_calls = clean.get("tool_calls")
+                if isinstance(raw_tool_calls, list):
+                    tool_calls: list[Any] = []
+                    for tc in raw_tool_calls:
+                        if not isinstance(tc, dict):
+                            tool_calls.append(tc)
+                            continue
+                        sequence += 1
+                        tc_clean = dict(tc)
+                        raw_id = tc_clean.get("id")
+                        normalized_id = cls._build_tool_call_id(
+                            raw_id if isinstance(raw_id, str) else None, sequence
+                        )
+                        if isinstance(raw_id, str) and raw_id != normalized_id:
+                            remap[raw_id] = normalized_id
+                        tc_clean["id"] = normalized_id
+                        tool_calls.append(tc_clean)
+                    clean["tool_calls"] = tool_calls
+
+            if role == "tool":
+                raw_tool_call_id = clean.get("tool_call_id")
+                if isinstance(raw_tool_call_id, str):
+                    if raw_tool_call_id in remap:
+                        clean["tool_call_id"] = remap[raw_tool_call_id]
+                    elif len(raw_tool_call_id.strip()) < _MIN_TOOL_CALL_ID_LEN:
+                        sequence += 1
+                        clean["tool_call_id"] = cls._build_tool_call_id(raw_tool_call_id, sequence)
+
+            normalized.append(clean)
+
+        return normalized
+
+    @staticmethod
+    def _extract_thinking_blocks(message: Any) -> list[dict[str, Any]]:
+        """Extract structured thinking blocks when provider exposes them."""
+
+        def _get(obj: Any, key: str) -> Any:
+            if isinstance(obj, dict):
+                return obj.get(key)
+            return getattr(obj, key, None)
+
+        candidates: list[Any] = []
+        for key in ("thinking_blocks", "reasoning_blocks"):
+            value = _get(message, key)
+            if isinstance(value, list):
+                candidates = value
+                break
+
+        if not candidates:
+            reasoning = _get(message, "reasoning")
+            if isinstance(reasoning, list):
+                candidates = reasoning
+            elif isinstance(reasoning, dict):
+                for key in ("content", "blocks", "thinking_blocks"):
+                    value = reasoning.get(key)
+                    if isinstance(value, list):
+                        candidates = value
+                        break
+
+        if not candidates:
+            provider_specific = _get(message, "provider_specific_fields")
+            if isinstance(provider_specific, dict):
+                for key in ("thinking_blocks", "reasoning_blocks"):
+                    value = provider_specific.get(key)
+                    if isinstance(value, list):
+                        candidates = value
+                        break
+
+        blocks: list[dict[str, Any]] = []
+        for item in candidates:
+            if isinstance(item, dict):
+                blocks.append(item)
+            else:
+                blocks.append({"type": "text", "text": str(item)})
+        return blocks
+
+    @staticmethod
     def _classify_error(status_code: int | None, message: str, code: str | None = None) -> str:
         """Classify provider/network failures into a stable error category."""
         text = f"{message} {code or ''}".lower()
@@ -208,6 +319,7 @@ class LiteLLMProvider(LLMProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         """
         Send a chat completion request via LiteLLM.
@@ -223,7 +335,9 @@ class LiteLLMProvider(LLMProvider):
         max_tokens = max(1, max_tokens)
         kwargs: dict[str, Any] = {
             "model": model,
-            "messages": self._sanitize_messages(self._sanitize_empty_content(messages)),
+            "messages": self._sanitize_messages(
+                self._sanitize_empty_content(self._normalize_short_tool_call_ids(messages))
+            ),
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
@@ -235,6 +349,8 @@ class LiteLLMProvider(LLMProvider):
             kwargs["api_base"] = self.api_base
         if self.extra_headers:
             kwargs["extra_headers"] = self.extra_headers
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice
@@ -304,7 +420,7 @@ class LiteLLMProvider(LLMProvider):
         message = choice.message
 
         tool_calls = []
-        for tc in getattr(message, "tool_calls", []) or []:
+        for index, tc in enumerate(getattr(message, "tool_calls", []) or [], start=1):
             args = tc.function.arguments
             if isinstance(args, str):
                 try:
@@ -315,7 +431,7 @@ class LiteLLMProvider(LLMProvider):
                 args = {"raw": str(args)}
             tool_calls.append(
                 ToolCallRequest(
-                    id=tc.id,
+                    id=self._build_tool_call_id(getattr(tc, "id", None), index),
                     name=tc.function.name,
                     arguments=args,
                 )
@@ -335,6 +451,7 @@ class LiteLLMProvider(LLMProvider):
             finish_reason=choice.finish_reason or "stop",
             usage=usage,
             reasoning_content=getattr(message, "reasoning_content", None) or None,
+            thinking_blocks=self._extract_thinking_blocks(message),
         )
 
     def get_default_model(self) -> str:

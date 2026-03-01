@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,7 @@ class SubagentManager:
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
+        self._session_task_ids: dict[str, set[str]] = defaultdict(set)
     
     async def spawn(
         self,
@@ -54,6 +56,7 @@ class SubagentManager:
         label: str | None = None,
         origin_channel: str = "cli",
         origin_chat_id: str = "direct",
+        session_key: str | None = None,
     ) -> str:
         """
         Spawn a subagent to execute a task in the background.
@@ -74,18 +77,52 @@ class SubagentManager:
             "channel": origin_channel,
             "chat_id": origin_chat_id,
         }
+        effective_session_key = session_key or f"{origin_channel}:{origin_chat_id}"
         
         # Create background task
         bg_task = asyncio.create_task(
             self._run_subagent(task_id, task, display_label, origin)
         )
         self._running_tasks[task_id] = bg_task
+        self._session_task_ids[effective_session_key].add(task_id)
         
         # Cleanup when done
-        bg_task.add_done_callback(lambda _: self._running_tasks.pop(task_id, None))
+        bg_task.add_done_callback(
+            lambda _: self._cleanup_task_tracking(task_id, effective_session_key)
+        )
         
         logger.info(f"Spawned subagent [{task_id}]: {display_label}")
         return f"Subagent [{display_label}] started (id: {task_id}). I'll notify you when it completes."
+
+    def _cleanup_task_tracking(self, task_id: str, session_key: str) -> None:
+        """Remove finished task from tracking maps."""
+        self._running_tasks.pop(task_id, None)
+        session_tasks = self._session_task_ids.get(session_key)
+        if not session_tasks:
+            return
+        session_tasks.discard(task_id)
+        if not session_tasks:
+            self._session_task_ids.pop(session_key, None)
+
+    def cancel_by_session(self, session_key: str) -> int:
+        """
+        Cancel running subagent tasks for a session.
+
+        Returns:
+            Number of running tasks that were cancelled.
+        """
+        task_ids = list(self._session_task_ids.get(session_key, set()))
+        cancelled = 0
+
+        for task_id in task_ids:
+            task = self._running_tasks.get(task_id)
+            if task is None or task.done():
+                self._cleanup_task_tracking(task_id, session_key)
+                continue
+            task.cancel()
+            cancelled += 1
+
+        return cancelled
     
     async def _run_subagent(
         self,

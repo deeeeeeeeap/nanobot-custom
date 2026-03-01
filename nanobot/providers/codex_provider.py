@@ -100,9 +100,11 @@ class CodexProvider(LLMProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         del max_tokens  # Codex backend currently rejects max_output_tokens.
         del temperature  # Codex backend currently rejects temperature.
+        del reasoning_effort  # Codex backend currently does not support this option.
 
         request_id = uuid.uuid4().hex[:10]
         target_model = self._normalize_model(model or self.default_model)

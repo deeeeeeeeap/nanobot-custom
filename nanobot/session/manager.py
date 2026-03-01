@@ -20,6 +20,7 @@ _HISTORY_KEYS = (
     "tool_call_id",
     "name",
     "reasoning_content",
+    "thinking_blocks",
 )
 
 
