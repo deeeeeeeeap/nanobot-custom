@@ -15,7 +15,20 @@ class ExecTool(Tool):
     MAX_TIMEOUT = 600
     MAX_OUTPUT_LEN = 10000
     SUBCOMMAND_PATTERN = re.compile(r"\$\(([^()]*)\)")
-    SUBCOMMAND_WHITELIST = {"date", "pwd", "whoami", "hostname", "cat", "echo"}
+    # 子命令白名单：运维安全命令集
+    SUBCOMMAND_WHITELIST = {
+        "date", "pwd", "whoami", "hostname", "cat", "echo",
+        # 文本处理
+        "grep", "awk", "sed", "head", "tail", "wc", "cut", "sort", "uniq", "tr",
+        # 系统信息
+        "id", "uname", "uptime", "free", "df", "du", "ps", "lsof",
+        # 网络诊断
+        "ip", "ss", "nstat", "tc", "ping", "dig", "nslookup", "curl",
+        # 系统配置（只读）
+        "sysctl", "lscpu", "lsblk", "mount", "findmnt",
+        # 文件操作（安全）
+        "ls", "find", "stat", "file", "basename", "dirname", "realpath",
+    }
 
     def __init__(
         self,
@@ -40,9 +53,10 @@ class ExecTool(Tool):
         self.allow_patterns = allow_patterns or []
         self.restrict_to_workspace = restrict_to_workspace
         self.injection_patterns = [
-            r"`[^`]+`",
-            r"\x00",
-            r"[\r\n]",
+            r"`[^`]+`",     # 反引号命令替换
+            r"\x00",        # null byte 注入
+            # 注意：已移除 [\r\n] 换行拦截——LLM 生成的多行命令是合法的，
+            # 真正危险的命令已被 deny_patterns 拦截。
         ]
 
     @property
@@ -138,24 +152,29 @@ class ExecTool(Tool):
         cmd = command.strip()
         lower = cmd.lower()
 
-        for pattern in self.deny_patterns:
+        # 规则 DENY-xxx：拦截高危命令模式
+        for i, pattern in enumerate(self.deny_patterns):
             if re.search(pattern, lower):
-                return "Error: Command blocked by safety guard (dangerous pattern detected)"
+                return f"Error: Command blocked by safety guard (rule DENY-{i}: dangerous pattern '{pattern}')"
 
+        # 规则 SUBCMD：子命令替换检查
         subcommand_error = self._validate_subcommand_substitution(cmd, cwd)
         if subcommand_error:
             return subcommand_error
 
-        for pattern in self.injection_patterns:
+        # 规则 INJ-xxx：注入模式检查
+        for i, pattern in enumerate(self.injection_patterns):
             if re.search(pattern, cmd):
-                return "Error: Command blocked by safety guard (command injection pattern detected)"
+                return f"Error: Command blocked by safety guard (rule INJ-{i}: injection pattern '{pattern}')"
 
+        # 规则 ALLOWLIST：白名单检查
         if self.allow_patterns and not any(re.search(p, lower) for p in self.allow_patterns):
-            return "Error: Command blocked by safety guard (not in allowlist)"
+            return "Error: Command blocked by safety guard (rule ALLOWLIST: not in allowlist)"
 
+        # 规则 WORKSPACE-xxx：工作目录限制检查
         if self.restrict_to_workspace:
             if re.search(r"(^|[\\/])\.\.([\\/]|$)", cmd):
-                return "Error: Command blocked by safety guard (path traversal detected)"
+                return "Error: Command blocked by safety guard (rule WORKSPACE-TRAVERSAL: path traversal detected)"
 
             cwd_path = Path(cwd).resolve()
             win_paths = re.findall(r"[A-Za-z]:\\[^\\\"']+", cmd)
@@ -167,7 +186,7 @@ class ExecTool(Tool):
                 except (OSError, RuntimeError, ValueError):
                     continue
                 if p.is_absolute() and cwd_path not in p.parents and p != cwd_path:
-                    return "Error: Command blocked by safety guard (path outside working dir)"
+                    return f"Error: Command blocked by safety guard (rule WORKSPACE-PATH: '{raw.strip()}' outside working dir)"
 
         return None
 

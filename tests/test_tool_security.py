@@ -16,7 +16,7 @@ from nanobot.agent.tools.shell import ExecTool
 async def test_exec_tool_blocks_command_injection_pattern() -> None:
     tool = ExecTool()
     result = await tool.execute("echo `whoami`")
-    assert "command injection pattern" in result.lower()
+    assert "injection pattern" in result.lower()
 
 
 async def test_exec_blocks_mkfs() -> None:
