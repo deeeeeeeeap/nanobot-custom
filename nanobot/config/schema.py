@@ -227,13 +227,15 @@ class AgentDefaults(BaseModel):
     model: str = "anthropic/claude-opus-4-5"
     max_tokens: int = Field(default=16384, ge=1, le=262144)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
-    max_tool_iterations: int = Field(default=30, ge=1, le=100)
+    max_tool_iterations: int = Field(default=50, ge=1, le=200)
     idle_intervention: bool = True
     loop_detection_enabled: bool = True
     loop_window: int = Field(default=30, ge=6, le=200)
-    loop_warn_threshold: int = Field(default=8, ge=2, le=200)
-    loop_critical_threshold: int = Field(default=12, ge=2, le=200)
-    loop_break_threshold: int = Field(default=18, ge=3, le=200)
+    loop_warn_threshold: int = Field(default=12, ge=2, le=200)
+    loop_critical_threshold: int = Field(default=18, ge=2, le=200)
+    loop_break_threshold: int = Field(default=25, ge=3, le=200)
+    max_exempt_rounds: int = Field(default=4, ge=1, le=20)
+    max_message_calls_per_turn: int = Field(default=5, ge=1, le=20)
     model_fallbacks: list[str] = Field(default_factory=list)
     failover_retry_once: bool = True
     context_guard_min_tokens: int = Field(default=16000, ge=1024, le=1_000_000)
@@ -272,6 +274,12 @@ class AgentDefaults(BaseModel):
             raise ValueError("loop_warn_threshold must be <= loop_critical_threshold")
         if self.loop_critical_threshold > self.loop_break_threshold:
             raise ValueError("loop_critical_threshold must be <= loop_break_threshold")
+        if self.loop_break_threshold > self.loop_window:
+            raise ValueError("loop_break_threshold must be <= loop_window")
+        if self.max_exempt_rounds > self.max_tool_iterations:
+            raise ValueError("max_exempt_rounds must be <= max_tool_iterations")
+        if self.max_message_calls_per_turn > self.max_tool_iterations:
+            raise ValueError("max_message_calls_per_turn must be <= max_tool_iterations")
         return self
 
 

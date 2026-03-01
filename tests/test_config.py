@@ -72,8 +72,10 @@ def test_search_config_defaults_and_validation() -> None:
     assert cfg.search.vector_enabled is False
     assert cfg.memory.auto_compress is True
     assert cfg.memory.compress_threshold == 10
-    assert cfg.agents.defaults.max_tool_iterations == 30
-    assert cfg.agents.defaults.loop_break_threshold == 18
+    assert cfg.agents.defaults.max_tool_iterations == 50
+    assert cfg.agents.defaults.loop_break_threshold == 25
+    assert cfg.agents.defaults.max_exempt_rounds == 4
+    assert cfg.agents.defaults.max_message_calls_per_turn == 5
     assert cfg.agents.defaults.model_fallbacks == []
     assert cfg.agents.defaults.compaction_enabled is True
     assert cfg.agents.defaults.compaction_target_ratio == 0.45
@@ -98,6 +100,28 @@ def test_search_config_defaults_and_validation() -> None:
                     "defaults": {
                         "loop_warn_threshold": 12,
                         "loop_critical_threshold": 8,
+                    }
+                }
+            }
+        )
+    with pytest.raises(ValidationError):
+        Config.model_validate(
+            {
+                "agents": {
+                    "defaults": {
+                        "loop_window": 10,
+                        "loop_break_threshold": 11,
+                    }
+                }
+            }
+        )
+    with pytest.raises(ValidationError):
+        Config.model_validate(
+            {
+                "agents": {
+                    "defaults": {
+                        "max_tool_iterations": 5,
+                        "max_exempt_rounds": 6,
                     }
                 }
             }

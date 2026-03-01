@@ -93,3 +93,19 @@ async def test_codex_auth_falls_back_to_cli_refresh(monkeypatch, tmp_path: Path)
     assert auth.tokens.access_token == "access-cli"
     assert auth.tokens.refresh_token == "refresh-cli"
     assert auth.tokens.account_id == "acct-cli"
+
+
+def test_codex_auth_summary_redacts_sensitive_output(monkeypatch, tmp_path: Path) -> None:
+    auth_path = tmp_path / "auth.json"
+    _write_auth(auth_path, "access-old", "refresh-old", "acct-1")
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+    auth = CodexAuth()
+
+    summary = auth._summarize_text(
+        "access_token=abc1234567890 bearer tok_secret_12345 "
+        "0123456789abcdef0123456789abcdef0123456789abcdef"
+    )
+
+    assert "[REDACTED]" in summary
+    assert "abc1234567890" not in summary
+    assert "tok_secret_12345" not in summary

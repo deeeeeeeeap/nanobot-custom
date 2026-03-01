@@ -394,9 +394,11 @@ class AgentLoop:
         idle_intervention: bool = True,
         loop_detection_enabled: bool = True,
         loop_window: int = 30,
-        loop_warn_threshold: int = 8,
-        loop_critical_threshold: int = 12,
-        loop_break_threshold: int = 18,
+        loop_warn_threshold: int = 12,
+        loop_critical_threshold: int = 18,
+        loop_break_threshold: int = 25,
+        max_exempt_rounds: int = 4,
+        max_message_calls_per_turn: int = 5,
         model_fallbacks: list[str] | None = None,
         failover_retry_once: bool = True,
         context_guard_min_tokens: int = 16000,
@@ -424,10 +426,19 @@ class AgentLoop:
         self.reporter_factory = reporter_factory  # Optional status reporter factory.
         self.idle_intervention = idle_intervention
         self.loop_detection_enabled = loop_detection_enabled
-        self.loop_window = max(6, loop_window)
-        self.loop_warn_threshold = max(2, loop_warn_threshold)
-        self.loop_critical_threshold = max(self.loop_warn_threshold, loop_critical_threshold)
-        self.loop_break_threshold = max(self.loop_critical_threshold, loop_break_threshold)
+        (
+            self.loop_window,
+            self.loop_warn_threshold,
+            self.loop_critical_threshold,
+            self.loop_break_threshold,
+        ) = self._normalize_loop_thresholds(
+            loop_window=loop_window,
+            loop_warn_threshold=loop_warn_threshold,
+            loop_critical_threshold=loop_critical_threshold,
+            loop_break_threshold=loop_break_threshold,
+        )
+        self.max_exempt_rounds = max(1, max_exempt_rounds)
+        self.max_message_calls_per_turn = max(1, max_message_calls_per_turn)
         self.model_fallbacks = model_fallbacks or []
         self.failover_retry_once = failover_retry_once
         self.context_guard_min_tokens = max(1024, context_guard_min_tokens)
@@ -461,6 +472,24 @@ class AgentLoop:
 
         self._running = False
         self._register_default_tools()
+
+    @staticmethod
+    def _normalize_loop_thresholds(
+        *,
+        loop_window: int,
+        loop_warn_threshold: int,
+        loop_critical_threshold: int,
+        loop_break_threshold: int,
+    ) -> tuple[int, int, int, int]:
+        window = max(6, loop_window)
+        warn = max(2, loop_warn_threshold)
+        critical = max(warn, loop_critical_threshold)
+        breaker = max(critical, loop_break_threshold)
+        if breaker > window:
+            breaker = window
+            critical = min(critical, breaker)
+            warn = min(warn, critical)
+        return window, warn, critical, breaker
 
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
@@ -640,8 +669,11 @@ class AgentLoop:
             self.search_store.close()
         logger.info("Agent loop stopping")
 
+    # 跟踪已写入 os.environ 的敏感 key 名称，用于写入后遮蔽
+    _sensitive_env_keys: set[str] = set()
+
     def _update_provider_env(self, model: str, api_key: str | None, api_base: str | None) -> None:
-        """根据 registry 设置 provider 环境变量，避免硬编码。"""
+        """根据 registry 设置 provider 凭据，同时遮蔽环境变量防止 shell 泄漏。"""
         import os
         from nanobot.providers.registry import find_by_model
 
@@ -651,13 +683,21 @@ class AgentLoop:
             # 通过 registry 查找正确的 env_key 和 env_extras
             spec = find_by_model(model)
             if spec:
+                # 先写入让 litellm 等库初始化时能读取
                 os.environ[spec.env_key] = api_key
+                self._sensitive_env_keys.add(spec.env_key)
                 logger.debug(f"Set {spec.env_key} for model {model}")
                 resolved_base = api_base or spec.default_api_base or ""
                 for env_name, template in spec.env_extras:
                     value = template.replace("{api_key}", api_key).replace("{api_base}", resolved_base)
                     os.environ[env_name] = value
+                    self._sensitive_env_keys.add(env_name)
                     logger.debug(f"Set {env_name} for model {model}")
+
+                # 遮蔽已写入的敏感值，防止 shell 工具通过 env/printenv 泄漏
+                for key in self._sensitive_env_keys:
+                    if key in os.environ and len(os.environ[key]) > 8:
+                        os.environ[key] = os.environ[key][:4] + "***"
 
         # 始终更新 api_base，确保切换模型后 provider endpoint 正确重置
         self.provider.api_base = api_base
@@ -665,20 +705,24 @@ class AgentLoop:
     def _refresh_runtime_options(self, config) -> None:
         """Refresh loop controls from latest config without recreating the loop."""
         defaults = config.agents.defaults
+        self.max_iterations = max(1, defaults.max_tool_iterations)
         self.max_tokens = max(1, defaults.max_tokens)
         self.temperature = defaults.temperature
         self.idle_intervention = defaults.idle_intervention
         self.loop_detection_enabled = defaults.loop_detection_enabled
-        self.loop_window = max(6, defaults.loop_window)
-        self.loop_warn_threshold = max(2, defaults.loop_warn_threshold)
-        self.loop_critical_threshold = max(
+        (
+            self.loop_window,
             self.loop_warn_threshold,
-            defaults.loop_critical_threshold,
-        )
-        self.loop_break_threshold = max(
             self.loop_critical_threshold,
-            defaults.loop_break_threshold,
+            self.loop_break_threshold,
+        ) = self._normalize_loop_thresholds(
+            loop_window=defaults.loop_window,
+            loop_warn_threshold=defaults.loop_warn_threshold,
+            loop_critical_threshold=defaults.loop_critical_threshold,
+            loop_break_threshold=defaults.loop_break_threshold,
         )
+        self.max_exempt_rounds = max(1, defaults.max_exempt_rounds)
+        self.max_message_calls_per_turn = max(1, defaults.max_message_calls_per_turn)
         self.model_fallbacks = list(defaults.model_fallbacks)
         self.failover_retry_once = defaults.failover_retry_once
         self.context_guard_min_tokens = max(1024, defaults.context_guard_min_tokens)
@@ -1401,9 +1445,9 @@ class AgentLoop:
         required_no_tool_observed = False
         required_no_tool_streak = int(session.metadata.get("required_no_tool_streak", 0))
         consecutive_exempt_rounds = 0
-        max_exempt_rounds = 2
+        max_exempt_rounds = self.max_exempt_rounds
         message_tool_count = 0
-        max_message_calls = 2
+        max_message_calls = self.max_message_calls_per_turn
         execution_intent = _is_execution_intent(msg.content)
         active_model = current_model
         loop_detector = (
@@ -1625,13 +1669,12 @@ class AgentLoop:
                     consecutive_exempt_rounds = 0
 
                 nudge_text = (
-                    "根据工具返回结果决定下一步：可继续调用工具执行、"
-                    "先分析后调整方案，或在任务完成时给出总结。"
+                    "继续执行任务。可调用工具、分析结果或在完成后给出总结。"
                 )
                 if consecutive_exempt_rounds > 0:
                     nudge_text = (
-                        "若无必要操作，请直接输出最终结论并停止调用工具。"
-                        "不要再发送状态通知消息。"
+                        "如仍有未完成的步骤，继续执行。"
+                        "如已全部完成，给出最终总结即可。"
                     )
                 messages.append(
                     {

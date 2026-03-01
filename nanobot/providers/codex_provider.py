@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -80,6 +81,17 @@ class CodexProvider(LLMProvider):
             return "format"
         return "unknown"
 
+    @staticmethod
+    def _summarize_error_text(message: Any, max_chars: int = 240) -> str:
+        text = str(message or "").replace("\r", " ").replace("\n", " ").strip()
+        if not text:
+            return ""
+        text = re.sub(r"(?i)\bbearer\s+[A-Za-z0-9._-]+", "Bearer [REDACTED]", text)
+        text = re.sub(r"\b[a-fA-F0-9]{48,}\b", "[REDACTED]", text)
+        if len(text) > max_chars:
+            return f"{text[:max_chars]}..."
+        return text
+
     async def chat(
         self,
         messages: list[dict[str, Any]],
@@ -92,7 +104,16 @@ class CodexProvider(LLMProvider):
         del max_tokens  # Codex backend currently rejects max_output_tokens.
         del temperature  # Codex backend currently rejects temperature.
 
+        request_id = uuid.uuid4().hex[:10]
         target_model = self._normalize_model(model or self.default_model)
+        logger.info(
+            "Codex request start: req_id={}, model={}, tool_choice={}, messages={}, tools={}",
+            request_id,
+            target_model,
+            tool_choice,
+            len(messages),
+            len(tools or []),
+        )
         payload, dropped = convert_messages_to_payload(
             messages=messages,
             model=target_model,
@@ -101,14 +122,29 @@ class CodexProvider(LLMProvider):
             enable_server_compaction=self.server_compaction_enabled,
             compact_threshold=self.compact_threshold,
         )
+        input_items = payload.get("input", [])
+        logger.debug(
+            "Codex payload prepared: req_id={}, input_items={}, server_compaction={}",
+            request_id,
+            len(input_items) if isinstance(input_items, list) else 0,
+            self.server_compaction_enabled,
+        )
         if dropped:
-            logger.warning("Removed {} orphan function_call_output items before Codex request", dropped)
+            logger.warning(
+                "Removed {} orphan function_call_output items before Codex request (req_id={})",
+                dropped,
+                request_id,
+            )
 
         try:
             await self.auth.ensure_valid()
             headers = self.auth.get_headers()
             status_code, result = await self._send_request(payload, headers)
             if status_code == 401:
+                logger.warning(
+                    "Codex request unauthorized, forcing token refresh once (req_id={})",
+                    request_id,
+                )
                 await self.auth.ensure_valid(force=True)
                 headers = self.auth.get_headers()
                 status_code, result = await self._send_request(payload, headers)
@@ -116,14 +152,32 @@ class CodexProvider(LLMProvider):
             if status_code >= 400:
                 body = str(result)
                 error_type = self._classify_error(status_code, body)
+                logger.warning(
+                    "Codex request failed: req_id={}, status={}, type={}, detail={}",
+                    request_id,
+                    status_code,
+                    error_type,
+                    self._summarize_error_text(body),
+                )
                 return LLMResponse(
                     content=f"Error calling LLM: ChatGPT API error ({status_code}): {body}",
                     finish_reason="error",
                     error_type=error_type,
                 )
 
-            parsed = result if isinstance(result, _ParsedSSE) else _ParsedSSE(content=None, tool_calls=[], reasoning_content=None)
+            parsed = (
+                result
+                if isinstance(result, _ParsedSSE)
+                else _ParsedSSE(content=None, tool_calls=[], reasoning_content=None)
+            )
             finish_reason = "tool_calls" if parsed.tool_calls else "stop"
+            logger.info(
+                "Codex request success: req_id={}, finish_reason={}, tool_calls={}, content_chars={}",
+                request_id,
+                finish_reason,
+                len(parsed.tool_calls),
+                len(parsed.content or ""),
+            )
             return LLMResponse(
                 content=parsed.content,
                 tool_calls=parsed.tool_calls,
@@ -132,6 +186,12 @@ class CodexProvider(LLMProvider):
             )
         except RuntimeError as e:
             msg = f"Error calling LLM: {e}"
+            logger.warning(
+                "Codex runtime error: req_id={}, type={}, detail={}",
+                request_id,
+                self._classify_error(None, str(e)),
+                self._summarize_error_text(str(e)),
+            )
             return LLMResponse(
                 content=msg,
                 finish_reason="error",
@@ -139,13 +199,19 @@ class CodexProvider(LLMProvider):
             )
         except (httpx.HTTPError, OSError, ValueError, json.JSONDecodeError) as e:
             msg = f"Error calling LLM: {e}"
+            logger.warning(
+                "Codex transport/parsing error: req_id={}, type={}, detail={}",
+                request_id,
+                self._classify_error(None, str(e)),
+                self._summarize_error_text(str(e)),
+            )
             return LLMResponse(
                 content=msg,
                 finish_reason="error",
                 error_type=self._classify_error(None, str(e)),
             )
         except Exception as e:
-            logger.exception("Unexpected Codex provider failure")
+            logger.exception("Unexpected Codex provider failure (req_id={})", request_id)
             msg = f"Error calling LLM: Unexpected LLM failure: {e}"
             return LLMResponse(
                 content=msg,

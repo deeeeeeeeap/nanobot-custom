@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -27,6 +29,13 @@ class CodexTokens:
 
 class CodexAuth:
     """Load, refresh, and persist Codex CLI tokens."""
+
+    _KV_SECRET_RE = re.compile(
+        r"(?i)\b(access_token|refresh_token|id_token|authorization|api[_-]?key|token|password)\b"
+        r"\s*[:=]\s*([^\s\"'`,;]+)"
+    )
+    _BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._-]+")
+    _GENERIC_SECRET_RE = re.compile(r"\b[a-fA-F0-9]{48,}\b")
 
     def __init__(
         self,
@@ -139,16 +148,23 @@ class CodexAuth:
             async with httpx.AsyncClient(timeout=20.0) as client:
                 response = await client.post(self.refresh_url, json=payload, headers=headers)
             if response.status_code != 200:
-                logger.warning("Codex HTTP refresh failed with status {}", response.status_code)
+                logger.warning(
+                    "Codex HTTP refresh failed: status={}, body={}",
+                    response.status_code,
+                    self._summarize_text(response.text),
+                )
                 return False
             data = response.json()
         except (httpx.HTTPError, json.JSONDecodeError, ValueError) as e:
-            logger.warning("Codex HTTP refresh failed: {}", e)
+            logger.warning("Codex HTTP refresh failed: {}", self._summarize_text(str(e)))
             return False
 
         access_token = str(data.get("access_token") or "").strip()
         if not access_token:
-            logger.warning("Codex HTTP refresh response missing access_token")
+            logger.warning(
+                "Codex HTTP refresh response missing access_token; keys={}",
+                sorted(data.keys()),
+            )
             return False
         refresh_token_new = str(data.get("refresh_token") or "").strip()
         account_id = str(data.get("account_id") or self._tokens.account_id).strip()
@@ -171,9 +187,10 @@ class CodexAuth:
             code, stdout, stderr = await asyncio.to_thread(self._run_cli_command, cmd)
             if code != 0:
                 logger.warning(
-                    "Codex CLI refresh command failed: {} (stderr={})",
+                    "Codex CLI refresh command failed: {} (exit_code={}, stderr={})",
                     " ".join(cmd),
-                    stderr.strip()[:240],
+                    code,
+                    self._summarize_text(stderr),
                 )
                 continue
             self.load()
@@ -181,9 +198,11 @@ class CodexAuth:
                 logger.info("Codex token refreshed via CLI command: {}", " ".join(cmd))
                 return True
             logger.warning(
-                "Codex CLI command succeeded but auth.json still has no access_token: {} (stdout={})",
+                "Codex CLI command succeeded but auth.json still has no access_token: {} "
+                "(stdout={}, stderr={})",
                 " ".join(cmd),
-                stdout.strip()[:240],
+                self._summarize_text(stdout),
+                self._summarize_text(stderr),
             )
         return False
 
@@ -200,6 +219,29 @@ class CodexAuth:
             return proc.returncode, proc.stdout or "", proc.stderr or ""
         except OSError as e:
             return 1, "", str(e)
+
+    @classmethod
+    def _redact_secrets(cls, text: str) -> str:
+        normalized = str(text or "").replace("\r", " ").replace("\n", " ").strip()
+        if not normalized:
+            return ""
+        redacted = cls._KV_SECRET_RE.sub(lambda m: f"{m.group(1)}=[REDACTED]", normalized)
+        redacted = cls._BEARER_RE.sub("Bearer [REDACTED]", redacted)
+        redacted = cls._GENERIC_SECRET_RE.sub("[REDACTED]", redacted)
+        return redacted
+
+    @classmethod
+    def _summarize_text(cls, text: str, max_preview_chars: int = 160) -> str:
+        raw = str(text or "").strip()
+        if not raw:
+            return "len=0"
+        redacted = cls._redact_secrets(raw)
+        digest = hashlib.sha1(redacted.encode("utf-8", errors="ignore")).hexdigest()[:10]
+        if len(redacted) > max_preview_chars:
+            preview = f"{redacted[:max_preview_chars]}..."
+        else:
+            preview = redacted
+        return f"len={len(raw)} sha1={digest} preview={preview!r}"
 
     async def _save(self) -> None:
         await asyncio.to_thread(self._save_sync)

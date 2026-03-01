@@ -650,7 +650,7 @@ async def test_message_only_loop_breaks_within_exempt_limit(monkeypatch, tmp_pat
     monkeypatch.setattr("nanobot.agent.loop.detect_hallucination", lambda *a, **k: _NoHallucination())
 
     provider = MessageOnlyProvider()
-    loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path, idle_intervention=True)
+    loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path, idle_intervention=True, max_exempt_rounds=2)
 
     reply = await loop.process_direct("开始执行", channel="telegram", chat_id="610")
     assert "任务状态更新 #2" in reply
@@ -685,7 +685,7 @@ async def test_message_tool_quota_short_circuit(monkeypatch, tmp_path: Path) -> 
     (tmp_path / "note.txt").write_text("quota-check", encoding="utf-8")
 
     provider = MessageQuotaProvider()
-    loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path, idle_intervention=True)
+    loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path, idle_intervention=True, max_message_calls_per_turn=2, max_exempt_rounds=2)
 
     reply = await loop.process_direct("开始执行", channel="telegram", chat_id="612")
     assert "任务状态更新 #3" in reply
@@ -701,11 +701,11 @@ async def test_nudge_changes_after_exempt_round(monkeypatch, tmp_path: Path) -> 
     monkeypatch.setattr("nanobot.agent.loop.detect_hallucination", lambda *a, **k: _NoHallucination())
 
     provider = MessageOnlyProvider()
-    loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path, idle_intervention=True)
+    loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path, idle_intervention=True, max_exempt_rounds=2)
     await loop.process_direct("开始执行", channel="telegram", chat_id="614")
     assert len(provider.observed_messages) >= 2
     assert provider.observed_messages[1][-1]["role"] == "user"
-    assert "若无必要操作，请直接输出最终结论并停止调用工具" in provider.observed_messages[1][-1]["content"]
+    assert "如已全部完成，给出最终总结即可" in provider.observed_messages[1][-1]["content"]
 
 
 def test_loop_detector_tool_name_frequency() -> None:
