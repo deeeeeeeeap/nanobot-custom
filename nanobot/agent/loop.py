@@ -622,14 +622,14 @@ class AgentLoop:
                     try:
                         reporter = self.reporter_factory(msg.channel, msg.chat_id)
                     except (TypeError, ValueError, RuntimeError) as e:
-                        logger.warning(f"鍒涘缓鐘舵€佹姤鍛婂櫒澶辫触: {e}")
+                        logger.warning(f"创建状态报告器失败: {e}")
 
                 # Process one inbound message.
                 try:
                     response = await self._process_message(msg, reporter=reporter)
 
                     if reporter:
-                        await reporter.finalize(delete_status=True)
+                        await reporter.finalize(delete_status=False)
 
                     if response:
                         await self.bus.publish_outbound(response)
