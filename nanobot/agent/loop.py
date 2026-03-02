@@ -680,7 +680,9 @@ class AgentLoop:
                         await reporter.finalize(delete_status=False)
 
                     if response:
-                        await self.bus.publish_outbound(response)
+                        # 跳过已通过 message tool 实时发送过的内容，防止重复
+                        if not response.metadata.get("_already_sent_via_tool"):
+                            await self.bus.publish_outbound(response)
                 except (NanobotError, RuntimeError, ValueError, OSError) as e:
                     logger.error(
                         "Message processing failed "
@@ -1578,6 +1580,7 @@ class AgentLoop:
         consecutive_exempt_rounds = 0
         max_exempt_rounds = self.max_exempt_rounds
         message_tool_count = 0
+        already_sent_via_tool = False
         max_message_calls = self.max_message_calls_per_turn
         execution_intent = _is_execution_intent(msg.content)
         active_model = current_model
@@ -1801,6 +1804,8 @@ class AgentLoop:
                             consecutive_exempt_rounds,
                             meaningful_tools_called,
                         )
+                        # 注意：message tool 已通过 send_callback 实时发送过内容，
+                        # 使用 _already_sent_via_tool 标记防止 run() 重复发送。
                         last_msg_content = None
                         for tc in reversed(response.tool_calls):
                             if tc.name in _IDLE_EXEMPT_TOOLS:
@@ -1808,6 +1813,10 @@ class AgentLoop:
                                 if last_msg_content:
                                     break
                         final_content = response.content or last_msg_content or ""
+                        # 如果最终内容来自 message tool（而非 response.content），
+                        # 标记为已发送，run() 中将跳过 publish_outbound。
+                        if not response.content and last_msg_content:
+                            already_sent_via_tool = True
                         final_reasoning_content = response.reasoning_content or None
                         final_thinking_blocks = response.thinking_blocks or None
                         loop_exit_reason = "exempt_round_exit"
@@ -1945,11 +1954,15 @@ class AgentLoop:
         self._maybe_schedule_session_compression(session)
         self.sessions.save(session)
 
+        out_metadata = dict(msg.metadata or {})
+        if already_sent_via_tool:
+            out_metadata["_already_sent_via_tool"] = True
+
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
             content=final_content,
-            metadata=msg.metadata or {},
+            metadata=out_metadata,
         )
 
     async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage | None:
