@@ -1,4 +1,4 @@
-﻿"""Agent loop: the core processing engine."""
+"""Agent loop: the core processing engine."""
 from __future__ import annotations
 
 import asyncio
@@ -1363,13 +1363,13 @@ class AgentLoop:
                     "reasoning_effort": self.reasoning_effort,
                 }
                 try:
-                    response = await provider.chat_with_retry(**chat_kwargs)
+                    response = await provider._safe_chat(**chat_kwargs)
                 except TypeError as exc:
                     # Backward compatibility for providers/tests not yet upgraded.
                     if "reasoning_effort" not in str(exc):
                         raise
                     chat_kwargs.pop("reasoning_effort", None)
-                    response = await provider.chat_with_retry(**chat_kwargs)
+                    response = await provider._safe_chat(**chat_kwargs)
                 last_response = response
                 active_model = model_name
                 if response.finish_reason != "error":
