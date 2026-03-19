@@ -47,7 +47,7 @@ class MemoryExtractor:
                 "output_language": self._output_language,
             },
         )
-        response = await self._provider.chat(
+        response = await self._provider.chat_with_retry(
             messages=[
                 {"role": "system", "content": "你是严格的 JSON 提取器。只输出 JSON。"},
                 {"role": "user", "content": prompt},
@@ -55,22 +55,22 @@ class MemoryExtractor:
             model=self._model,
         )
         payload = self._parse_json_payload(response.content or "")
+        raw_memories = payload.get("memories")
+        if not isinstance(raw_memories, list):
+            logger.warning("Memory extraction rejected: memories payload is not a list")
+            return []
         candidates: list[CandidateMemory] = []
-        for item in payload.get("memories", []):
-            category = self._parse_category(item.get("category", "patterns"))
-            abstract = str(item.get("abstract", "")).strip()
-            overview = str(item.get("overview", "")).strip()
-            content = str(item.get("content", "")).strip()
-            if not content:
+        for item in raw_memories:
+            normalized = self._validate_memory_item(item)
+            if normalized is None:
+                logger.warning("Memory extraction rejected: invalid or incomplete memory payload item")
                 continue
-            if not abstract:
-                abstract = content.splitlines()[0][:100]
             candidates.append(
                 CandidateMemory(
-                    category=category,
-                    abstract=abstract,
-                    overview=overview or abstract,
-                    content=content,
+                    category=normalized["category"],
+                    abstract=normalized["abstract"],
+                    overview=normalized["overview"],
+                    content=normalized["content"],
                     source_session=session_key,
                     language=self._output_language,
                 )
@@ -117,7 +117,7 @@ class MemoryExtractor:
             },
         )
         try:
-            response = await self._provider.chat(
+            response = await self._provider.chat_with_retry(
                 messages=[
                     {"role": "system", "content": "你是记忆合并器。输出纯文本。"},
                     {"role": "user", "content": prompt},
@@ -142,11 +142,40 @@ class MemoryExtractor:
         return "\n".join(lines)
 
     @staticmethod
-    def _parse_category(value: str) -> MemoryCategory:
+    def _parse_category(value: Any) -> MemoryCategory | None:
         try:
-            return MemoryCategory(str(value).strip().lower())
+            if not isinstance(value, str):
+                return None
+            return MemoryCategory(value.strip().lower())
         except ValueError:
-            return MemoryCategory.PATTERNS
+            return None
+
+    @staticmethod
+    def _coerce_text(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        text = value.strip()
+        return text or None
+
+    @classmethod
+    def _validate_memory_item(cls, item: Any) -> dict[str, Any] | None:
+        if not isinstance(item, dict):
+            return None
+
+        category = cls._parse_category(item.get("category"))
+        abstract = cls._coerce_text(item.get("abstract"))
+        overview = cls._coerce_text(item.get("overview"))
+        content = cls._coerce_text(item.get("content"))
+
+        if category is None or abstract is None or overview is None or content is None:
+            return None
+
+        return {
+            "category": category,
+            "abstract": abstract,
+            "overview": overview,
+            "content": content,
+        }
 
     @staticmethod
     def _extract_json_text(text: str) -> str:
@@ -179,4 +208,3 @@ class MemoryExtractor:
             f"- 来源会话: {session_key}\n"
             f"- 语言: {candidate.language}\n"
         )
-

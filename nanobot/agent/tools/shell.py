@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from nanobot.agent.tools.base import Tool
+from nanobot.security.network import contains_internal_url
 
 
 class ExecTool(Tool):
@@ -15,19 +16,51 @@ class ExecTool(Tool):
     MAX_TIMEOUT = 600
     MAX_OUTPUT_LEN = 10000
     SUBCOMMAND_PATTERN = re.compile(r"\$\(([^()]*)\)")
-    # 子命令白名单：运维安全命令集
     SUBCOMMAND_WHITELIST = {
-        "date", "pwd", "whoami", "hostname", "cat", "echo",
-        # 文本处理
-        "grep", "awk", "sed", "head", "tail", "wc", "cut", "sort", "uniq", "tr",
-        # 系统信息
-        "id", "uname", "uptime", "free", "df", "du", "ps", "lsof",
-        # 网络诊断
-        "ip", "ss", "nstat", "tc", "ping", "dig", "nslookup", "curl",
-        # 系统配置（只读）
-        "sysctl", "lscpu", "lsblk", "mount", "findmnt",
-        # 文件操作（安全）
-        "ls", "find", "stat", "file", "basename", "dirname", "realpath",
+        "date",
+        "pwd",
+        "whoami",
+        "hostname",
+        "cat",
+        "echo",
+        "grep",
+        "awk",
+        "sed",
+        "head",
+        "tail",
+        "wc",
+        "cut",
+        "sort",
+        "uniq",
+        "tr",
+        "id",
+        "uname",
+        "uptime",
+        "free",
+        "df",
+        "du",
+        "ps",
+        "lsof",
+        "ip",
+        "ss",
+        "nstat",
+        "tc",
+        "ping",
+        "dig",
+        "nslookup",
+        "curl",
+        "sysctl",
+        "lscpu",
+        "lsblk",
+        "mount",
+        "findmnt",
+        "ls",
+        "find",
+        "stat",
+        "file",
+        "basename",
+        "dirname",
+        "realpath",
     }
 
     def __init__(
@@ -41,9 +74,7 @@ class ExecTool(Tool):
         self.timeout = timeout
         self.working_dir = working_dir
         self.deny_patterns = deny_patterns or [
-            # rm -rf / del /f 已移除：bot 需要清理临时文件的权限
             r"\b(mkfs|diskpart)\b",
-            # Block standalone "format" command only, allow flags like "--format=json".
             r"(?:^|[;&|]\s*)format(?:\s|$)",
             r"\bdd\s+if=",
             r">\s*/dev/sd",
@@ -53,10 +84,8 @@ class ExecTool(Tool):
         self.allow_patterns = allow_patterns or []
         self.restrict_to_workspace = restrict_to_workspace
         self.injection_patterns = [
-            r"`[^`]+`",     # 反引号命令替换
-            r"\x00",        # null byte 注入
-            # 注意：已移除 [\r\n] 换行拦截——LLM 生成的多行命令是合法的，
-            # 真正危险的命令已被 deny_patterns 拦截。
+            r"`[^`]+`",
+            r"\x00",
         ]
 
     @property
@@ -117,7 +146,6 @@ class ExecTool(Tool):
                 )
             except asyncio.TimeoutError:
                 process.kill()
-                # Ensure process resources are reclaimed after kill.
                 try:
                     await asyncio.wait_for(process.wait(), timeout=5.0)
                 except asyncio.TimeoutError:
@@ -152,43 +180,51 @@ class ExecTool(Tool):
         cmd = command.strip()
         lower = cmd.lower()
 
-        # 规则 DENY-xxx：拦截高危命令模式
         for i, pattern in enumerate(self.deny_patterns):
             if re.search(pattern, lower):
                 return f"Error: Command blocked by safety guard (rule DENY-{i}: dangerous pattern '{pattern}')"
 
-        # 规则 SUBCMD：子命令替换检查
         subcommand_error = self._validate_subcommand_substitution(cmd, cwd)
         if subcommand_error:
             return subcommand_error
 
-        # 规则 INJ-xxx：注入模式检查
         for i, pattern in enumerate(self.injection_patterns):
             if re.search(pattern, cmd):
                 return f"Error: Command blocked by safety guard (rule INJ-{i}: injection pattern '{pattern}')"
 
-        # 规则 ALLOWLIST：白名单检查
         if self.allow_patterns and not any(re.search(p, lower) for p in self.allow_patterns):
             return "Error: Command blocked by safety guard (rule ALLOWLIST: not in allowlist)"
 
-        # 规则 WORKSPACE-xxx：工作目录限制检查
+        if contains_internal_url(cmd):
+            return "Error: Command blocked by safety guard (internal/private URL detected)"
+
         if self.restrict_to_workspace:
             if re.search(r"(^|[\\/])\.\.([\\/]|$)", cmd):
                 return "Error: Command blocked by safety guard (rule WORKSPACE-TRAVERSAL: path traversal detected)"
 
             cwd_path = Path(cwd).resolve()
-            win_paths = re.findall(r"[A-Za-z]:\\[^\\\"']+", cmd)
-            posix_paths = re.findall(r"(?:^|[\s|>])(/[^\s\"'>]+)", cmd)
-
-            for raw in win_paths + posix_paths:
+            for raw in self._extract_workspace_paths(cmd):
                 try:
-                    p = Path(raw.strip()).resolve()
+                    expanded = os.path.expandvars(raw.strip())
+                    path = Path(expanded).expanduser().resolve()
                 except (OSError, RuntimeError, ValueError):
                     continue
-                if p.is_absolute() and cwd_path not in p.parents and p != cwd_path:
-                    return f"Error: Command blocked by safety guard (rule WORKSPACE-PATH: '{raw.strip()}' outside working dir)"
+
+                if path.is_absolute() and cwd_path not in path.parents and path != cwd_path:
+                    return (
+                        "Error: Command blocked by safety guard "
+                        f"(rule WORKSPACE-PATH: '{raw.strip()}' outside working dir)"
+                    )
 
         return None
+
+    @staticmethod
+    def _extract_workspace_paths(command: str) -> list[str]:
+        """Extract absolute and home-relative path tokens from a command string."""
+        win_paths = re.findall(r"[A-Za-z]:\\[^\\\"']+", command)
+        posix_paths = re.findall(r"(?:^|[\s|>])(/[^\s\"'>]+)", command)
+        home_paths = re.findall(r"(?:^|[\s|>'\"])(~[^\s\"'>;|<]*)", command)
+        return win_paths + posix_paths + home_paths
 
     def _validate_subcommand_substitution(self, command: str, cwd: str) -> str | None:
         """Allow only a narrow `$()` subset to reduce false positives without opening RCE paths."""

@@ -1,12 +1,15 @@
 """Web tools: web_search and web_fetch.
 
-借鉴 OpenClaw 的改进：
-- 结果缓存（避免重复搜索）
-- 地区和语言参数
-- 时效过滤（freshness）
-- 外部内容安全标记
+Custom additions:
+- result cache
+- country/freshness filtering
+- SSRF/network safety checks
+- optional provider/fallback support
 """
 
+from __future__ import annotations
+
+import asyncio
 import html
 import json
 import os
@@ -18,77 +21,77 @@ from urllib.parse import urlparse
 import httpx
 
 from nanobot.agent.tools.base import Tool
+from nanobot.security.network import validate_resolved_url, validate_url_target
 
-# 共享常量
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36"
-MAX_REDIRECTS = 5  # 限制重定向次数防止 DoS 攻击
+MAX_REDIRECTS = 5
 
-# 缓存设置（借鉴 OpenClaw）
-SEARCH_CACHE: dict[str, tuple[float, str]] = {}  # {cache_key: (timestamp, result)}
-CACHE_TTL_SECONDS = 300  # 缓存 5 分钟
-
-# Brave Search 时效过滤值
-FRESHNESS_VALUES = {"pd", "pw", "pm", "py"}  # past day/week/month/year
+SEARCH_CACHE: dict[str, tuple[float, str]] = {}
+CACHE_TTL_SECONDS = 300
+FRESHNESS_VALUES = {"pd", "pw", "pm", "py"}
 
 
 def _strip_tags(text: str) -> str:
-    """移除 HTML 标签并解码实体。"""
-    text = re.sub(r'<script[\s\S]*?</script>', '', text, flags=re.I)
-    text = re.sub(r'<style[\s\S]*?</style>', '', text, flags=re.I)
-    text = re.sub(r'<[^>]+>', '', text)
+    """Remove HTML tags and decode entities."""
+    text = re.sub(r"<script[\s\S]*?</script>", "", text, flags=re.I)
+    text = re.sub(r"<style[\s\S]*?</style>", "", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", "", text)
     return html.unescape(text).strip()
 
 
 def _normalize(text: str) -> str:
-    """规范化空白字符。"""
-    text = re.sub(r'[ \t]+', ' ', text)
-    return re.sub(r'\n{3,}', '\n\n', text).strip()
+    """Normalize whitespace."""
+    text = re.sub(r"[ \t]+", " ", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 def _validate_url(url: str) -> tuple[bool, str]:
-    """验证 URL：必须是 http(s) 且有有效域名。"""
+    """Validate URL scheme and basic shape."""
     try:
         p = urlparse(url)
-        if p.scheme not in ('http', 'https'):
-            return False, f"仅支持 http/https，收到 '{p.scheme or 'none'}'"
+        if p.scheme not in ("http", "https"):
+            return False, f"Only http/https allowed, got '{p.scheme or 'none'}'"
         if not p.netloc:
-            return False, "缺少域名"
+            return False, "Missing domain"
         return True, ""
     except Exception as e:
         return False, str(e)
 
 
+def _validate_url_safe(url: str) -> tuple[bool, str]:
+    """Validate URL with SSRF protections."""
+    return validate_url_target(url)
+
+
 def _wrap_external_content(text: str, source: str = "web") -> str:
-    """
-    标记外部内容（借鉴 OpenClaw 的安全实践）。
-    防止搜索结果中的 prompt injection。
-    """
-    # 移除可能的控制字符
-    cleaned = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', text)
-    return cleaned
+    """Strip control characters from external content."""
+    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
 
 
-def _get_cache_key(query: str, count: int, country: str | None, freshness: str | None) -> str:
-    """生成缓存键。"""
-    return f"{query}:{count}:{country or 'default'}:{freshness or 'default'}"
+def _get_cache_key(
+    query: str,
+    count: int,
+    country: str | None,
+    freshness: str | None,
+    provider: str = "brave",
+) -> str:
+    """Build a cache key."""
+    return f"{provider}:{query}:{count}:{country or 'default'}:{freshness or 'default'}"
 
 
 def _read_cache(key: str) -> str | None:
-    """读取缓存，如果过期则返回 None。"""
+    """Read a cached result if still fresh."""
     if key in SEARCH_CACHE:
         timestamp, result = SEARCH_CACHE[key]
         if time.time() - timestamp < CACHE_TTL_SECONDS:
             return result
-        # 过期，删除
         del SEARCH_CACHE[key]
     return None
 
 
 def _write_cache(key: str, result: str) -> None:
-    """写入缓存。"""
-    # 限制缓存大小（防止内存溢出）
+    """Write a cached result and keep the cache bounded."""
     if len(SEARCH_CACHE) > 100:
-        # 删除最旧的一半
         sorted_keys = sorted(SEARCH_CACHE.keys(), key=lambda k: SEARCH_CACHE[k][0])
         for old_key in sorted_keys[:50]:
             del SEARCH_CACHE[old_key]
@@ -96,220 +99,491 @@ def _write_cache(key: str, result: str) -> None:
 
 
 def _normalize_freshness(value: str | None) -> str | None:
-    """
-    规范化 freshness 参数（借鉴 OpenClaw）。
-    支持: pd (过去24h), pw (过去一周), pm (过去一月), py (过去一年)
-    或日期范围: YYYY-MM-DDtoYYYY-MM-DD
-    """
+    """Normalize freshness values used by Brave Search."""
     if not value:
         return None
     trimmed = value.strip().lower()
     if trimmed in FRESHNESS_VALUES:
         return trimmed
-    # 检查日期范围格式
-    if re.match(r'^\d{4}-\d{2}-\d{2}to\d{4}-\d{2}-\d{2}$', trimmed):
+    if re.match(r"^\d{4}-\d{2}-\d{2}to\d{4}-\d{2}-\d{2}$", trimmed):
         return trimmed
     return None
 
 
+def _format_search_results(query: str, items: list[dict[str, Any]], n: int) -> str:
+    """Format generic provider results."""
+    if not items:
+        return json.dumps({"query": query, "count": 0, "message": f"No results for '{query}'"})
+
+    lines = [f"Results for: {query}\n"]
+    for i, item in enumerate(items[:n], 1):
+        title = _normalize(_strip_tags(str(item.get("title", ""))))
+        url = str(item.get("url", ""))
+        snippet = _normalize(
+            _strip_tags(
+                str(
+                    item.get("content")
+                    or item.get("description")
+                    or item.get("body")
+                    or ""
+                )
+            )
+        )
+        lines.append(f"{i}. {title}")
+        lines.append(f"   {url}")
+        if snippet:
+            lines.append(f"   {snippet}")
+    return "\n".join(lines)
+
+
 class WebSearchTool(Tool):
-    """使用 Brave Search API 搜索网络（已增强）。"""
-    
+    """Search the web using Brave or an optional fallback provider."""
+
     name = "web_search"
-    description = (
-        "搜索网络获取最新信息。支持地区限定和时效过滤。"
-        "返回标题、URL 和摘要。"
-    )
+    description = "Search the web. Returns titles, URLs, snippets, and optional freshness/country filtering."
     parameters = {
         "type": "object",
         "properties": {
             "query": {
-                "type": "string", 
-                "description": "搜索查询词"
+                "type": "string",
+                "description": "Search query",
             },
             "count": {
-                "type": "integer", 
-                "description": "结果数量 (1-10)", 
-                "minimum": 1, 
-                "maximum": 10
+                "type": "integer",
+                "description": "Result count (1-10)",
+                "minimum": 1,
+                "maximum": 10,
             },
             "country": {
                 "type": "string",
-                "description": "国家/地区代码 (如 US, CN, DE, ALL)，默认 US"
+                "description": "Country/region code (e.g. US, CN, DE, ALL). Defaults to US.",
             },
             "freshness": {
                 "type": "string",
-                "description": "时效过滤: pd=过去24小时, pw=过去一周, pm=过去一月, py=过去一年"
-            }
+                "description": "Freshness filter: pd, pw, pm, py, or YYYY-MM-DDtoYYYY-MM-DD",
+            },
         },
-        "required": ["query"]
+        "required": ["query"],
     }
-    
-    def __init__(self, api_key: str | None = None, max_results: int = 5, timeout: float = 15.0):
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        max_results: int = 5,
+        timeout: float = 15.0,
+        provider: str | None = None,
+        fallback_provider: str | None = None,
+        proxy: str | None = None,
+    ):
         self.api_key = api_key or os.environ.get("BRAVE_API_KEY", "")
         self.max_results = max_results
         self.timeout = timeout
-    
+        self.provider = (provider or os.environ.get("WEB_SEARCH_PROVIDER", "brave")).strip().lower() or "brave"
+        self.fallback_provider = (fallback_provider or os.environ.get("WEB_SEARCH_FALLBACK_PROVIDER", "")).strip().lower()
+        self.proxy = proxy
+
     async def execute(
-        self, 
-        query: str, 
-        count: int | None = None, 
+        self,
+        query: str,
+        count: int | None = None,
         country: str | None = None,
         freshness: str | None = None,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> str:
-        if not self.api_key:
-            return json.dumps({
-                "error": "missing_api_key",
-                "message": "BRAVE_API_KEY 未配置。请在配置文件中设置 Brave Search API 密钥。"
-            })
-        
         n = min(max(count or self.max_results, 1), 10)
         normalized_freshness = _normalize_freshness(freshness)
-        
-        # 检查缓存
-        cache_key = _get_cache_key(query, n, country, normalized_freshness)
+        cache_key = _get_cache_key(query, n, country, normalized_freshness, self.provider)
+
         cached = _read_cache(cache_key)
         if cached:
             return cached + "\n\n(cached)"
-        
+
+        ok, result = await self._search_provider(query, n, country, normalized_freshness, self.provider)
+        if not ok and self.fallback_provider and self.fallback_provider != self.provider:
+            fallback_ok, fallback_result = await self._search_provider(
+                query,
+                n,
+                country,
+                normalized_freshness,
+                self.fallback_provider,
+            )
+            if fallback_ok:
+                ok, result = True, fallback_result
+
+        if ok:
+            _write_cache(cache_key, result)
+        return result
+
+    async def _search_provider(
+        self,
+        query: str,
+        n: int,
+        country: str | None,
+        freshness: str | None,
+        provider: str,
+    ) -> tuple[bool, str]:
+        provider = provider.strip().lower()
+        if provider == "brave":
+            return await self._search_brave(query, n, country, freshness)
+        if provider == "duckduckgo":
+            return await self._search_duckduckgo(query, n)
+        if provider == "tavily":
+            return await self._search_tavily(query, n)
+        if provider == "searxng":
+            return await self._search_searxng(query, n)
+        if provider == "jina":
+            return await self._search_jina(query, n)
+        return False, json.dumps({"error": "unknown_provider", "message": f"Unknown search provider '{provider}'"})
+
+    async def _search_brave(
+        self,
+        query: str,
+        n: int,
+        country: str | None,
+        freshness: str | None,
+    ) -> tuple[bool, str]:
+        api_key = self.api_key or os.environ.get("BRAVE_API_KEY", "")
+        if not api_key:
+            return False, json.dumps(
+                {
+                    "error": "missing_api_key",
+                    "message": "BRAVE_API_KEY is not configured.",
+                }
+            )
+
+        params: dict[str, Any] = {"q": query, "count": n}
+        if country:
+            params["country"] = country.upper()
+        if freshness:
+            params["freshness"] = freshness
+
         try:
-            # 构建请求参数
-            params: dict[str, Any] = {"q": query, "count": n}
-            if country:
-                params["country"] = country.upper()
-            if normalized_freshness:
-                params["freshness"] = normalized_freshness
-            
             start_time = time.time()
-            
-            async with httpx.AsyncClient() as client:
+            client_kwargs: dict[str, Any] = {}
+            if self.proxy:
+                client_kwargs["proxy"] = self.proxy
+            async with httpx.AsyncClient(**client_kwargs) as client:
                 r = await client.get(
                     "https://api.search.brave.com/res/v1/web/search",
                     params=params,
                     headers={
-                        "Accept": "application/json", 
-                        "X-Subscription-Token": self.api_key
+                        "Accept": "application/json",
+                        "X-Subscription-Token": api_key,
                     },
-                    timeout=self.timeout
+                    timeout=self.timeout,
                 )
                 r.raise_for_status()
-            
+
             elapsed_ms = int((time.time() - start_time) * 1000)
-            
             results = r.json().get("web", {}).get("results", [])
             if not results:
-                return json.dumps({
-                    "query": query,
-                    "count": 0,
-                    "message": f"未找到关于 '{query}' 的结果"
-                })
-            
-            # 格式化结果（使用安全包装）
-            lines = [f"搜索结果: {query} (用时 {elapsed_ms}ms)\n"]
+                return True, json.dumps(
+                    {
+                        "query": query,
+                        "count": 0,
+                        "message": f"No results found for '{query}'",
+                    }
+                )
+
+            lines = [f"Search results: {query} (took {elapsed_ms}ms)\n"]
             for i, item in enumerate(results[:n], 1):
-                title = _wrap_external_content(item.get('title', ''))
-                url = item.get('url', '')
-                desc = _wrap_external_content(item.get('description', ''))
-                age = item.get('age', '')
-                
+                title = _wrap_external_content(str(item.get("title", "")))
+                url = str(item.get("url", ""))
+                desc = _wrap_external_content(str(item.get("description", "")))
+                age = str(item.get("age", ""))
+
                 lines.append(f"{i}. {title}")
                 lines.append(f"   {url}")
                 if desc:
                     lines.append(f"   {desc}")
                 if age:
-                    lines.append(f"   发布时间: {age}")
-            
-            result = "\n".join(lines)
-            
-            # 写入缓存
-            _write_cache(cache_key, result)
-            
-            return result
-            
+                    lines.append(f"   Published: {age}")
+
+            return True, "\n".join(lines)
         except httpx.TimeoutException:
-            return json.dumps({"error": "timeout", "message": f"搜索超时 ({self.timeout}s)"})
+            return False, json.dumps({"error": "timeout", "message": f"Search timed out ({self.timeout}s)"})
         except httpx.HTTPStatusError as e:
-            return json.dumps({"error": "http_error", "status": e.response.status_code, "message": str(e)})
+            return False, json.dumps(
+                {"error": "http_error", "status": e.response.status_code, "message": str(e)}
+            )
         except Exception as e:
-            return json.dumps({"error": "unknown", "message": str(e)})
+            return False, json.dumps({"error": "unknown", "message": str(e)})
+
+    async def _search_duckduckgo(self, query: str, n: int) -> tuple[bool, str]:
+        try:
+            from ddgs import DDGS
+        except Exception as e:
+            return False, json.dumps({"error": "missing_dependency", "message": str(e)})
+
+        try:
+            ddgs = DDGS(timeout=10)
+            raw = await asyncio.to_thread(ddgs.text, query, max_results=n)
+            if not raw:
+                return True, json.dumps({"query": query, "count": 0, "message": f"No results for '{query}'"})
+
+            items = [
+                {
+                    "title": r.get("title", ""),
+                    "url": r.get("href", ""),
+                    "content": r.get("body", ""),
+                }
+                for r in raw
+            ]
+            return True, _format_search_results(query, items, n)
+        except Exception as e:
+            return False, json.dumps({"error": "duckduckgo_error", "message": str(e)})
+
+    async def _search_tavily(self, query: str, n: int) -> tuple[bool, str]:
+        api_key = os.environ.get("TAVILY_API_KEY", "")
+        if not api_key:
+            return False, json.dumps({"error": "missing_api_key", "message": "TAVILY_API_KEY is not configured."})
+
+        try:
+            client_kwargs: dict[str, Any] = {}
+            if self.proxy:
+                client_kwargs["proxy"] = self.proxy
+            async with httpx.AsyncClient(**client_kwargs) as client:
+                r = await client.post(
+                    "https://api.tavily.com/search",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    json={"query": query, "max_results": n},
+                    timeout=15.0,
+                )
+                r.raise_for_status()
+            return True, _format_search_results(query, r.json().get("results", []), n)
+        except Exception as e:
+            return False, json.dumps({"error": "tavily_error", "message": str(e)})
+
+    async def _search_searxng(self, query: str, n: int) -> tuple[bool, str]:
+        base_url = (os.environ.get("SEARXNG_BASE_URL", "")).strip()
+        if not base_url:
+            return False, json.dumps({"error": "missing_base_url", "message": "SEARXNG_BASE_URL is not configured."})
+
+        endpoint = f"{base_url.rstrip('/')}/search"
+        is_valid, error_msg = _validate_url_safe(endpoint)
+        if not is_valid:
+            return False, json.dumps({"error": "invalid_url", "message": error_msg})
+
+        try:
+            client_kwargs: dict[str, Any] = {}
+            if self.proxy:
+                client_kwargs["proxy"] = self.proxy
+            async with httpx.AsyncClient(**client_kwargs) as client:
+                r = await client.get(
+                    endpoint,
+                    params={"q": query, "format": "json"},
+                    headers={"User-Agent": USER_AGENT},
+                    timeout=10.0,
+                )
+                r.raise_for_status()
+            return True, _format_search_results(query, r.json().get("results", []), n)
+        except Exception as e:
+            return False, json.dumps({"error": "searxng_error", "message": str(e)})
+
+    async def _search_jina(self, query: str, n: int) -> tuple[bool, str]:
+        api_key = os.environ.get("JINA_API_KEY", "")
+        try:
+            headers = {"Accept": "application/json"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+
+            client_kwargs: dict[str, Any] = {}
+            if self.proxy:
+                client_kwargs["proxy"] = self.proxy
+            async with httpx.AsyncClient(**client_kwargs) as client:
+                r = await client.get(
+                    "https://s.jina.ai/",
+                    params={"q": query},
+                    headers=headers,
+                    timeout=15.0,
+                )
+                r.raise_for_status()
+
+            payload = r.json()
+            data = payload.get("data", [])
+            if isinstance(data, dict):
+                data = [data]
+
+            items = [
+                {
+                    "title": d.get("title", ""),
+                    "url": d.get("url", ""),
+                    "content": d.get("content", ""),
+                }
+                for d in data[:n]
+            ]
+            return True, _format_search_results(query, items, n)
+        except Exception as e:
+            return False, json.dumps({"error": "jina_error", "message": str(e)})
 
 
 class WebFetchTool(Tool):
-    """使用 Readability 抓取并提取 URL 内容。"""
-    
+    """Fetch a URL and extract readable content."""
+
     name = "web_fetch"
-    description = "抓取 URL 并提取可读内容 (HTML → markdown/text)。"
+    description = "Fetch URL and extract readable content (HTML -> markdown/text)."
     parameters = {
         "type": "object",
         "properties": {
-            "url": {"type": "string", "description": "要抓取的 URL"},
+            "url": {"type": "string", "description": "URL to fetch"},
             "extractMode": {"type": "string", "enum": ["markdown", "text"], "default": "markdown"},
-            "maxChars": {"type": "integer", "minimum": 100, "description": "最大字符数"}
+            "maxChars": {"type": "integer", "minimum": 100, "description": "Maximum character count"},
         },
-        "required": ["url"]
+        "required": ["url"],
     }
-    
-    def __init__(self, max_chars: int = 50000):
-        self.max_chars = max_chars
-    
-    async def execute(self, url: str, extractMode: str = "markdown", maxChars: int | None = None, **kwargs: Any) -> str:
-        from readability import Document
 
+    def __init__(
+        self,
+        max_chars: int = 50000,
+        provider: str | None = None,
+        fallback_provider: str | None = None,
+        proxy: str | None = None,
+    ):
+        self.max_chars = max_chars
+        self.provider = (provider or os.environ.get("WEB_FETCH_PROVIDER", "readability")).strip().lower() or "readability"
+        self.fallback_provider = (
+            fallback_provider or os.environ.get("WEB_FETCH_FALLBACK_PROVIDER", "")
+        ).strip().lower()
+        self.proxy = proxy
+
+    async def execute(
+        self,
+        url: str,
+        extractMode: str = "markdown",
+        maxChars: int | None = None,
+        **kwargs: Any,
+    ) -> str:
         max_chars = maxChars or self.max_chars
 
-        # 验证 URL
-        is_valid, error_msg = _validate_url(url)
+        is_valid, error_msg = _validate_url_safe(url)
         if not is_valid:
-            return json.dumps({"error": f"URL 验证失败: {error_msg}", "url": url})
+            return json.dumps({"error": f"URL validation failed: {error_msg}", "url": url})
+
+        provider = self.provider
+        if provider in {"jina", "auto"}:
+            jina_result = await self._fetch_jina(url, max_chars)
+            if jina_result is not None:
+                return jina_result
+            provider = self.fallback_provider or "readability"
+
+        if provider not in {"readability", "", "local"}:
+            if self.fallback_provider in {"readability", "local"}:
+                provider = "readability"
+            else:
+                return json.dumps({"error": "unknown_provider", "message": f"Unknown fetch provider '{provider}'", "url": url})
+
+        return await self._fetch_readability(url, extractMode, max_chars)
+
+    async def _fetch_jina(self, url: str, max_chars: int) -> str | None:
+        """Try Jina Reader first. Returns None on failure so the caller can fall back."""
+        try:
+            headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
+            jina_key = os.environ.get("JINA_API_KEY", "")
+            if jina_key:
+                headers["Authorization"] = f"Bearer {jina_key}"
+
+            client_kwargs: dict[str, Any] = {}
+            if self.proxy:
+                client_kwargs["proxy"] = self.proxy
+            async with httpx.AsyncClient(timeout=20.0, **client_kwargs) as client:
+                r = await client.get(f"https://r.jina.ai/{url}", headers=headers)
+                if r.status_code == 429:
+                    return None
+                r.raise_for_status()
+
+            data = r.json().get("data", {})
+            title = data.get("title", "")
+            text = data.get("content", "")
+            if not text:
+                return None
+
+            if title:
+                text = f"# {title}\n\n{text}"
+            truncated = len(text) > max_chars
+            if truncated:
+                text = text[:max_chars]
+
+            return json.dumps(
+                {
+                    "url": url,
+                    "finalUrl": data.get("url", url),
+                    "status": r.status_code,
+                    "extractor": "jina",
+                    "truncated": truncated,
+                    "length": len(text),
+                    "text": _wrap_external_content(text),
+                }
+            )
+        except Exception:
+            return None
+
+    async def _fetch_readability(self, url: str, extract_mode: str, max_chars: int) -> str:
+        """Fetch locally and extract with readability-lxml."""
+        from readability import Document
 
         try:
-            async with httpx.AsyncClient(
-                follow_redirects=True,
-                max_redirects=MAX_REDIRECTS,
-                timeout=30.0
-            ) as client:
+            client_kwargs: dict[str, Any] = {
+                "follow_redirects": True,
+                "max_redirects": MAX_REDIRECTS,
+                "timeout": 30.0,
+            }
+            if self.proxy:
+                client_kwargs["proxy"] = self.proxy
+
+            async with httpx.AsyncClient(**client_kwargs) as client:
                 r = await client.get(url, headers={"User-Agent": USER_AGENT})
                 r.raise_for_status()
-            
+
+            redir_ok, redir_err = validate_resolved_url(str(r.url))
+            if not redir_ok:
+                return json.dumps({"error": f"Redirect blocked: {redir_err}", "url": url})
+
             ctype = r.headers.get("content-type", "")
-            
-            # JSON
             if "application/json" in ctype:
                 text, extractor = json.dumps(r.json(), indent=2), "json"
-            # HTML
             elif "text/html" in ctype or r.text[:256].lower().startswith(("<!doctype", "<html")):
                 doc = Document(r.text)
-                content = self._to_markdown(doc.summary()) if extractMode == "markdown" else _strip_tags(doc.summary())
+                content = self._to_markdown(doc.summary()) if extract_mode == "markdown" else _strip_tags(doc.summary())
                 text = f"# {doc.title()}\n\n{content}" if doc.title() else content
                 extractor = "readability"
             else:
                 text, extractor = r.text, "raw"
-            
+
             truncated = len(text) > max_chars
             if truncated:
                 text = text[:max_chars]
-            
-            return json.dumps({
-                "url": url, 
-                "finalUrl": str(r.url), 
-                "status": r.status_code,
-                "extractor": extractor, 
-                "truncated": truncated, 
-                "length": len(text), 
-                "text": _wrap_external_content(text)
-            })
+
+            return json.dumps(
+                {
+                    "url": url,
+                    "finalUrl": str(r.url),
+                    "status": r.status_code,
+                    "extractor": extractor,
+                    "truncated": truncated,
+                    "length": len(text),
+                    "text": _wrap_external_content(text),
+                }
+            )
+        except httpx.ProxyError as e:
+            return json.dumps({"error": f"Proxy error: {e}", "url": url})
         except Exception as e:
             return json.dumps({"error": str(e), "url": url})
-    
+
     def _to_markdown(self, html_content: str) -> str:
-        """将 HTML 转换为 markdown。"""
-        # 转换链接、标题、列表
-        text = re.sub(r'<a\s+[^>]*href=["\']([^"\']+)["\'][^>]*>([\s\S]*?)</a>',
-                      lambda m: f'[{_strip_tags(m[2])}]({m[1]})', html_content, flags=re.I)
-        text = re.sub(r'<h([1-6])[^>]*>([\s\S]*?)</h\1>',
-                      lambda m: f'\n{"#" * int(m[1])} {_strip_tags(m[2])}\n', text, flags=re.I)
-        text = re.sub(r'<li[^>]*>([\s\S]*?)</li>', lambda m: f'\n- {_strip_tags(m[1])}', text, flags=re.I)
-        text = re.sub(r'</(p|div|section|article)>', '\n\n', text, flags=re.I)
-        text = re.sub(r'<(br|hr)\s*/?>', '\n', text, flags=re.I)
+        """Convert HTML to markdown-like text."""
+        text = re.sub(
+            r'<a\s+[^>]*href=["\']([^"\']+)["\'][^>]*>([\s\S]*?)</a>',
+            lambda m: f"[{_strip_tags(m[2])}]({m[1]})",
+            html_content,
+            flags=re.I,
+        )
+        text = re.sub(
+            r"<h([1-6])[^>]*>([\s\S]*?)</h\1>",
+            lambda m: f"\n{'#' * int(m[1])} {_strip_tags(m[2])}\n",
+            text,
+            flags=re.I,
+        )
+        text = re.sub(r"<li[^>]*>([\s\S]*?)</li>", lambda m: f"\n- {_strip_tags(m[1])}", text, flags=re.I)
+        text = re.sub(r"</(p|div|section|article)>", "\n\n", text, flags=re.I)
+        text = re.sub(r"<(br|hr)\s*/?>", "\n", text, flags=re.I)
         return _normalize(_strip_tags(text))

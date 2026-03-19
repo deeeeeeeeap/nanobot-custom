@@ -1363,13 +1363,13 @@ class AgentLoop:
                     "reasoning_effort": self.reasoning_effort,
                 }
                 try:
-                    response = await provider.chat(**chat_kwargs)
+                    response = await provider.chat_with_retry(**chat_kwargs)
                 except TypeError as exc:
                     # Backward compatibility for providers/tests not yet upgraded.
                     if "reasoning_effort" not in str(exc):
                         raise
                     chat_kwargs.pop("reasoning_effort", None)
-                    response = await provider.chat(**chat_kwargs)
+                    response = await provider.chat_with_retry(**chat_kwargs)
                 last_response = response
                 active_model = model_name
                 if response.finish_reason != "error":
@@ -2303,7 +2303,7 @@ class AgentLoop:
 Respond with ONLY valid JSON, no markdown fences."""
 
         try:
-            response = await self.provider.chat(
+            response = await self.provider.chat_with_retry(
                 messages=[
                     {"role": "system", "content": "You are a memory consolidation agent. Respond only with valid JSON."},
                     {"role": "user", "content": prompt},
@@ -2374,6 +2374,5 @@ Respond with ONLY valid JSON, no markdown fences."""
 
         response = await self._process_message(msg)
         return response.content if response else ""
-
 
 

@@ -19,9 +19,11 @@ class SkillsLoader:
     """
     
     def __init__(self, workspace: Path, builtin_skills_dir: Path | None = None):
-        self.workspace = workspace
-        self.workspace_skills = workspace / "skills"
-        self.builtin_skills = builtin_skills_dir or BUILTIN_SKILLS_DIR
+        # Canonicalize paths so skills remain discoverable even when the
+        # current working directory or workspace access is restricted.
+        self.workspace = Path(workspace).expanduser().resolve()
+        self.workspace_skills = self.workspace / "skills"
+        self.builtin_skills = Path(builtin_skills_dir or BUILTIN_SKILLS_DIR).expanduser().resolve()
     
     def list_skills(self, filter_unavailable: bool = True) -> list[dict[str, str]]:
         """
@@ -167,10 +169,19 @@ class SkillsLoader:
         return content
     
     def _parse_nanobot_metadata(self, raw: str) -> dict:
-        """Parse nanobot metadata JSON from frontmatter."""
+        """Parse skill metadata JSON from frontmatter."""
         try:
             data = json.loads(raw)
-            return data.get("nanobot", {}) if isinstance(data, dict) else {}
+            if not isinstance(data, dict):
+                return {}
+
+            # Keep compatibility with both the current nanobot namespace and
+            # the upstream OpenClaw-style namespace used by some skill packs.
+            for namespace in ("nanobot", "openclaw"):
+                meta = data.get(namespace)
+                if isinstance(meta, dict):
+                    return meta
+            return {}
         except (json.JSONDecodeError, TypeError):
             return {}
     

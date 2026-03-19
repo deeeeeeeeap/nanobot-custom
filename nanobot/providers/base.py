@@ -1,8 +1,15 @@
 """Base LLM provider interface."""
 
+import asyncio
+import inspect
+import json
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -11,6 +18,24 @@ class ToolCallRequest:
     id: str
     name: str
     arguments: dict[str, Any]
+    provider_specific_fields: dict[str, Any] | None = None
+    function_provider_specific_fields: dict[str, Any] | None = None
+
+    def to_openai_tool_call(self) -> dict[str, Any]:
+        """Serialize to an OpenAI-style tool_call payload."""
+        tool_call = {
+            "id": self.id,
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "arguments": json.dumps(self.arguments, ensure_ascii=False),
+            },
+        }
+        if self.provider_specific_fields:
+            tool_call["provider_specific_fields"] = self.provider_specific_fields
+        if self.function_provider_specific_fields:
+            tool_call["function"]["provider_specific_fields"] = self.function_provider_specific_fields
+        return tool_call
 
 
 @dataclass
@@ -30,6 +55,15 @@ class LLMResponse:
         return len(self.tool_calls) > 0
 
 
+@dataclass(frozen=True)
+class GenerationSettings:
+    """Default generation parameters for LLM calls."""
+
+    temperature: float = 0.7
+    max_tokens: int = 4096
+    reasoning_effort: str | None = None
+
+
 class LLMProvider(ABC):
     """
     Abstract base class for LLM providers.
@@ -38,9 +72,160 @@ class LLMProvider(ABC):
     while maintaining a consistent interface.
     """
 
+    _CHAT_RETRY_DELAYS = (1, 2, 4)
+    _TRANSIENT_ERROR_MARKERS = (
+        "429",
+        "rate limit",
+        "500",
+        "502",
+        "503",
+        "504",
+        "overloaded",
+        "timeout",
+        "timed out",
+        "connection",
+        "server error",
+        "temporarily unavailable",
+    )
+    _TRANSIENT_ERROR_TYPES = frozenset({"rate_limit", "timeout", "server_error", "overloaded", "network"})
+    _DEFAULT_ALLOWED_MESSAGE_KEYS = frozenset(
+        {
+            "role",
+            "content",
+            "tool_calls",
+            "tool_call_id",
+            "name",
+            "reasoning_content",
+            "thinking_blocks",
+        }
+    )
+    _SENTINEL = object()
+
     def __init__(self, api_key: str | None = None, api_base: str | None = None):
         self.api_key = api_key
         self.api_base = api_base
+        self.generation: GenerationSettings = GenerationSettings()
+
+    @staticmethod
+    def _sanitize_empty_content(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Normalize empty content blocks and strip internal metadata."""
+        result: list[dict[str, Any]] = []
+        for msg in messages:
+            content = msg.get("content")
+
+            if isinstance(content, str) and not content:
+                clean = dict(msg)
+                clean["content"] = None if (msg.get("role") == "assistant" and msg.get("tool_calls")) else "(empty)"
+                result.append(clean)
+                continue
+
+            if isinstance(content, list):
+                new_items: list[Any] = []
+                changed = False
+                for item in content:
+                    if (
+                        isinstance(item, dict)
+                        and item.get("type") in ("text", "input_text", "output_text")
+                        and not item.get("text")
+                    ):
+                        changed = True
+                        continue
+                    if isinstance(item, dict) and "_meta" in item:
+                        new_items.append({k: v for k, v in item.items() if k != "_meta"})
+                        changed = True
+                    else:
+                        new_items.append(item)
+                if changed or not content:
+                    clean = dict(msg)
+                    if new_items:
+                        clean["content"] = new_items
+                    elif msg.get("role") == "assistant" and msg.get("tool_calls"):
+                        clean["content"] = None
+                    else:
+                        clean["content"] = "(empty)"
+                    result.append(clean)
+                    continue
+
+            if isinstance(content, dict):
+                clean = dict(msg)
+                clean["content"] = [content]
+                result.append(clean)
+                continue
+
+            result.append(msg)
+        return result
+
+    @staticmethod
+    def _sanitize_request_messages(
+        messages: list[dict[str, Any]],
+        allowed_keys: frozenset[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Keep only provider-safe message keys and normalize assistant content."""
+        keys = allowed_keys or LLMProvider._DEFAULT_ALLOWED_MESSAGE_KEYS
+        sanitized: list[dict[str, Any]] = []
+        for msg in messages:
+            clean = {k: v for k, v in msg.items() if k in keys}
+            if clean.get("role") == "assistant" and "content" not in clean:
+                clean["content"] = None
+            sanitized.append(clean)
+        return sanitized
+
+    @classmethod
+    def _is_transient_error(cls, content: str | None) -> bool:
+        err = (content or "").lower()
+        return any(marker in err for marker in cls._TRANSIENT_ERROR_MARKERS)
+
+    @classmethod
+    def _is_transient_error_type(cls, error_type: str | None) -> bool:
+        return bool(error_type) and error_type in cls._TRANSIENT_ERROR_TYPES
+
+    @staticmethod
+    def _strip_image_content(messages: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
+        """Replace image_url blocks with text placeholders."""
+        found = False
+        result: list[dict[str, Any]] = []
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                new_content = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "image_url":
+                        path = (block.get("_meta") or {}).get("path", "")
+                        placeholder = f"[image: {path}]" if path else "[image omitted]"
+                        new_content.append({"type": "text", "text": placeholder})
+                        found = True
+                    else:
+                        new_content.append(block)
+                result.append({**msg, "content": new_content})
+            else:
+                result.append(msg)
+        return result if found else None
+
+    async def _safe_chat(self, **kwargs: Any) -> LLMResponse:
+        """Call chat() and convert unexpected exceptions to error responses."""
+        try:
+            return await self.chat(**self._filter_chat_kwargs(kwargs))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return LLMResponse(content=f"Error calling LLM: {exc}", finish_reason="error", error_type="unknown")
+
+    def _filter_chat_kwargs(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Pass only parameters accepted by the concrete provider implementation."""
+        try:
+            signature = inspect.signature(self.chat)
+        except (TypeError, ValueError):
+            return kwargs
+
+        accepts_var_kwargs = any(
+            param.kind == inspect.Parameter.VAR_KEYWORD
+            for param in signature.parameters.values()
+        )
+        if accepts_var_kwargs:
+            return kwargs
+
+        allowed = set(signature.parameters)
+        return {key: value for key, value in kwargs.items() if key in allowed}
 
     @abstractmethod
     async def chat(
@@ -69,6 +254,63 @@ class LLMProvider(ABC):
             LLMResponse with content and/or tool calls.
         """
         pass
+
+    async def chat_with_retry(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = "auto",
+        model: str | None = None,
+        max_tokens: object = _SENTINEL,
+        temperature: object = _SENTINEL,
+        reasoning_effort: object = _SENTINEL,
+    ) -> LLMResponse:
+        """Call chat() with retry on transient provider failures."""
+        if max_tokens is self._SENTINEL:
+            max_tokens = self.generation.max_tokens
+        if temperature is self._SENTINEL:
+            temperature = self.generation.temperature
+        if reasoning_effort is self._SENTINEL:
+            reasoning_effort = self.generation.reasoning_effort
+
+        request_kwargs: dict[str, Any] = {
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": tool_choice,
+            "model": model,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "reasoning_effort": reasoning_effort,
+        }
+
+        for attempt, delay in enumerate(self._CHAT_RETRY_DELAYS, start=1):
+            response = await self._safe_chat(**request_kwargs)
+            if response.finish_reason != "error":
+                return response
+
+            # 如果 provider 已标记具体错误类型且不属于瞬态错误，跳过重试直接返回
+            # （避免与 loop 层的 _chat_with_failover 形成双重重试）
+            if response.error_type and not self._is_transient_error_type(response.error_type):
+                return response
+
+            transient = self._is_transient_error_type(response.error_type) or self._is_transient_error(response.content)
+            if not transient:
+                stripped = self._strip_image_content(messages)
+                if stripped is not None:
+                    logger.warning("Non-transient LLM error with image content, retrying without images")
+                    return await self._safe_chat(**{**request_kwargs, "messages": stripped})
+                return response
+
+            logger.warning(
+                "LLM transient error (attempt %s/%s), retrying in %ss: %s",
+                attempt,
+                len(self._CHAT_RETRY_DELAYS),
+                delay,
+                (response.content or "")[:120].lower(),
+            )
+            await asyncio.sleep(delay)
+
+        return await self._safe_chat(**request_kwargs)
 
     @abstractmethod
     def get_default_model(self) -> str:
