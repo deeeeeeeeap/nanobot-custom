@@ -87,7 +87,22 @@ class LiteLLMProvider(LLMProvider):
         return model
 
     def _supports_cache_control(self, model: str) -> bool:
-        """Return True when provider/model supports cache_control on content blocks."""
+        """Return True when provider/model supports explicit cache-control markers."""
+        if self._gateway is not None:
+            flag = getattr(self._gateway, "supports_cache_control_markers", None)
+            if flag is not None:
+                return bool(flag)
+
+        spec = find_by_model(model)
+        flag = getattr(spec, "supports_cache_control_markers", None) if spec else None
+        if flag is not None:
+            return bool(flag)
+
+        model_lower = model.lower()
+        return "anthropic" in model_lower or "claude" in model_lower
+
+    def _supports_prompt_caching(self, model: str) -> bool:
+        """Return True when provider/model is expected to support prompt caching at all."""
         if self._gateway is not None:
             flag = getattr(self._gateway, "supports_prompt_caching", None)
             if flag is not None:
@@ -99,7 +114,7 @@ class LiteLLMProvider(LLMProvider):
             return bool(flag)
 
         model_lower = model.lower()
-        return "anthropic" in model_lower or "claude" in model_lower
+        return any(name in model_lower for name in ("anthropic", "claude", "gemini", "openai", "gpt"))
 
     def _apply_cache_control(
         self,
@@ -373,7 +388,7 @@ class LiteLLMProvider(LLMProvider):
                     has_tc,
                     len(choice.message.content or ""),
                 )
-            return self._parse_response(response)
+            return self._parse_response(response, requested_model=original_model)
         except (TypeError, ValueError, OSError, TimeoutError) as e:
             err = ProviderError(f"LLM request failed: {e}")
             error_type = self._classify_error(
@@ -414,7 +429,7 @@ class LiteLLMProvider(LLMProvider):
                 error_type=error_type,
             )
 
-    def _parse_response(self, response: Any) -> LLMResponse:
+    def _parse_response(self, response: Any, requested_model: str | None = None) -> LLMResponse:
         """Parse LiteLLM response into project-standard format."""
         choice = response.choices[0]
         message = choice.message
@@ -438,18 +453,35 @@ class LiteLLMProvider(LLMProvider):
             )
 
         usage = {}
+        cache_read_tokens = 0
+        cache_creation_tokens = 0
         if getattr(response, "usage", None):
             usage = {
                 "prompt_tokens": response.usage.prompt_tokens,
                 "completion_tokens": response.usage.completion_tokens,
                 "total_tokens": response.usage.total_tokens,
             }
+            cache_read_tokens = int(getattr(response.usage, "cache_read_input_tokens", 0) or 0)
+            cache_creation_tokens = int(getattr(response.usage, "cache_creation_input_tokens", 0) or 0)
+            if cache_read_tokens or cache_creation_tokens:
+                prompt_tokens = max(1, int(getattr(response.usage, "prompt_tokens", 0) or 0))
+                hit_rate = cache_read_tokens / prompt_tokens * 100
+                logger.info(
+                    "Prompt cache stats: model={}, read_tokens={}, creation_tokens={}, prompt_tokens={}, hit_rate={:.1f}%",
+                    requested_model or self.default_model,
+                    cache_read_tokens,
+                    cache_creation_tokens,
+                    prompt_tokens,
+                    hit_rate,
+                )
 
         return LLMResponse(
             content=message.content,
             tool_calls=tool_calls,
             finish_reason=choice.finish_reason or "stop",
             usage=usage,
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
             reasoning_content=getattr(message, "reasoning_content", None) or None,
             thinking_blocks=self._extract_thinking_blocks(message),
         )

@@ -23,6 +23,7 @@ class ContextBuilder:
     
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
     _RUNTIME_CONTEXT_TAG = "[runtime]"
+    _SYSTEM_REMINDER_TAG = "[system-reminder]"
     _MOJIBAKE_MARKERS = ("�", "\ue0ff", "锛", "銆", "鈥")
     
     def __init__(self, workspace: Path):
@@ -54,16 +55,11 @@ class ContextBuilder:
         if bootstrap:
             parts.append(bootstrap)
         
-        # Memory context
-        memory = self.memory.get_memory_context()
-        if memory:
-            if self._looks_mojibake(memory):
-                logger.warning("Detected mojibake in memory block, skipping memory injection.")
-                memory = "(记忆内容因编码异常已跳过)"
-            parts.append(f"# Memory\n\n{memory}")
-            parts.append(
-                "当需要某条记忆的完整细节时，优先使用 `knowledge_search` 或 `read_file` 读取具体路径。"
-            )
+        # Keep profile-level memory in the stable prefix. More volatile session
+        # memory is injected later as a reminder message to preserve cacheability.
+        profile = self._get_profile_memory()
+        if profile:
+            parts.append(f"# Profile\n\n{profile}")
 
         parts.append(
             "# Built-in Knowledge Search\n\n"
@@ -84,19 +80,21 @@ class ContextBuilder:
                 parts.append(f"# Active Skills\n\n{always_content}")
         
         # 2. Available skills: only show summary (agent uses read_file to load)
-        skills_summary = self.skills.build_skills_summary()
+        skills_summary = self._get_skills_summary_text()
         if skills_summary:
-            if self._looks_mojibake(skills_summary):
-                logger.warning("Detected mojibake in skills summary, skipping summary.")
-                skills_summary = "<skills unavailable=\"encoding_error\" />"
-            parts.append(f"""# Skills
-
-The following skills extend your capabilities. To use a skill, read its SKILL.md file using the read_file tool.
-Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
-
-{skills_summary}""")
+            parts.append(skills_summary)
         
         return "\n\n---\n\n".join(parts)
+
+    def get_cache_prefix_material(self, skill_names: list[str] | None = None) -> dict[str, str]:
+        """Expose stable prompt segments for cache-fingerprint logging."""
+        bootstrap = self._load_bootstrap_files()
+        skills_summary = self._get_skills_summary_text()
+        return {
+            "system_prompt": self.build_system_prompt(skill_names),
+            "bootstrap_text": bootstrap,
+            "skills_summary": skills_summary,
+        }
     
     def _get_identity(self) -> str:
         """Get the core identity section."""
@@ -181,6 +179,23 @@ Skills with available="false" need dependencies installed first - you can try in
         
         return "\n\n".join(parts) if parts else ""
 
+    def _get_skills_summary_text(self) -> str:
+        """Build the human-facing skills summary block used in the system prompt."""
+        skills_summary = self.skills.build_skills_summary()
+        if not skills_summary:
+            return ""
+        if self._looks_mojibake(skills_summary):
+            logger.warning("Detected mojibake in skills summary, skipping summary.")
+            skills_summary = "<skills unavailable=\"encoding_error\" />"
+        return (
+            "# Skills\n\n"
+            "The following skills extend your capabilities. To use a skill, read its SKILL.md "
+            "file using the read_file tool.\n"
+            "Skills with available=\"false\" need dependencies installed first - you can try "
+            "installing them with apt/brew.\n\n"
+            f"{skills_summary}"
+        )
+
     @classmethod
     def _looks_mojibake(cls, text: str) -> bool:
         """Heuristic detector for common UTF-8/GBK mojibake fragments."""
@@ -232,9 +247,10 @@ Skills with available="false" need dependencies installed first - you can try in
         # History
         messages.extend(history)
 
-        # Runtime metadata is isolated from the actual user input.
-        runtime_context = self._build_runtime_context_prefix(channel, chat_id)
-        messages.append({"role": "user", "content": runtime_context})
+        # Dynamic runtime/session context is isolated from the stable system prompt.
+        reminder = self._build_dynamic_context_reminder(channel, chat_id)
+        if reminder:
+            messages.append({"role": "user", "content": reminder})
 
         # Current message (with optional image attachments)
         user_content = self._build_user_content(current_message, media)
@@ -250,6 +266,71 @@ Skills with available="false" need dependencies installed first - you can try in
         if channel and chat_id:
             lines.append(f"{ContextBuilder._RUNTIME_CONTEXT_TAG} session={channel}:{chat_id}")
         return "\n".join(lines)
+
+    def _get_profile_memory(self) -> str:
+        """Return only low-churn profile memory for the stable system prefix."""
+        profile_file = self.memory.profile_file
+        if not profile_file.exists():
+            return ""
+        profile = profile_file.read_text(encoding="utf-8").strip()
+        if not profile:
+            return ""
+        if self._looks_mojibake(profile):
+            logger.warning("Detected mojibake in profile memory block, skipping static profile injection.")
+            return "(Profile 内容因编码异常已跳过)"
+        return profile
+
+    def _get_dynamic_memory_context(self) -> str:
+        """Return volatile memory context that should stay out of the stable prefix."""
+        parts: list[str] = []
+
+        long_term = self.memory.read_long_term().strip()
+        if long_term:
+            parts.append("## Legacy Long-term Memory\n" + long_term)
+
+        index_lines: list[str] = []
+        seen_abstracts: set[str] = set()
+        for category in self.memory.INDEX_CATEGORIES:
+            cat_dir = self.memory.memories_dir / category.value
+            if not cat_dir.exists():
+                continue
+            for fp in sorted(cat_dir.glob("*.md")):
+                try:
+                    first_line = fp.read_text(encoding="utf-8").splitlines()[0].strip()
+                except (OSError, IndexError):
+                    continue
+                if not first_line:
+                    continue
+                normalized = first_line.lower()
+                if normalized in seen_abstracts:
+                    continue
+                seen_abstracts.add(normalized)
+                rel = fp.relative_to(self.workspace).as_posix()
+                index_lines.append(f"- [{category.value}] {first_line} ({rel})")
+        if index_lines:
+            parts.append("## Memory Index (L1)\n" + "\n".join(index_lines[:80]))
+
+        memory = "\n\n".join(parts).strip()
+        if not memory:
+            return ""
+        if self._looks_mojibake(memory):
+            logger.warning("Detected mojibake in dynamic memory block, skipping reminder memory injection.")
+            return "(记忆内容因编码异常已跳过)"
+        return memory
+
+    def _build_dynamic_context_reminder(self, channel: str | None, chat_id: str | None) -> str:
+        """Build a cache-friendly reminder message for volatile runtime context."""
+        parts = [self._build_runtime_context_prefix(channel, chat_id)]
+
+        memory = self._get_dynamic_memory_context()
+        if memory:
+            parts.append(
+                f"{self._SYSTEM_REMINDER_TAG} volatile_memory=true\n\n"
+                f"{memory}\n\n"
+                "当需要某条记忆的完整细节时，优先使用 `knowledge_search` 或 `read_file` 读取具体路径。"
+            )
+
+        return "\n\n".join(part for part in parts if part.strip())
 
     def _build_user_content(
         self,

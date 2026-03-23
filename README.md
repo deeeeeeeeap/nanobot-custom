@@ -11,7 +11,7 @@
   <p>
     <img src="https://img.shields.io/badge/python-≥3.11-blue" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
-    <img src="https://img.shields.io/badge/tests-186_passed-brightgreen" alt="Tests">
+    <img src="https://img.shields.io/badge/tests-212_passed-brightgreen" alt="Tests">
     <img src="https://img.shields.io/badge/channels-8-blueviolet" alt="Channels">
   </p>
 </div>
@@ -32,7 +32,8 @@
 - 🧬 **思维链支持** — DeepSeek-R1、Claude Thinking 推理过程可视化
 - 🔄 **交错思维链** — 工具执行后自动反思，提升多步推理质量
 - ⚡ **反空转干预** — 执行型请求 `tool_choice=required` 源头阻断空转
-- 💰 **Prompt Caching** — Anthropic/Claude 自动注入缓存标记，节省 token
+- 💰 **Prompt Caching 架构** — 前缀稳定化 + cache-safe compaction + 缓存命中率监控
+- 📊 **缓存指纹观测** — 自动检测前缀漂移，定位缓存失效根因
 
 </td>
 <td width="50%">
@@ -294,6 +295,16 @@ nanobot search reindex          # 手动重建索引
 nanobot search embed            # 激活语义搜索
 ```
 
+### 💰 Prompt Caching 缓存优先架构
+
+基于 Claude Code 团队最佳实践，以缓存命中率为核心设计约束：
+
+- **前缀稳定化** — system prompt 只保留低频变化内容（identity、bootstrap、profile、skills summary），高频变化的 L1 记忆和运行时信息通过 `[system-reminder]` user message 注入
+- **Cache-Safe Compaction** — 上下文压缩时复用父对话的完整前缀（system prompt + tools + history），仅追加压缩指令，最大化缓存复用
+- **缓存指纹观测** — 每轮记录前缀指纹（model / system prompt / tools / skills 的 hash），自动检测哪一部分导致缓存失效
+- **Provider 缓存指标** — 从 LiteLLM 响应提取 `cache_read_tokens` / `cache_creation_tokens`，记录命中率日志
+- **Skills 确定性排序** — skills 目录遍历使用稳定排序，避免前缀漂移
+
 ### 📋 推特智能监控
 
 - Web 管理面板 — 关注名单管理、凭证配置
@@ -328,13 +339,20 @@ pytest tests/test_codex_provider.py tests/test_codex_auth.py tests/test_codex_ad
 
 ```
 nanobot/
-├── agent/           # AgentLoop 核心 + 工具注册 + 幻觉检测
+├── agent/
+│   ├── loop.py              # AgentLoop 核心 + cache-safe compaction
+│   ├── context.py           # ContextBuilder（前缀稳定化）
+│   ├── cache_fingerprint.py # 缓存前缀指纹 & 漂移检测
+│   ├── skills.py            # Skills 加载（确定性排序）
+│   ├── hallucination_detector.py  # 防幻觉检测
+│   └── tools/               # 工具注册（shell/file/web/memory）
 ├── providers/
-│   ├── codex_provider.py   # 原生 Codex Responses API Provider
-│   ├── codex_auth.py       # OAuth token 自动刷新管理
-│   ├── codex_adapter.py    # 消息格式转换 + 孤儿工具清理
-│   ├── litellm_provider.py # 通用 LiteLLM 多模型适配
-│   └── base.py             # Provider 抽象基类
+│   ├── codex_provider.py    # 原生 Codex Responses API Provider
+│   ├── codex_auth.py        # OAuth token 自动刷新管理
+│   ├── codex_adapter.py     # 消息格式转换 + 孤儿工具清理
+│   ├── litellm_provider.py  # 通用 LiteLLM 多模型适配 + 缓存指标提取
+│   ├── registry.py          # Provider 注册表（含缓存能力标记）
+│   └── base.py              # Provider 抽象基类 + LLMResponse
 ├── channels/        # 8 种消息渠道适配器
 ├── config/          # 配置加载 & Pydantic Schema
 ├── memory/          # 双层记忆（压缩/提取/去重）

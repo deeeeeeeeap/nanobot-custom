@@ -17,6 +17,7 @@ from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
 from nanobot.agent.context import ContextBuilder
+from nanobot.agent.cache_fingerprint import diff_fingerprint, fingerprint_prefix
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool
@@ -840,6 +841,63 @@ class AgentLoop:
         omitted = len(text) - head - tail
         return f"{text[:head]}...[省略 {omitted} 字符]...{text[-tail:]}"
 
+    def _compute_cache_prefix_fingerprint(
+        self,
+        *,
+        model: str,
+        tools: list[dict[str, Any]] | None,
+        skill_names: list[str] | None = None,
+    ) -> dict[str, str]:
+        material = self.context.get_cache_prefix_material(skill_names)
+        return fingerprint_prefix(
+            model=model,
+            system_prompt=material["system_prompt"],
+            tool_definitions=tools,
+            bootstrap_text=material["bootstrap_text"],
+            skills_summary=material["skills_summary"],
+        )
+
+    def _log_cache_prefix_fingerprint(
+        self,
+        session,
+        *,
+        model: str,
+        tools: list[dict[str, Any]] | None,
+        skill_names: list[str] | None = None,
+    ) -> None:
+        current = self._compute_cache_prefix_fingerprint(
+            model=model,
+            tools=tools,
+            skill_names=skill_names,
+        )
+        previous = session.metadata.get("cache_prefix_fingerprint")
+        changed = diff_fingerprint(previous if isinstance(previous, dict) else None, current)
+        logger.info(
+            "Cache prefix fingerprint: session={}, model={}, changed={}",
+            session.key,
+            model,
+            ",".join(changed) if changed else "(none)",
+        )
+        session.metadata["cache_prefix_fingerprint"] = current
+
+    @staticmethod
+    def _log_cache_usage(model: str, response: LLMProvider | Any) -> None:
+        cache_read = getattr(response, "cache_read_tokens", 0) or 0
+        cache_creation = getattr(response, "cache_creation_tokens", 0) or 0
+        if not cache_read and not cache_creation:
+            return
+        prompt_tokens = int((getattr(response, "usage", {}) or {}).get("prompt_tokens", 0) or 0)
+        total = max(1, prompt_tokens)
+        hit_rate = cache_read / total * 100
+        logger.info(
+            "Prompt cache observed: model={}, read_tokens={}, creation_tokens={}, prompt_tokens={}, hit_rate={:.1f}%",
+            model,
+            cache_read,
+            cache_creation,
+            prompt_tokens,
+            hit_rate,
+        )
+
     @staticmethod
     def _assistant_tool_call_ids(msg: dict) -> set[str]:
         if msg.get("role") != "assistant":
@@ -1064,9 +1122,11 @@ class AgentLoop:
         *,
         source_text: str,
         active_model: str,
+        parent_messages: list[dict] | None = None,
+        tools: list[dict[str, Any]] | None = None,
         runtime_config=None,
     ) -> tuple[str | None, str]:
-        prompt_messages = [
+        legacy_prompt_messages = [
             {
                 "role": "system",
                 "content": (
@@ -1083,12 +1143,31 @@ class AgentLoop:
             },
         ]
 
+        primary_messages = legacy_prompt_messages
+        primary_tools = None
+        primary_tool_choice = "auto"
+        if parent_messages:
+            primary_messages = [
+                *parent_messages,
+                {
+                    "role": "user",
+                    "content": (
+                        f"{ContextBuilder._SYSTEM_REMINDER_TAG} compaction=true\n"
+                        "不要调用任何工具。请直接输出纯文本摘要，限制在 8-12 行内，保留："
+                        "关键目标、已执行操作、失败原因、待办项、重要路径/命令。\n\n"
+                        f"{source_text}"
+                    ),
+                },
+            ]
+            primary_tools = tools
+            primary_tool_choice = "none"
+
         try:
             response, used_model = await asyncio.wait_for(
                 self._chat_with_failover(
-                    messages=prompt_messages,
-                    tools=None,
-                    tool_choice="auto",
+                    messages=primary_messages,
+                    tools=primary_tools,
+                    tool_choice=primary_tool_choice,
                     primary_model=active_model,
                     runtime_config=runtime_config,
                 ),
@@ -1097,7 +1176,26 @@ class AgentLoop:
         except asyncio.TimeoutError:
             logger.warning("Compaction summary timed out (model={})", active_model)
             return None, active_model
-        if not response or response.finish_reason == "error":
+        if not response or response.finish_reason == "error" or response.has_tool_calls:
+            if parent_messages:
+                try:
+                    response, used_model = await asyncio.wait_for(
+                        self._chat_with_failover(
+                            messages=legacy_prompt_messages,
+                            tools=None,
+                            tool_choice="auto",
+                            primary_model=active_model,
+                            runtime_config=runtime_config,
+                        ),
+                        timeout=30,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("Compaction legacy fallback timed out (model={})", active_model)
+                    return None, active_model
+            else:
+                return None, used_model
+        self._log_cache_usage(used_model, response)
+        if response.finish_reason == "error" or response.has_tool_calls:
             return None, used_model
         text = (response.content or "").strip()
         if not text:
@@ -1143,6 +1241,7 @@ class AgentLoop:
             return self._guard_context_window(messages, model), model
 
         old_messages = non_system[:old_count]
+        tool_definitions = self.tools.get_definitions()
         chunk_target = max(800, int((budget * self.compaction_target_ratio) / 2))
         chunks = self._split_messages_for_compaction(
             old_messages,
@@ -1163,6 +1262,8 @@ class AgentLoop:
             summary, used_model = await self._summarize_compaction_text(
                 source_text=chunk_text,
                 active_model=active_model,
+                parent_messages=messages,
+                tools=tool_definitions,
                 runtime_config=runtime_config,
             )
             active_model = used_model
@@ -1177,6 +1278,8 @@ class AgentLoop:
             merged, used_model = await self._summarize_compaction_text(
                 source_text=merged_source,
                 active_model=active_model,
+                parent_messages=messages,
+                tools=tool_definitions,
                 runtime_config=runtime_config,
             )
             active_model = used_model
@@ -1189,9 +1292,9 @@ class AgentLoop:
             return self._guard_context_window(messages, model), model
 
         summary_message = {
-            "role": "system",
+            "role": "user",
             "content": (
-                "# 会话压缩摘要\n"
+                f"{ContextBuilder._SYSTEM_REMINDER_TAG} compaction_summary=true\n"
                 "以下为较早对话的压缩摘要，请与近期消息一起使用：\n"
                 f"{summary_text}"
             ),
@@ -1561,6 +1664,11 @@ class AgentLoop:
             current_model,
             runtime_config=runtime_config,
         )
+        self._log_cache_prefix_fingerprint(
+            session,
+            model=current_model,
+            tools=self.tools.get_definitions(),
+        )
 
         # Main agent loop.
         iteration = 0
@@ -1643,6 +1751,7 @@ class AgentLoop:
                 primary_model=active_model,
                 runtime_config=runtime_config,
             )
+            self._log_cache_usage(used_model, response)
             if used_model != active_model:
                 logger.warning("Using fallback model for this request: {} -> {}", active_model, used_model)
                 active_model = used_model
@@ -1658,6 +1767,7 @@ class AgentLoop:
                     primary_model=active_model,
                     runtime_config=runtime_config,
                 )
+                self._log_cache_usage(used_model, response)
                 active_model = used_model
                 actual_tool_choice = "auto"
 
@@ -2008,6 +2118,11 @@ class AgentLoop:
             messages,
             self.model,
         )
+        self._log_cache_prefix_fingerprint(
+            session,
+            model=active_system_model,
+            tools=self.tools.get_definitions(),
+        )
 
         iteration = 0
         final_content = None
@@ -2035,6 +2150,7 @@ class AgentLoop:
                 tool_choice="auto",
                 primary_model=active_model,
             )
+            self._log_cache_usage(used_model, response)
             active_model = used_model
 
             if response.finish_reason == "error":
@@ -2374,5 +2490,3 @@ Respond with ONLY valid JSON, no markdown fences."""
 
         response = await self._process_message(msg)
         return response.content if response else ""
-
-

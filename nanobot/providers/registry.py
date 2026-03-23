@@ -47,6 +47,8 @@ class ProviderSpec:
 
     # gateway behavior
     strip_model_prefix: bool = False         # strip "provider/" before re-prefixing
+    supports_prompt_caching: bool | None = None
+    supports_cache_control_markers: bool | None = None
 
     # per-model param overrides, e.g. (("kimi-k2.5", {"temperature": 1.0}),)
     model_overrides: tuple[tuple[str, dict[str, Any]], ...] = ()
@@ -80,6 +82,8 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         detect_by_base_keyword="openrouter",
         default_api_base="https://openrouter.ai/api/v1",
         strip_model_prefix=False,
+        supports_prompt_caching=True,
+        supports_cache_control_markers=False,
         model_overrides=(),
     ),
 
@@ -100,6 +104,8 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         detect_by_base_keyword="aihubmix",
         default_api_base="https://aihubmix.com/v1",
         strip_model_prefix=True,            # anthropic/claude-3 → claude-3 → openai/claude-3
+        supports_prompt_caching=True,
+        supports_cache_control_markers=False,
         model_overrides=(),
     ),
 
@@ -119,6 +125,8 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         detect_by_base_keyword="antigravity",
         default_api_base="http://127.0.0.1:8045/v1",
         strip_model_prefix=True,            # antigravity/claude-opus-4-6 → claude-opus-4-6 → openai/claude-opus-4-6
+        supports_prompt_caching=False,
+        supports_cache_control_markers=False,
         model_overrides=(),
     ),
 
@@ -139,6 +147,8 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         detect_by_base_keyword="",
         default_api_base="",
         strip_model_prefix=False,
+        supports_prompt_caching=True,
+        supports_cache_control_markers=True,
         model_overrides=(),
     ),
 
@@ -157,6 +167,8 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         detect_by_base_keyword="",
         default_api_base="",
         strip_model_prefix=False,
+        supports_prompt_caching=True,
+        supports_cache_control_markers=False,
         model_overrides=(),
     ),
 
@@ -175,6 +187,8 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         detect_by_base_keyword="",
         default_api_base="",
         strip_model_prefix=False,
+        supports_prompt_caching=False,
+        supports_cache_control_markers=False,
         model_overrides=(),
     ),
 
@@ -193,6 +207,8 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         detect_by_base_keyword="",
         default_api_base="",
         strip_model_prefix=False,
+        supports_prompt_caching=True,
+        supports_cache_control_markers=False,
         model_overrides=(),
     ),
 
@@ -215,6 +231,8 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         detect_by_base_keyword="",
         default_api_base="",
         strip_model_prefix=False,
+        supports_prompt_caching=False,
+        supports_cache_control_markers=False,
         model_overrides=(),
     ),
 
@@ -233,6 +251,8 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         detect_by_base_keyword="",
         default_api_base="",
         strip_model_prefix=False,
+        supports_prompt_caching=False,
+        supports_cache_control_markers=False,
         model_overrides=(),
     ),
 
@@ -275,6 +295,8 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         detect_by_base_keyword="minimax",
         default_api_base="https://api.minimaxi.com/v1",
         strip_model_prefix=False,             # 保留 minimax/ 前缀给 litellm
+        supports_prompt_caching=False,
+        supports_cache_control_markers=False,
         model_overrides=(),
     ),
 
@@ -296,6 +318,8 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         detect_by_base_keyword="",
         default_api_base="",                # user must provide in config
         strip_model_prefix=False,
+        supports_prompt_caching=False,
+        supports_cache_control_markers=False,
         model_overrides=(),
     ),
 
@@ -317,6 +341,8 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         detect_by_base_keyword="",
         default_api_base="",
         strip_model_prefix=False,
+        supports_prompt_caching=False,
+        supports_cache_control_markers=False,
         model_overrides=(),
     ),
 )

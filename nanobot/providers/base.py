@@ -45,6 +45,8 @@ class LLMResponse:
     tool_calls: list[ToolCallRequest] = field(default_factory=list)
     finish_reason: str = "stop"
     usage: dict[str, int] = field(default_factory=dict)
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
     reasoning_content: str | None = None  # reasoning output from compatible models
     thinking_blocks: list[dict[str, Any]] = field(default_factory=list)
     error_type: str | None = None
