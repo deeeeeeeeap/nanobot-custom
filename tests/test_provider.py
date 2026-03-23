@@ -65,6 +65,31 @@ def test_provider_parse_response_without_tool_calls() -> None:
     assert parsed.content == "ok"
     assert parsed.tool_calls == []
     assert parsed.usage["total_tokens"] == 3
+    assert parsed.cache_read_tokens == 0
+    assert parsed.cache_creation_tokens == 0
+
+
+def test_provider_parse_response_extracts_cache_metrics() -> None:
+    provider = LiteLLMProvider(api_key="k")
+    fake_response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                finish_reason="stop",
+                message=SimpleNamespace(content="ok", reasoning_content=None, tool_calls=None),
+            )
+        ],
+        usage=SimpleNamespace(
+            prompt_tokens=1000,
+            completion_tokens=20,
+            total_tokens=1020,
+            cache_read_input_tokens=700,
+            cache_creation_input_tokens=200,
+        ),
+    )
+
+    parsed = provider._parse_response(fake_response, requested_model="anthropic/claude-3-5-sonnet")
+    assert parsed.cache_read_tokens == 700
+    assert parsed.cache_creation_tokens == 200
 
 
 def test_provider_apply_cache_control_marks_system_and_last_tool() -> None:

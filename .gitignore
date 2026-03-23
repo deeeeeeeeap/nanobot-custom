@@ -17,11 +17,3 @@ docs/
 __pycache__/
 .coverage
 .nanobot/
-
-# Build artifacts
-.coverage
-htmlcov/
-
-# IDE files
-*.code-workspace
-

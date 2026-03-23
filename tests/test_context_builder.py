@@ -95,3 +95,58 @@ def test_add_assistant_message_preserves_thinking_blocks(tmp_path):
     assert updated[-1]["role"] == "assistant"
     assert updated[-1]["thinking_blocks"] == [{"type": "thinking", "text": "step-1"}]
     assert updated[-1]["reasoning_content"] == "brief reasoning"
+
+
+def test_profile_memory_stays_in_system_prompt(tmp_path):
+    memory_dir = tmp_path / "memory" / "memories"
+    memory_dir.mkdir(parents=True)
+    (memory_dir / "profile.md").write_text("用户偏好直接行动。", encoding="utf-8")
+
+    builder = ContextBuilder(tmp_path)
+    prompt = builder.build_system_prompt()
+
+    assert "# Profile" in prompt
+    assert "用户偏好直接行动" in prompt
+
+
+def test_volatile_memory_moves_to_reminder_message(tmp_path):
+    memory_root = tmp_path / "memory"
+    memories_dir = memory_root / "memories" / "preferences"
+    memories_dir.mkdir(parents=True)
+    (memory_root / "MEMORY.md").write_text("长期约定。", encoding="utf-8")
+    (memories_dir / "pref.md").write_text("喜欢简洁回复\n\n细节", encoding="utf-8")
+
+    builder = ContextBuilder(tmp_path)
+    system_prompt = builder.build_system_prompt()
+    messages = builder.build_messages(
+        history=[],
+        current_message="继续",
+        channel="telegram",
+        chat_id="42",
+    )
+
+    assert "## Legacy Long-term Memory" not in system_prompt
+    assert "## Memory Index (L1)" not in system_prompt
+    reminder = messages[1]
+    assert reminder["role"] == "user"
+    assert ContextBuilder._SYSTEM_REMINDER_TAG in reminder["content"]
+    assert "长期约定" in reminder["content"]
+    assert "喜欢简洁回复" in reminder["content"]
+
+
+def test_skills_listing_is_deterministic(tmp_path):
+    skills_root = tmp_path / "skills"
+    for name in ("z_skill", "a_skill", "m_skill"):
+        skill_dir = skills_root / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            f"---\ndescription: {name}\n---\n{name}",
+            encoding="utf-8",
+        )
+
+    builder = ContextBuilder(tmp_path)
+    first = [item["name"] for item in builder.skills.list_skills(filter_unavailable=False) if item["source"] == "workspace"]
+    second = [item["name"] for item in builder.skills.list_skills(filter_unavailable=False) if item["source"] == "workspace"]
+
+    assert first == ["a_skill", "m_skill", "z_skill"]
+    assert second == first
