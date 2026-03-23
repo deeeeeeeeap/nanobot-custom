@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from nanobot.agent.context import ContextBuilder
 from nanobot.agent.loop import (
     AgentLoop,
     _ToolLoopDetector,
@@ -328,6 +329,9 @@ class CompactionProvider(LLMProvider):
     def __init__(self):
         super().__init__(api_key=None, api_base=None)
         self.calls = 0
+        self.observed_messages: list[list[dict[str, Any]]] = []
+        self.observed_tool_choices: list[str] = []
+        self.observed_tools: list[list[dict[str, Any]] | None] = []
 
     async def chat(
         self,
@@ -340,6 +344,9 @@ class CompactionProvider(LLMProvider):
         reasoning_effort: str | None = None,
     ) -> LLMResponse:
         self.calls += 1
+        self.observed_messages.append(list(messages))
+        self.observed_tool_choices.append(tool_choice)
+        self.observed_tools.append(list(tools) if tools is not None else None)
         return LLMResponse(content="压缩摘要：用户要求修复脚本并验证输出。", finish_reason="stop")
 
     def get_default_model(self) -> str:
@@ -1166,10 +1173,15 @@ async def test_compaction_summarizes_old_messages(monkeypatch, tmp_path: Path) -
     compacted, _ = await loop._compact_messages_for_context(messages, "qwen-mini")
     assert len(compacted) < len(messages)
     assert any(
-        isinstance(msg.get("content"), str) and "会话压缩摘要" in msg.get("content", "")
+        isinstance(msg.get("content"), str)
+        and ContextBuilder._SYSTEM_REMINDER_TAG in msg.get("content", "")
+        and "压缩摘要" in msg.get("content", "")
         for msg in compacted
     )
     assert provider.calls >= 1
+    assert provider.observed_tool_choices[0] == "none"
+    assert provider.observed_tools[0]
+    assert provider.observed_messages[0][0]["content"] == "system prompt"
 
 
 async def test_compaction_summary_timeout_falls_back(monkeypatch, tmp_path: Path) -> None:
@@ -1193,6 +1205,37 @@ async def test_compaction_summary_timeout_falls_back(monkeypatch, tmp_path: Path
     )
     assert summary is None
     assert model == "openai/gpt-4o-mini"
+
+
+async def test_compaction_fork_appends_instruction_to_parent_prefix(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "nanobot.agent.loop.load_config",
+        lambda: (_ for _ in ()).throw(ConfigError("test config missing")),
+    )
+    monkeypatch.setattr("nanobot.agent.loop.detect_hallucination", lambda *a, **k: _NoHallucination())
+
+    provider = CompactionProvider()
+    loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path)
+    parent_messages = [
+        {"role": "system", "content": "stable system"},
+        {"role": "user", "content": "history one"},
+        {"role": "assistant", "content": "history two"},
+    ]
+
+    summary, used_model = await loop._summarize_compaction_text(
+        source_text="old context",
+        active_model="openai/gpt-4o-mini",
+        parent_messages=parent_messages,
+        tools=loop.tools.get_definitions(),
+    )
+
+    assert summary is not None
+    assert used_model == "openai/gpt-4o-mini"
+    sent = provider.observed_messages[0]
+    assert sent[:-1] == parent_messages
+    assert ContextBuilder._SYSTEM_REMINDER_TAG in sent[-1]["content"]
+    assert "不要调用任何工具" in sent[-1]["content"]
 
 
 async def test_empty_assistant_without_tool_calls_not_persisted_to_session(
@@ -1301,7 +1344,4 @@ async def test_arguments_list_memory_consolidation_uses_first_item(
     assert result["history_added"] is True
     assert result["memory_updated"] is True
     assert session.messages == []
-
-
-
 
