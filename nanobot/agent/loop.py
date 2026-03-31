@@ -39,7 +39,6 @@ from nanobot.memory.extractor import MemoryExtractor
 from nanobot.memory.models import CompressionResult
 from nanobot.agent.cost_tracker import CostSnapshot, ModelUsage, SessionCostTracker
 from nanobot.agent.microcompact import (
-    COMPACTABLE_TOOL_NAMES as _MC_COMPACTABLE_TOOLS,
     TOOL_RESULT_CLEARED_MESSAGE as _MC_CLEARED_MSG,
     estimate_tool_result_tokens as _mc_estimate_tokens,
     microcompact_messages as _mc_compact,
