@@ -123,4 +123,157 @@ async def test_finished_task_is_removed_from_session_tracking(
     assert len(manager._session_task_ids) == 0
 
 
+async def test_spawn_registers_worker_protocol_record(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    manager = SubagentManager(
+        provider=DummyProvider(),
+        workspace=tmp_path,
+        bus=MessageBus(),
+    )
 
+    gate = asyncio.Event()
+    seen: dict[str, Any] = {}
+
+    async def _blocking_run(record: Any, task: str, origin: dict[str, str]) -> None:
+        seen["record"] = record
+        seen["task"] = task
+        seen["origin"] = origin
+        await gate.wait()
+
+    monkeypatch.setattr(manager, "_run_subagent", _blocking_run)
+
+    message = await manager.spawn(
+        task="protocol-task",
+        label="Protocol Task",
+        origin_channel="cli",
+        origin_chat_id="chat-a",
+    )
+
+    assert "worker:" in message
+    await _tick()
+    assert len(manager._worker_records) == 1
+    record = seen["record"]
+    assert record.worker_id.startswith("worker-")
+    assert record.label == "Protocol Task"
+    assert record.session_key == "cli:chat-a"
+    assert seen["task"] == "protocol-task"
+    assert seen["origin"] == {"channel": "cli", "chat_id": "chat-a"}
+    assert manager._worker_records[record.worker_id] == record
+    assert record.task_id in manager._running_tasks
+
+    manager._running_tasks[record.task_id].cancel()
+    await _tick()
+    assert len(manager._worker_records) == 0
+
+
+async def test_continue_unknown_worker_returns_safe_error(
+    tmp_path: Path,
+) -> None:
+    manager = SubagentManager(
+        provider=DummyProvider(),
+        workspace=tmp_path,
+        bus=MessageBus(),
+    )
+
+    result = await manager.continue_worker("worker-missing", "follow-up task")
+
+    assert result.startswith("Error: ")
+    assert "worker-missing" not in manager._worker_mailboxes
+
+
+async def test_continue_existing_worker_reuses_worker_id_and_records_mailbox(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    manager = SubagentManager(
+        provider=DummyProvider(),
+        workspace=tmp_path,
+        bus=MessageBus(),
+    )
+
+    async def _fast_run(*args: Any, **kwargs: Any) -> None:
+        return
+
+    monkeypatch.setattr(manager, "_run_subagent", _fast_run)
+
+    start_message = await manager.spawn(
+        task="initial task",
+        label="Initial Task",
+        origin_channel="cli",
+        origin_chat_id="chat-a",
+    )
+    assert "worker:" in start_message
+    await _tick()
+
+    assert len(manager._worker_mailboxes) == 1
+    worker_id = next(iter(manager._worker_mailboxes))
+    mailbox = manager._worker_mailboxes[worker_id]
+    assert mailbox.session_key == "cli:chat-a"
+    assert mailbox.origin_channel == "cli"
+    assert mailbox.origin_chat_id == "chat-a"
+    assert len(mailbox.history) == 1
+    assert mailbox.history[0].kind == "spawn"
+    assert mailbox.history[0].task == "initial task"
+
+    gate = asyncio.Event()
+    seen: dict[str, Any] = {}
+
+    async def _blocking_run(record: Any, task: str, origin: dict[str, str]) -> None:
+        seen["record"] = record
+        seen["task"] = task
+        seen["origin"] = origin
+        await gate.wait()
+
+    monkeypatch.setattr(manager, "_run_subagent", _blocking_run)
+
+    result = await manager.continue_worker(worker_id, "follow-up task")
+    assert "continued" in result
+    await _tick()
+
+    assert len(manager._worker_records) == 1
+    record = seen["record"]
+    assert record.worker_id == worker_id
+    assert record.session_key == "cli:chat-a"
+    assert seen["task"] == "follow-up task"
+    assert seen["origin"] == {"channel": "cli", "chat_id": "chat-a"}
+    assert len(manager._worker_mailboxes[worker_id].history) == 2
+    assert manager._worker_mailboxes[worker_id].history[1].kind == "continue"
+    assert manager._worker_mailboxes[worker_id].history[1].task == "follow-up task"
+
+    gate.set()
+    await _tick()
+    assert len(manager._worker_records) == 0
+
+
+async def test_task_notification_contains_worker_id_and_result(
+    tmp_path: Path,
+) -> None:
+    manager = SubagentManager(
+        provider=DummyProvider(),
+        workspace=tmp_path,
+        bus=MessageBus(),
+    )
+
+    record_type = type(
+        "Record",
+        (),
+        {
+            "worker_id": "worker-123",
+            "task_id": "task-123",
+            "label": "Protocol Task",
+        },
+    )
+    notification = manager._build_task_notification(
+        record_type(),
+        "completed",
+        "Agent 'Protocol Task' completed successfully",
+        "ok",
+    )
+
+    assert "<task-notification>" in notification
+    assert "<task-id>worker-123</task-id>" in notification
+    assert "<status>completed</status>" in notification
+    assert "<summary>Agent 'Protocol Task' completed successfully</summary>" in notification
+    assert "<result>ok</result>" in notification

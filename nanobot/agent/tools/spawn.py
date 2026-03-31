@@ -51,15 +51,32 @@ class SpawnTool(Tool):
                     "type": "string",
                     "description": "Optional short label for the task (for display)",
                 },
+                "worker_id": {
+                    "type": "string",
+                    "description": "Optional existing worker ID to continue",
+                },
             },
             "required": ["task"],
         }
     
-    async def execute(self, task: str, label: str | None = None, **kwargs: Any) -> str:
+    async def execute(
+        self,
+        task: str,
+        label: str | None = None,
+        worker_id: str | None = None,
+        **kwargs: Any,
+    ) -> str:
         """Spawn a subagent to execute the given task."""
+        if worker_id:
+            return await self._manager.continue_worker(
+                worker_id=worker_id,
+                task=task,
+                label=label,
+            )
         return await self._manager.spawn(
             task=task,
             label=label,
             origin_channel=self._origin_channel,
             origin_chat_id=self._origin_chat_id,
+            session_key=kwargs.get("session_key"),
         )

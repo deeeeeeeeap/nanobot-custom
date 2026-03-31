@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 import re
+from datetime import datetime
 import weakref
 from collections import Counter, deque
 from dataclasses import dataclass
@@ -36,6 +37,13 @@ from nanobot.memory.compressor import SessionCompressor
 from nanobot.memory.deduplicator import MemoryDeduplicator
 from nanobot.memory.extractor import MemoryExtractor
 from nanobot.memory.models import CompressionResult
+from nanobot.agent.cost_tracker import CostSnapshot, ModelUsage, SessionCostTracker
+from nanobot.agent.microcompact import (
+    COMPACTABLE_TOOL_NAMES as _MC_COMPACTABLE_TOOLS,
+    TOOL_RESULT_CLEARED_MESSAGE as _MC_CLEARED_MSG,
+    estimate_tool_result_tokens as _mc_estimate_tokens,
+    microcompact_messages as _mc_compact,
+)
 from nanobot.session.manager import SessionManager
 from nanobot.config.model_capabilities import supports_function_calling
 from nanobot.agent.hallucination_detector import (
@@ -143,6 +151,11 @@ def _is_execution_intent(user_message: str) -> bool:
 # 这些工具不算「真正完成了任务」，即使调了也不阻止空转干预
 _IDLE_EXEMPT_TOOLS = frozenset({"message", "send_message"})
 _IDLE_EXEMPT_EXEC_COMMANDS = frozenset({"date", "pwd", "whoami", "hostname"})
+_TOOL_RESULT_CLEARED_MESSAGE = _MC_CLEARED_MSG
+_QUERY_MICROCOMPACT_KEEP_RECENT = 4
+_QUERY_MICROCOMPACT_LARGE_RESULT_THRESHOLD = 800
+_TIME_BASED_TOOL_RESULT_IDLE_MINUTES = 30
+_MAX_CONSECUTIVE_COMPACTION_FAILURES = 3
 
 
 def _normalize_tool_arguments(arguments: object) -> dict:
@@ -193,6 +206,65 @@ def _is_meaningful_tool_call(tool_name: str, arguments: object = None) -> bool:
     if re.fullmatch(r"(date|pwd|whoami|hostname)(\s+[-/\w:.]+)?", command):
         return False
     return True
+
+
+# token 估算和 microcompact 统一由 nanobot.agent.microcompact 模块提供
+_tool_result_token_estimate = _mc_estimate_tokens
+
+
+def _copy_messages_for_microcompact(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """返回query-time压缩视图，委托给 microcompact 模块。"""
+    return _mc_compact(
+        messages,
+        keep_recent=_QUERY_MICROCOMPACT_KEEP_RECENT,
+        large_result_token_threshold=_QUERY_MICROCOMPACT_LARGE_RESULT_THRESHOLD,
+    )
+
+
+def _clean_idle_tool_results(session) -> bool:
+    """Clear stale tool-result content in stored session messages after long idle gaps."""
+    last_assistant_ts: str | None = None
+    for message in reversed(session.messages):
+        if message.get("role") == "assistant" and message.get("timestamp"):
+            last_assistant_ts = str(message["timestamp"])
+            break
+    if not last_assistant_ts:
+        return False
+
+    try:
+        last_assistant_dt = datetime.fromisoformat(last_assistant_ts)
+    except ValueError:
+        return False
+
+    idle_minutes = (datetime.now() - last_assistant_dt).total_seconds() / 60.0
+    if idle_minutes < _TIME_BASED_TOOL_RESULT_IDLE_MINUTES:
+        return False
+
+    compactable_names = {"exec", "read_file", "web_search", "web_fetch"}
+    compactable_ids = [
+        block.get("tool_call_id")
+        for block in session.messages
+        if block.get("role") == "tool" and block.get("name") in compactable_names and block.get("tool_call_id")
+    ]
+    if not compactable_ids:
+        return False
+
+    keep_ids = set(compactable_ids[-_QUERY_MICROCOMPACT_KEEP_RECENT:])
+    changed = False
+    for message in session.messages:
+        if message.get("role") != "tool" or message.get("name") not in compactable_names:
+            continue
+        if message.get("tool_call_id") in keep_ids:
+            continue
+        if _tool_result_token_estimate(message.get("content")) < _QUERY_MICROCOMPACT_LARGE_RESULT_THRESHOLD:
+            continue
+        if message.get("content") == _TOOL_RESULT_CLEARED_MESSAGE:
+            continue
+        message["content"] = _TOOL_RESULT_CLEARED_MESSAGE
+        changed = True
+    if changed:
+        session.updated_at = datetime.now()
+    return changed
 
 
 _STOP_SIGNALS = frozenset(
@@ -899,6 +971,90 @@ class AgentLoop:
         )
 
     @staticmethod
+    def _cost_snapshot_from_metadata(metadata: dict[str, Any]) -> CostSnapshot | None:
+        state = metadata.get("cost_tracker_state")
+        if not isinstance(state, dict):
+            return None
+
+        model_usage: dict[str, ModelUsage] = {}
+        raw_model_usage = state.get("model_usage")
+        if isinstance(raw_model_usage, dict):
+            for model, usage in raw_model_usage.items():
+                if not isinstance(model, str) or not isinstance(usage, dict):
+                    continue
+                model_usage[model] = ModelUsage(
+                    input_tokens=int(usage.get("input_tokens", 0) or 0),
+                    output_tokens=int(usage.get("output_tokens", 0) or 0),
+                    cache_read_tokens=int(usage.get("cache_read_tokens", 0) or 0),
+                    cache_creation_tokens=int(usage.get("cache_creation_tokens", 0) or 0),
+                    cost_usd=float(usage.get("cost_usd", 0.0) or 0.0),
+                )
+
+        return CostSnapshot(
+            total_input_tokens=int(state.get("total_input_tokens", 0) or 0),
+            total_output_tokens=int(state.get("total_output_tokens", 0) or 0),
+            total_cache_read_tokens=int(state.get("total_cache_read_tokens", 0) or 0),
+            total_cache_creation_tokens=int(state.get("total_cache_creation_tokens", 0) or 0),
+            total_cost_usd=float(state.get("total_cost_usd", 0.0) or 0.0),
+            model_usage=model_usage,
+        )
+
+    @staticmethod
+    def _cost_snapshot_to_metadata(snapshot: CostSnapshot) -> dict[str, Any]:
+        return {
+            "total_input_tokens": snapshot.total_input_tokens,
+            "total_output_tokens": snapshot.total_output_tokens,
+            "total_cache_read_tokens": snapshot.total_cache_read_tokens,
+            "total_cache_creation_tokens": snapshot.total_cache_creation_tokens,
+            "total_cost_usd": snapshot.total_cost_usd,
+            "model_usage": {
+                model: {
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": usage.output_tokens,
+                    "cache_read_tokens": usage.cache_read_tokens,
+                    "cache_creation_tokens": usage.cache_creation_tokens,
+                    "cost_usd": usage.cost_usd,
+                }
+                for model, usage in snapshot.model_usage.items()
+            },
+        }
+
+    def _record_session_cost_state(self, session, model: str, response: Any) -> None:
+        tracker = SessionCostTracker()
+        snapshot = self._cost_snapshot_from_metadata(session.metadata)
+        if snapshot is not None:
+            tracker._snapshot = snapshot
+        tracker.record(model, response)
+        session.metadata["cost_tracker_state"] = self._cost_snapshot_to_metadata(tracker.snapshot())
+
+    def _restore_session_runtime_metadata(self, session) -> None:
+        """Normalize persisted session metadata before a resumed turn runs."""
+        snapshot = self._cost_snapshot_from_metadata(session.metadata)
+        if snapshot is not None:
+            session.metadata["cost_tracker_state"] = self._cost_snapshot_to_metadata(snapshot)
+
+        raw_streak = session.metadata.get("compaction_failure_streak")
+        if raw_streak is not None:
+            try:
+                session.metadata["compaction_failure_streak"] = int(raw_streak)
+            except (TypeError, ValueError):
+                session.metadata["compaction_failure_streak"] = 0
+
+        if not session.metadata.get("last_assistant_timestamp"):
+            for message in reversed(session.messages):
+                if message.get("role") == "assistant" and message.get("timestamp"):
+                    session.metadata["last_assistant_timestamp"] = str(message["timestamp"])
+                    break
+
+        mode = session.metadata.get("mode")
+        if mode is not None and not isinstance(mode, str):
+            session.metadata["mode"] = str(mode)
+
+        worker_summary = session.metadata.get("worker_summary")
+        if worker_summary is not None and not isinstance(worker_summary, str):
+            session.metadata["worker_summary"] = str(worker_summary)
+
+    @staticmethod
     def _assistant_tool_call_ids(msg: dict) -> set[str]:
         if msg.get("role") != "assistant":
             return set()
@@ -980,6 +1136,8 @@ class AgentLoop:
             logger.debug("Skip empty assistant message persistence (no tool_calls)")
             return
         session.add_message("assistant", content or "", **kwargs)
+        if session.messages:
+            session.metadata["last_assistant_timestamp"] = str(session.messages[-1]["timestamp"])
 
     def _split_non_system_into_atomic_groups(self, messages: list[dict]) -> list[list[dict]]:
         """Keep assistant(tool_calls)+tool results as one atomic unit."""
@@ -1550,6 +1708,9 @@ class AgentLoop:
         effective_session_key = override_session_key or msg.session_key
         session = self.sessions.get_or_create(effective_session_key)
 
+        if _clean_idle_tool_results(session):
+            self.sessions.save(session)
+
         # Handle slash commands.
         raw_cmd = msg.content.strip()
         cmd = raw_cmd.lower()
@@ -1651,6 +1812,8 @@ class AgentLoop:
         if isinstance(cron_tool, CronTool):
             cron_tool.set_context(msg.channel, msg.chat_id)
 
+        self._restore_session_runtime_metadata(session)
+
         # Build LLM context with history + current message.
         messages = self.context.build_messages(
             history=session.get_history(),
@@ -1659,11 +1822,28 @@ class AgentLoop:
             channel=msg.channel,
             chat_id=msg.chat_id,
         )
-        messages, current_model = await self._compact_messages_for_context(
-            messages,
-            current_model,
-            runtime_config=runtime_config,
-        )
+        compaction_failure_streak = int(session.metadata.get("compaction_failure_streak", 0))
+        if compaction_failure_streak >= _MAX_CONSECUTIVE_COMPACTION_FAILURES:
+            logger.warning(
+                "Skipping context compaction after {} consecutive failures",
+                compaction_failure_streak,
+            )
+            messages = self._guard_context_window(messages, current_model)
+        else:
+            try:
+                messages, current_model = await self._compact_messages_for_context(
+                    messages,
+                    current_model,
+                    runtime_config=runtime_config,
+                )
+            except Exception:
+                compaction_failure_streak += 1
+                session.metadata["compaction_failure_streak"] = compaction_failure_streak
+                self.sessions.save(session)
+                raise
+            else:
+                session.metadata["compaction_failure_streak"] = 0
+                self.sessions.save(session)
         self._log_cache_prefix_fingerprint(
             session,
             model=current_model,
@@ -1744,8 +1924,9 @@ class AgentLoop:
                 requested_tool_choice,
             )
 
+            model_messages = _copy_messages_for_microcompact(messages)
             response, used_model = await self._chat_with_failover(
-                messages=messages,
+                messages=model_messages,
                 tools=tools_definitions,
                 tool_choice=requested_tool_choice,
                 primary_model=active_model,
@@ -1781,6 +1962,8 @@ class AgentLoop:
                 loop_exit_reason = "model_error"
                 persist_final_assistant = False
                 break
+
+            self._record_session_cost_state(session, active_model, response)
 
             # Handle tool calls.
             if response.has_tool_calls:
@@ -2108,6 +2291,8 @@ class AgentLoop:
         if isinstance(cron_tool, CronTool):
             cron_tool.set_context(origin_channel, origin_chat_id)
 
+        self._restore_session_runtime_metadata(session)
+
         messages = self.context.build_messages(
             history=session.get_history(),
             current_message=msg.content,
@@ -2144,8 +2329,9 @@ class AgentLoop:
         while iteration < self.max_iterations:
             iteration += 1
 
+            model_messages = _copy_messages_for_microcompact(messages)
             response, used_model = await self._chat_with_failover(
-                messages=messages,
+                messages=model_messages,
                 tools=self.tools.get_definitions(),
                 tool_choice="auto",
                 primary_model=active_model,
@@ -2244,21 +2430,52 @@ class AgentLoop:
     def _build_status_text(self, session) -> str:
         """Build a concise runtime status message."""
         model = self.model
-        fc = "已启用" if supports_function_calling(model) else "未启用"
-        tools = ", ".join(self.tools.tool_names) if self.tools.tool_names else "（无）"
-        return (
-            "运行状态：\n\n"
-            f"- 模型: {model}\n"
-            f"- Function calling: {fc}\n"
-            f"- 已注册工具: {tools}\n"
-            f"- 会话消息数: {len(session.messages)}\n"
-            f"- 记忆自动压缩: {'开启' if self.memory_config.auto_compress else '关闭'}\n"
-            f"- Loop detection: {'开启' if self.loop_detection_enabled else '关闭'} "
-            f"(break={self.loop_break_threshold})\n"
-            f"- Model failover: {'开启' if bool(self.model_fallbacks) else '关闭'}\n"
-            f"- Context compaction: {'开启' if self.compaction_enabled else '关闭'} "
-            f"(ratio={self.compaction_target_ratio:.2f})\n"
-            f"- Tool 输出预算: {self.tool_result_max_chars} chars"
+        fc = "enabled" if supports_function_calling(model) else "disabled"
+        tools = ", ".join(self.tools.tool_names) if self.tools.tool_names else "(none)"
+        cost_state = self._cost_snapshot_from_metadata(session.metadata)
+        if cost_state is None:
+            cost_lines = [
+                "- Cost: 0 input, 0 output, 0 cache read, 0 cache write, $0.0000",
+                "- Model usage: none",
+            ]
+        else:
+            cost_lines = [
+                (
+                    "- Cost: "
+                    f"{cost_state.total_input_tokens} input, "
+                    f"{cost_state.total_output_tokens} output, "
+                    f"{cost_state.total_cache_read_tokens} cache read, "
+                    f"{cost_state.total_cache_creation_tokens} cache write, "
+                    f"${cost_state.total_cost_usd:.4f}"
+                )
+            ]
+            if cost_state.model_usage:
+                for usage_model, usage in sorted(cost_state.model_usage.items()):
+                    cost_lines.append(
+                        "- "
+                        f"{usage_model}: "
+                        f"{usage.input_tokens} input, "
+                        f"{usage.output_tokens} output, "
+                        f"{usage.cache_read_tokens} cache read, "
+                        f"{usage.cache_creation_tokens} cache write, "
+                        f"${usage.cost_usd:.4f}"
+                    )
+            else:
+                cost_lines.append("- Model usage: none")
+        return "\n".join(
+            [
+                "Runtime status:",
+                f"- Model: {model}",
+                f"- Function calling: {fc}",
+                f"- Registered tools: {tools}",
+                f"- Session messages: {len(session.messages)}",
+                *cost_lines,
+                f"- Memory auto-compress: {'on' if self.memory_config.auto_compress else 'off'}",
+                f"- Loop detection: {'on' if self.loop_detection_enabled else 'off'} (break={self.loop_break_threshold})",
+                f"- Model failover: {'on' if bool(self.model_fallbacks) else 'off'}",
+                f"- Context compaction: {'on' if self.compaction_enabled else 'off'} (ratio={self.compaction_target_ratio:.2f})",
+                f"- Tool output budget: {self.tool_result_max_chars} chars",
+            ]
         )
 
     def _handle_model_command(self, raw_cmd: str) -> str:
@@ -2490,3 +2707,4 @@ Respond with ONLY valid JSON, no markdown fences."""
 
         response = await self._process_message(msg)
         return response.content if response else ""
+

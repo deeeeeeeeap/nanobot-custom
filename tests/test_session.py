@@ -121,3 +121,62 @@ def test_session_get_history_keeps_thinking_blocks() -> None:
 
     history = session.get_history()
     assert history[1]["thinking_blocks"] == [{"type": "thinking", "text": "step-a"}]
+
+
+def test_session_metadata_round_trip_preserves_restore_fields(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+    key = "telegram:meta-roundtrip"
+    manager = SessionManager(tmp_path)
+    session = manager.get_or_create(key)
+    session.set_metadata(
+        last_assistant_timestamp="2026-03-31T10:11:12",
+        compaction_failure_streak=3,
+        microcompact_stats={"turns": 8, "tokens_saved": 1234},
+        cost_tracker_state={"totalCostUSD": 1.25, "modelUsage": {"claude": {"inputTokens": 10}}},
+        mode="coordinator",
+        worker_summary="handled file cleanup",
+    )
+    session.add_message("user", "persist me")
+    manager.save(session)
+
+    reloaded = SessionManager(tmp_path).get_or_create(key)
+    assert reloaded.metadata == session.metadata
+    assert reloaded.updated_at >= reloaded.created_at
+
+
+def test_session_metadata_loads_legacy_files_without_new_fields(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+    key = "telegram:meta-legacy"
+    manager = SessionManager(tmp_path)
+    path = manager._get_session_path(key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        '{"_type":"metadata","key":"telegram:meta-legacy","created_at":"2026-02-16T00:00:00","updated_at":"2026-02-16T00:00:01","metadata":{"custom":"value"}}\n'
+        '{"role":"user","content":"hello"}\n',
+        encoding="utf-8",
+    )
+
+    session = manager.get_or_create(key)
+    assert session.key == key
+    assert session.metadata == {"custom": "value"}
+    assert session.get_history() == [{"role": "user", "content": "hello"}]
+    assert session.updated_at.isoformat().startswith("2026-02-16T00:00:01")
+
+
+def test_session_metadata_ignores_non_dict_metadata(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+    key = "telegram:meta-invalid"
+    manager = SessionManager(tmp_path)
+    path = manager._get_session_path(key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        '{"_type":"metadata","created_at":"2026-02-16T00:00:00","metadata":"oops"}\n'
+        '{"role":"user","content":"hello"}\n',
+        encoding="utf-8",
+    )
+
+    session = manager.get_or_create(key)
+    assert session.metadata == {}

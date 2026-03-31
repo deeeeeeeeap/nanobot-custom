@@ -6,6 +6,8 @@ import asyncio
 import json
 import uuid
 from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +21,34 @@ from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.web import WebSearchTool, WebFetchTool
+
+
+@dataclass(slots=True)
+class WorkerProtocolRecord:
+    worker_id: str
+    task_id: str
+    label: str
+    session_key: str
+    origin_channel: str
+    origin_chat_id: str
+
+
+@dataclass(slots=True)
+class WorkerMailboxEntry:
+    task_id: str
+    label: str
+    task: str
+    kind: str
+    timestamp: str
+
+
+@dataclass(slots=True)
+class WorkerMailbox:
+    worker_id: str
+    session_key: str
+    origin_channel: str
+    origin_chat_id: str
+    history: list[WorkerMailboxEntry] = field(default_factory=list)
 
 
 class SubagentManager:
@@ -49,6 +79,118 @@ class SubagentManager:
         self.restrict_to_workspace = restrict_to_workspace
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_task_ids: dict[str, set[str]] = defaultdict(set)
+        self._worker_records: dict[str, WorkerProtocolRecord] = {}
+        self._worker_mailboxes: dict[str, WorkerMailbox] = {}
+
+    def _make_session_key(
+        self,
+        origin_channel: str,
+        origin_chat_id: str,
+        session_key: str | None,
+    ) -> str:
+        return session_key or f"{origin_channel}:{origin_chat_id}"
+
+    def _make_worker_id(self, session_key: str) -> str:
+        # Stable per spawned worker. Future follow-up routing can target this ID.
+        return f"worker-{uuid.uuid4().hex[:12]}"
+
+    def _make_display_label(self, task: str, label: str | None) -> str:
+        return label or task[:30] + ("..." if len(task) > 30 else "")
+
+    def _record_worker_mailbox(
+        self,
+        *,
+        worker_id: str,
+        task_id: str,
+        label: str,
+        task: str,
+        session_key: str,
+        origin_channel: str,
+        origin_chat_id: str,
+        kind: str,
+    ) -> WorkerMailbox:
+        mailbox = self._worker_mailboxes.get(worker_id)
+        if mailbox is None:
+            mailbox = WorkerMailbox(
+                worker_id=worker_id,
+                session_key=session_key,
+                origin_channel=origin_channel,
+                origin_chat_id=origin_chat_id,
+            )
+            self._worker_mailboxes[worker_id] = mailbox
+        mailbox.history.append(
+            WorkerMailboxEntry(
+                task_id=task_id,
+                label=label,
+                task=task,
+                kind=kind,
+                timestamp=datetime.now().isoformat(),
+            )
+        )
+        return mailbox
+
+    def _launch_worker_task(
+        self,
+        record: WorkerProtocolRecord,
+        task: str,
+        origin: dict[str, str],
+        *,
+        kind: str,
+    ) -> str:
+        bg_task = asyncio.create_task(self._run_subagent(record, task, origin))
+        self._running_tasks[record.task_id] = bg_task
+        self._session_task_ids[record.session_key].add(record.task_id)
+        self._worker_records[record.worker_id] = record
+        self._record_worker_mailbox(
+            worker_id=record.worker_id,
+            task_id=record.task_id,
+            label=record.label,
+            task=task,
+            session_key=record.session_key,
+            origin_channel=record.origin_channel,
+            origin_chat_id=record.origin_chat_id,
+            kind=kind,
+        )
+
+        # Cleanup when done
+        bg_task.add_done_callback(
+            lambda _: self._cleanup_task_tracking(
+                record.task_id,
+                record.session_key,
+                record.worker_id,
+            )
+        )
+
+        logger.info(
+            "{} subagent [{}/{}]: {}",
+            "Spawned" if kind == "spawn" else "Continued",
+            record.task_id,
+            record.worker_id,
+            record.label,
+        )
+        action = "started" if kind == "spawn" else "continued"
+        return (
+            f"Subagent [{record.label}] {action} (id: {record.task_id}, worker: {record.worker_id}). "
+            "I'll notify you when it completes."
+        )
+
+    def _build_task_notification(
+        self,
+        record: WorkerProtocolRecord,
+        status: str,
+        summary: str,
+        result: str | None = None,
+    ) -> str:
+        parts = [
+            "<task-notification>",
+            f"<task-id>{record.worker_id}</task-id>",
+            f"<status>{status}</status>",
+            f"<summary>{summary}</summary>",
+        ]
+        if result is not None:
+            parts.append(f"<result>{result}</result>")
+        parts.append("</task-notification>")
+        return "\n".join(parts)
     
     async def spawn(
         self,
@@ -71,38 +213,70 @@ class SubagentManager:
             Status message indicating the subagent was started.
         """
         task_id = str(uuid.uuid4())[:8]
-        display_label = label or task[:30] + ("..." if len(task) > 30 else "")
+        display_label = self._make_display_label(task, label)
+        session_key = self._make_session_key(origin_channel, origin_chat_id, session_key)
+        worker_id = self._make_worker_id(session_key)
         
         origin = {
             "channel": origin_channel,
             "chat_id": origin_chat_id,
         }
-        effective_session_key = session_key or f"{origin_channel}:{origin_chat_id}"
-        
-        # Create background task
-        bg_task = asyncio.create_task(
-            self._run_subagent(task_id, task, display_label, origin)
+        record = WorkerProtocolRecord(
+            worker_id=worker_id,
+            task_id=task_id,
+            label=display_label,
+            session_key=session_key,
+            origin_channel=origin_channel,
+            origin_chat_id=origin_chat_id,
         )
-        self._running_tasks[task_id] = bg_task
-        self._session_task_ids[effective_session_key].add(task_id)
-        
-        # Cleanup when done
-        bg_task.add_done_callback(
-            lambda _: self._cleanup_task_tracking(task_id, effective_session_key)
-        )
-        
-        logger.info(f"Spawned subagent [{task_id}]: {display_label}")
-        return f"Subagent [{display_label}] started (id: {task_id}). I'll notify you when it completes."
+        return self._launch_worker_task(record, task, origin, kind="spawn")
 
-    def _cleanup_task_tracking(self, task_id: str, session_key: str) -> None:
+    async def continue_worker(
+        self,
+        worker_id: str,
+        task: str,
+        label: str | None = None,
+    ) -> str:
+        mailbox = self._worker_mailboxes.get(worker_id)
+        if mailbox is None:
+            return f"Error: worker not found: {worker_id}"
+        if worker_id in self._worker_records:
+            return f"Error: worker is still running: {worker_id}"
+
+        task_id = str(uuid.uuid4())[:8]
+        display_label = self._make_display_label(task, label)
+        record = WorkerProtocolRecord(
+            worker_id=worker_id,
+            task_id=task_id,
+            label=display_label,
+            session_key=mailbox.session_key,
+            origin_channel=mailbox.origin_channel,
+            origin_chat_id=mailbox.origin_chat_id,
+        )
+        origin = {
+            "channel": mailbox.origin_channel,
+            "chat_id": mailbox.origin_chat_id,
+        }
+        return self._launch_worker_task(record, task, origin, kind="continue")
+
+    def _cleanup_task_tracking(
+        self,
+        task_id: str,
+        session_key: str,
+        worker_id: str | None = None,
+    ) -> None:
         """Remove finished task from tracking maps."""
         self._running_tasks.pop(task_id, None)
         session_tasks = self._session_task_ids.get(session_key)
         if not session_tasks:
+            if worker_id is not None:
+                self._worker_records.pop(worker_id, None)
             return
         session_tasks.discard(task_id)
         if not session_tasks:
             self._session_task_ids.pop(session_key, None)
+        if worker_id is not None:
+            self._worker_records.pop(worker_id, None)
 
     def cancel_by_session(self, session_key: str) -> int:
         """
@@ -126,13 +300,17 @@ class SubagentManager:
     
     async def _run_subagent(
         self,
-        task_id: str,
+        record: WorkerProtocolRecord,
         task: str,
-        label: str,
         origin: dict[str, str],
     ) -> None:
         """Execute the subagent task and announce the result."""
-        logger.info(f"Subagent [{task_id}] starting task: {label}")
+        logger.info(
+            "Subagent [{}/{}] starting task: {}",
+            record.task_id,
+            record.worker_id,
+            record.label,
+        )
         
         try:
             # Build subagent tools (no message tool, no spawn tool)
@@ -194,7 +372,13 @@ class SubagentManager:
                     # Execute tools
                     for tool_call in response.tool_calls:
                         args_str = json.dumps(tool_call.arguments)
-                        logger.debug(f"Subagent [{task_id}] executing: {tool_call.name} with arguments: {args_str}")
+                        logger.debug(
+                            "Subagent [{}/{}] executing: {} with arguments: {}",
+                            record.task_id,
+                            record.worker_id,
+                            tool_call.name,
+                            args_str,
+                        )
                         result = await tools.execute(tool_call.name, tool_call.arguments)
                         messages.append({
                             "role": "tool",
@@ -209,18 +393,26 @@ class SubagentManager:
             if not final_result:
                 final_result = "（子代理已完成执行，但未返回文本结果。请检查工具执行日志。）"
             
-            logger.info(f"Subagent [{task_id}] completed successfully")
-            await self._announce_result(task_id, label, task, final_result, origin, "ok")
+            logger.info(
+                "Subagent [{}/{}] completed successfully",
+                record.task_id,
+                record.worker_id,
+            )
+            await self._announce_result(record, task, final_result, origin, "ok")
             
         except Exception as e:
             error_msg = f"Error: {str(e)}"
-            logger.error(f"Subagent [{task_id}] failed: {e}")
-            await self._announce_result(task_id, label, task, error_msg, origin, "error")
+            logger.error(
+                "Subagent [{}/{}] failed: {}",
+                record.task_id,
+                record.worker_id,
+                e,
+            )
+            await self._announce_result(record, task, error_msg, origin, "error")
     
     async def _announce_result(
         self,
-        task_id: str,
-        label: str,
+        record: WorkerProtocolRecord,
         task: str,
         result: str,
         origin: dict[str, str],
@@ -228,13 +420,25 @@ class SubagentManager:
     ) -> None:
         """Announce the subagent result to the main agent via the message bus."""
         status_text = "completed successfully" if status == "ok" else "failed"
+        notification_status = "completed" if status == "ok" else "failed"
+        notification = self._build_task_notification(
+            record,
+            notification_status,
+            f"Agent '{record.label}' {status_text}",
+            result,
+        )
         
-        announce_content = f"""[Subagent '{label}' {status_text}]
+        announce_content = f"""[Subagent '{record.label}' {status_text}]
+
+Worker ID: {record.worker_id}
 
 Task: {task}
 
 Result:
 {result}
+
+Protocol:
+{notification}
 
 Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not mention technical details like "subagent" or task IDs."""
         
@@ -247,7 +451,13 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         )
         
         await self.bus.publish_inbound(msg)
-        logger.debug(f"Subagent [{task_id}] announced result to {origin['channel']}:{origin['chat_id']}")
+        logger.debug(
+            "Subagent [{}/{}] announced result to {}:{}",
+            record.task_id,
+            record.worker_id,
+            origin["channel"],
+            origin["chat_id"],
+        )
     
     def _build_subagent_prompt(self, task: str) -> str:
         """Build a focused system prompt for the subagent."""
@@ -286,4 +496,3 @@ When you have completed the task, provide a clear summary of your findings or ac
     def get_running_count(self) -> int:
         """Return the number of currently running subagents."""
         return len(self._running_tasks)
-

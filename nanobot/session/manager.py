@@ -23,6 +23,15 @@ _HISTORY_KEYS = (
     "thinking_blocks",
 )
 
+_METADATA_KEYS = (
+    "last_assistant_timestamp",
+    "compaction_failure_streak",
+    "microcompact_stats",
+    "cost_tracker_state",
+    "mode",
+    "worker_summary",
+)
+
 
 @dataclass
 class Session:
@@ -81,6 +90,12 @@ class Session:
         """Clear all messages in the session."""
         self.messages = []
         self.updated_at = datetime.now()
+
+    def set_metadata(self, **kwargs: Any) -> None:
+        """Update persisted session metadata fields."""
+        for key, value in kwargs.items():
+            if key in _METADATA_KEYS:
+                self.metadata[key] = value
 
 
 class SessionManager:
@@ -161,6 +176,7 @@ class SessionManager:
                 messages = []
                 metadata = {}
                 created_at = None
+                updated_at = None
                 stored_key: str | None = None
 
                 with open(path, encoding="utf-8") as f:
@@ -172,10 +188,16 @@ class SessionManager:
                         data = json.loads(line)
 
                         if data.get("_type") == "metadata":
-                            metadata = data.get("metadata", {})
+                            raw_metadata = data.get("metadata", {})
+                            metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
                             created_at = (
                                 datetime.fromisoformat(data["created_at"])
                                 if data.get("created_at")
+                                else None
+                            )
+                            updated_at = (
+                                datetime.fromisoformat(data["updated_at"])
+                                if data.get("updated_at")
                                 else None
                             )
                             key_value = data.get("key")
@@ -198,6 +220,7 @@ class SessionManager:
                     key=effective_key,
                     messages=messages,
                     created_at=created_at or datetime.now(),
+                    updated_at=updated_at or created_at or datetime.now(),
                     metadata=metadata,
                 )
             except Exception as e:

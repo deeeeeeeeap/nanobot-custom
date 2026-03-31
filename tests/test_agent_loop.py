@@ -1,12 +1,15 @@
 ﻿import asyncio
 import weakref
 from pathlib import Path
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.loop import (
     AgentLoop,
+    _clean_idle_tool_results,
+    _copy_messages_for_microcompact,
     _ToolLoopDetector,
     _is_execution_intent,
     _is_lazy_response,
@@ -17,6 +20,7 @@ from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.exceptions import ConfigError
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from nanobot.session.manager import SessionManager
 
 
 class DummyProvider(LLMProvider):
@@ -107,6 +111,34 @@ class NoToolProvider(LLMProvider):
 
     def get_default_model(self) -> str:
         return "openai/gpt-4o-mini"
+
+
+class CostAwareProvider(LLMProvider):
+    def __init__(self) -> None:
+        super().__init__(api_key=None, api_base=None)
+        self.calls = 0
+
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        reasoning_effort: str | None = None,
+    ) -> LLMResponse:
+        self.calls += 1
+        return LLMResponse(
+            content="cost-aware reply",
+            finish_reason="stop",
+            usage={"input_tokens": 100, "output_tokens": 40},
+            cache_read_tokens=8,
+            cache_creation_tokens=2,
+        )
+
+    def get_default_model(self) -> str:
+        return "anthropic/claude-3-5-sonnet"
 
 
 class MessageOnlyProvider(LLMProvider):
@@ -758,6 +790,38 @@ async def test_process_direct_persists_tool_chain_reasoning_effort_and_thinking_
     assert history[3]["thinking_blocks"][0]["text"] == "读取结果可直接总结。"
 
 
+async def test_process_direct_records_cost_state_and_status(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "nanobot.agent.loop.load_config",
+        lambda: (_ for _ in ()).throw(ConfigError("test config missing")),
+    )
+    monkeypatch.setattr("nanobot.agent.loop.detect_hallucination", lambda *a, **k: _NoHallucination())
+
+    provider = CostAwareProvider()
+    loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path)
+
+    reply = await loop.process_direct("track usage", channel="telegram", chat_id="900")
+    assert reply == "cost-aware reply"
+
+    session = loop.sessions.get_or_create("telegram:900")
+    state = session.metadata["cost_tracker_state"]
+    assert state["total_input_tokens"] == 200
+    assert state["total_output_tokens"] == 80
+    assert state["total_cache_read_tokens"] == 16
+    assert state["total_cache_creation_tokens"] == 4
+    assert state["total_cost_usd"] > 0
+    assert "anthropic/claude-3-5-sonnet" in state["model_usage"]
+
+    status = await loop.process_direct("/status", channel="telegram", chat_id="900")
+    assert "- Cost: 200 input, 80 output, 16 cache read, 4 cache write" in status
+    assert "anthropic/claude-3-5-sonnet" in status
+    assert "$" in status
+
+    reloaded = SessionManager(tmp_path).get_or_create("telegram:900")
+    assert reloaded.metadata["cost_tracker_state"] == state
+
+
 def test_refresh_runtime_options_updates_reasoning_effort(monkeypatch, tmp_path: Path) -> None:
     loop = _make_loop(monkeypatch, tmp_path)
     assert loop.reasoning_effort == "medium"
@@ -1184,6 +1248,143 @@ async def test_compaction_summarizes_old_messages(monkeypatch, tmp_path: Path) -
     assert provider.observed_messages[0][0]["content"] == "system prompt"
 
 
+def test_query_microcompact_does_not_mutate_source_messages() -> None:
+    messages = [
+        {"role": "user", "content": "u0"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "t1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "t1", "name": "read_file", "content": "x" * 5000},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "t2", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "t2", "name": "read_file", "content": "y" * 5000},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "t3", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "t3", "name": "read_file", "content": "z" * 5000},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "t4", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "t4", "name": "read_file", "content": "w" * 5000},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "t5", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "t5", "name": "read_file", "content": "v" * 5000},
+    ]
+
+    view = _copy_messages_for_microcompact(messages)
+
+    assert view is not messages
+    assert view[2]["content"] == "[Old tool result content cleared]"
+    assert messages[2]["content"] == "x" * 5000
+
+
+def test_idle_tool_result_cleanup_clears_stale_content(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    session = SessionManager(tmp_path).get_or_create("telegram:idle")
+    old_ts = (datetime.now() - timedelta(minutes=31)).isoformat()
+    session.messages = [
+        {"role": "user", "content": "start", "timestamp": old_ts},
+        {"role": "assistant", "content": "done", "timestamp": old_ts},
+        {"role": "tool", "tool_call_id": "t1", "name": "read_file", "content": "x" * 5000, "timestamp": old_ts},
+        {"role": "assistant", "content": "done2", "timestamp": old_ts},
+        {"role": "tool", "tool_call_id": "t2", "name": "read_file", "content": "y" * 5000, "timestamp": old_ts},
+        {"role": "assistant", "content": "done3", "timestamp": old_ts},
+        {"role": "tool", "tool_call_id": "t3", "name": "read_file", "content": "z" * 5000, "timestamp": old_ts},
+        {"role": "assistant", "content": "done4", "timestamp": old_ts},
+        {"role": "tool", "tool_call_id": "t4", "name": "read_file", "content": "w" * 5000, "timestamp": old_ts},
+        {"role": "assistant", "content": "done5", "timestamp": old_ts},
+        {"role": "tool", "tool_call_id": "t5", "name": "read_file", "content": "v" * 5000, "timestamp": old_ts},
+    ]
+
+    changed = _clean_idle_tool_results(session)
+
+    assert changed is True
+    assert session.messages[2]["content"] == "[Old tool result content cleared]"
+
+
+async def test_compaction_failure_breaker_skips_helper(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "nanobot.agent.loop.load_config",
+        lambda: (_ for _ in ()).throw(ConfigError("test config missing")),
+    )
+    monkeypatch.setattr("nanobot.agent.loop.detect_hallucination", lambda *a, **k: _NoHallucination())
+
+    provider = NoToolProvider(reply="ok")
+    loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path)
+    session = loop.sessions.get_or_create("telegram:breaker")
+    session.metadata["compaction_failure_streak"] = 3
+    session.add_message("user", "history " + ("x" * 12000))
+    session.add_message("assistant", "reply " + ("y" * 12000))
+    loop.sessions.save(session)
+
+    called = False
+
+    async def _boom(*args, **kwargs):
+        raise AssertionError("compaction helper should be skipped")
+
+    def _guard(messages, model):
+        nonlocal called
+        called = True
+        return messages
+
+    monkeypatch.setattr(loop, "_compact_messages_for_context", _boom)
+    monkeypatch.setattr(loop, "_guard_context_window", _guard)
+
+    reply = await loop.process_direct("继续", channel="telegram", chat_id="breaker")
+
+    assert reply == "ok"
+    assert called is True
+
+
+async def test_resumed_session_restores_persisted_runtime_metadata(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "nanobot.agent.loop.load_config",
+        lambda: (_ for _ in ()).throw(ConfigError("test config missing")),
+    )
+    monkeypatch.setattr("nanobot.agent.loop.detect_hallucination", lambda *a, **k: _NoHallucination())
+
+    loop = AgentLoop(bus=MessageBus(), provider=CostAwareProvider(), workspace=tmp_path)
+    session = loop.sessions.get_or_create("telegram:restore")
+    session.metadata.update(
+        {
+            "compaction_failure_streak": "2",
+            "last_assistant_timestamp": "",
+            "cost_tracker_state": {
+                "total_input_tokens": 100,
+                "total_output_tokens": 40,
+                "total_cache_read_tokens": 8,
+                "total_cache_creation_tokens": 2,
+                "total_cost_usd": 0.0003,
+                "model_usage": {
+                    "anthropic/claude-3-5-sonnet": {
+                        "input_tokens": 100,
+                        "output_tokens": 40,
+                        "cache_read_tokens": 8,
+                        "cache_creation_tokens": 2,
+                        "cost_usd": 0.0003,
+                    }
+                },
+            },
+            "mode": 1,
+            "worker_summary": {"owner": "worker-g"},
+        }
+    )
+    session.add_message("assistant", "previous turn", timestamp="2026-03-31T09:00:00")
+    loop.sessions.save(session)
+
+    reply = await loop.process_direct("继续", channel="telegram", chat_id="restore")
+
+    assert reply == "cost-aware reply"
+    restored = loop.sessions.get_or_create("telegram:restore")
+    assert restored.metadata["compaction_failure_streak"] == 0
+    assert restored.metadata["mode"] == "1"
+    assert restored.metadata["worker_summary"] == "{'owner': 'worker-g'}"
+    assert restored.metadata["last_assistant_timestamp"]
+
+    cost_state = restored.metadata["cost_tracker_state"]
+    assert cost_state["total_input_tokens"] == 300
+    assert cost_state["total_output_tokens"] == 120
+    assert cost_state["total_cache_read_tokens"] == 24
+    assert cost_state["total_cache_creation_tokens"] == 6
+    assert cost_state["model_usage"]["anthropic/claude-3-5-sonnet"]["input_tokens"] == 300
+
+
 async def test_compaction_summary_timeout_falls_back(monkeypatch, tmp_path: Path) -> None:
     loop = _make_loop(monkeypatch, tmp_path)
 
@@ -1344,4 +1545,3 @@ async def test_arguments_list_memory_consolidation_uses_first_item(
     assert result["history_added"] is True
     assert result["memory_updated"] is True
     assert session.messages == []
-
