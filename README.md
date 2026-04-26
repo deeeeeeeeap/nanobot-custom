@@ -107,17 +107,17 @@
 git clone https://github.com/deeeeeeeeap/nanobot-custom.git /opt/nanobot
 cd /opt/nanobot
 
-# 安装
-apt install pipx -y && pipx ensurepath && source ~/.bashrc
-pipx install -e . --force
-pip install croniter --break-system-packages  # 定时任务依赖
-pip install sentence-transformers --break-system-packages  # 语义搜索（可选）
+# 1C1G VPS 推荐：默认只安装核心 + Telegram + cron + Codex/LiteLLM
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -e .
 ```
 
 ### 2. 初始化
 
 ```bash
-nanobot onboard
+nanobot setup
+nanobot doctor
 ```
 
 ### 3. 配置 `~/.nanobot/config.json`
@@ -154,6 +154,12 @@ nanobot onboard
       "search": {
         "api_key": "你的Brave-Search-API-Key"
       }
+    },
+    "result_storage": {
+      "enabled": true,
+      "threshold_chars": 8000,
+      "turn_budget_chars": 60000,
+      "path": "tool-results"
     }
   }
 }
@@ -195,9 +201,10 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/opt/nanobot
-ExecStart=/root/.local/bin/nanobot gateway
+ExecStart=/opt/nanobot/.venv/bin/nanobot gateway
 Restart=always
 RestartSec=10
+Environment=PYTHONUNBUFFERED=1
 
 [Install]
 WantedBy=multi-user.target
@@ -220,6 +227,23 @@ cd /opt/nanobot && git pull && systemctl restart nanobot
 
 # 冒烟测试（验证 Codex 连通性）
 python3 scripts/smoke_test_codex.py --model openai/gpt-5.3-codex
+
+# 本地诊断，不联网也能完成本地项检查
+nanobot doctor
+```
+
+## 📦 可选功能安装
+
+默认安装面向低配 VPS，不会安装非核心渠道 SDK、向量搜索大依赖或 WhatsApp bridge。需要时按需安装：
+
+```bash
+pip install -e '.[slack]'
+pip install -e '.[feishu]'
+pip install -e '.[dingtalk]'
+pip install -e '.[qq]'
+pip install -e '.[whatsapp]'
+pip install -e '.[vector]'
+pip install -e '.[dev]'
 ```
 
 ## 📱 Telegram 命令
@@ -304,6 +328,13 @@ nanobot search embed            # 激活语义搜索
 - **缓存指纹观测** — 每轮记录前缀指纹（model / system prompt / tools / skills 的 hash），自动检测哪一部分导致缓存失效
 - **Provider 缓存指标** — 从 LiteLLM 响应提取 `cache_read_tokens` / `cache_creation_tokens`，记录命中率日志
 - **Skills 确定性排序** — skills 目录遍历使用稳定排序，避免前缀漂移
+
+### 🪶 低配 VPS 运行优化
+
+- `nanobot setup` 等价于实用初始化向导，默认应用 `vps-1c1g` profile。
+- `nanobot onboard --wizard --profile vps-1c1g` 可保留已有密钥并补齐 Telegram/Codex/Brave 配置。
+- `nanobot doctor` 检查 Python、依赖、配置、workspace 写权限、Telegram token、Codex auth、Brave key 和低配 profile。
+- 大工具输出默认落盘到 workspace 下 `tool-results/`，上下文只保留 preview 和路径引用，降低 token 与内存压力。
 
 ### 📋 推特智能监控
 

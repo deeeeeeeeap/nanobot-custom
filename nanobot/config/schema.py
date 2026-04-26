@@ -386,10 +386,32 @@ class ExecToolConfig(BaseModel):
     timeout: int = Field(default=120, ge=1, le=600)
 
 
+class ResultStorageConfig(BaseModel):
+    """Configuration for spilling large tool results to workspace files."""
+
+    enabled: bool = True
+    threshold_chars: int = Field(default=8000, ge=1000, le=1_000_000)
+    turn_budget_chars: int = Field(default=60000, ge=5000, le=2_000_000)
+    path: str = "tool-results"
+    preview_chars: int = Field(default=3000, ge=500, le=100_000)
+
+    @field_validator("path")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        raw = value.strip().replace("\\", "/")
+        if not raw:
+            return "tool-results"
+        candidate = Path(raw)
+        if raw.startswith("/") or candidate.is_absolute() or ".." in candidate.parts:
+            raise ValueError("tools.result_storage.path must be workspace-relative")
+        return raw.strip("/")
+
+
 class ToolsConfig(BaseModel):
     """Tools configuration."""
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
+    result_storage: ResultStorageConfig = Field(default_factory=ResultStorageConfig)
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
 
 

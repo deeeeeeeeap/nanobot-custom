@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from nanobot.cli.commands import _make_provider
 from nanobot.config.loader import load_config
-from nanobot.config.schema import Config
+from nanobot.config.schema import Config, ResultStorageConfig
 from nanobot.exceptions import ConfigError
 from nanobot.providers.codex_provider import CodexProvider
 
@@ -87,6 +87,10 @@ def test_search_config_defaults_and_validation() -> None:
     assert cfg.providers.codex.enabled is False
     assert cfg.providers.codex.server_compaction_enabled is False
     assert cfg.providers.codex.compact_threshold == 80000
+    assert cfg.tools.result_storage.enabled is True
+    assert cfg.tools.result_storage.threshold_chars == 8000
+    assert cfg.tools.result_storage.turn_budget_chars == 60000
+    assert cfg.tools.result_storage.path == "tool-results"
 
     with pytest.raises(ValidationError):
         Config.model_validate({"search": {"default_limit": 0}})
@@ -141,6 +145,30 @@ def test_search_config_defaults_and_validation() -> None:
         Config.model_validate({"agents": {"defaults": {"compaction_target_ratio": 1.2}}})
     with pytest.raises(ValidationError):
         Config.model_validate({"providers": {"codex": {"timeout": 5}}})
+    with pytest.raises(ValidationError):
+        ResultStorageConfig(path="/tmp/outside")
+
+
+def test_load_config_accepts_result_storage_camel_case(tmp_path) -> None:
+    config_path = tmp_path / "config.json"
+    data = {
+        "tools": {
+            "resultStorage": {
+                "enabled": True,
+                "thresholdChars": 12345,
+                "turnBudgetChars": 70000,
+                "path": "tool-results",
+                "previewChars": 2500,
+            }
+        }
+    }
+    config_path.write_text(json.dumps(data), encoding="utf-8")
+
+    config = load_config(config_path)
+    assert config.tools.result_storage.enabled is True
+    assert config.tools.result_storage.threshold_chars == 12345
+    assert config.tools.result_storage.turn_budget_chars == 70000
+    assert config.tools.result_storage.preview_chars == 2500
 
 
 def test_make_provider_selects_codex_when_enabled(monkeypatch, tmp_path) -> None:

@@ -30,7 +30,7 @@ from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.memory_tool import MemoryTool
 from nanobot.agent.subagent import SubagentManager
 from nanobot.config.loader import load_config, save_config
-from nanobot.config.schema import ExecToolConfig, MemoryConfig, SearchConfig
+from nanobot.config.schema import ExecToolConfig, MemoryConfig, ResultStorageConfig, SearchConfig
 from nanobot.cron.service import CronService
 from nanobot.exceptions import ConfigError, NanobotError
 from nanobot.memory.compressor import SessionCompressor
@@ -43,6 +43,7 @@ from nanobot.agent.microcompact import (
     estimate_tool_result_tokens as _mc_estimate_tokens,
     microcompact_messages as _mc_compact,
 )
+from nanobot.agent.tool_result_storage import persist_tool_result_if_needed
 from nanobot.session.manager import SessionManager
 from nanobot.config.model_capabilities import supports_function_calling
 from nanobot.agent.hallucination_detector import (
@@ -513,6 +514,7 @@ class AgentLoop:
         context_guard_min_tokens: int = 16000,
         context_guard_warn_tokens: int = 32000,
         tool_result_max_chars: int = 12000,
+        result_storage_config: ResultStorageConfig | None = None,
         compaction_enabled: bool = True,
         compaction_target_ratio: float = 0.45,
         fallback_provider: LLMProvider | None = None,
@@ -557,6 +559,8 @@ class AgentLoop:
             context_guard_warn_tokens,
         )
         self.tool_result_max_chars = max(1000, tool_result_max_chars)
+        self.result_storage_config = result_storage_config or ResultStorageConfig()
+        self._tool_result_turn_chars = 0
         self.compaction_enabled = compaction_enabled
         self.compaction_target_ratio = min(0.9, max(0.1, compaction_target_ratio))
         self.search_store = None
@@ -854,6 +858,8 @@ class AgentLoop:
             defaults.context_guard_warn_tokens,
         )
         self.tool_result_max_chars = max(1000, defaults.tool_result_max_chars)
+        if hasattr(config, "tools") and hasattr(config.tools, "result_storage"):
+            self.result_storage_config = config.tools.result_storage
         self.compaction_enabled = defaults.compaction_enabled
         self.compaction_target_ratio = min(0.9, max(0.1, defaults.compaction_target_ratio))
 
@@ -1510,6 +1516,31 @@ class AgentLoop:
         tail_text = result[-tail:] if tail > 0 else ""
         return f"{result[:head]}\n[...省略 {omitted} 字符...]\n{tail_text}"
 
+    def _reset_tool_result_turn_budget(self) -> None:
+        self._tool_result_turn_chars = 0
+
+    def _prepare_tool_result(self, result: str, tool_name: str, tool_call_id: str) -> str:
+        """Persist large tool output or output that would exceed this turn's budget."""
+        force_persist = False
+        if self.result_storage_config.enabled:
+            next_total = self._tool_result_turn_chars + len(result)
+            force_persist = next_total > self.result_storage_config.turn_budget_chars
+            self._tool_result_turn_chars = next_total
+        try:
+            stored = persist_tool_result_if_needed(
+                content=result,
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                workspace=self.workspace,
+                config=self.result_storage_config,
+                force=force_persist,
+            )
+            result = stored.content
+        except (OSError, ValueError) as e:
+            logger.warning("Tool result persistence failed: {}", e)
+            return f"Error: tool result storage failed for {tool_name}: {e}"
+        return self._truncate_tool_result(result)
+
     def _get_session_compression_lock(self, session_key: str) -> asyncio.Lock:
         lock = self._session_compression_locks.get(session_key)
         if lock is None:
@@ -1679,6 +1710,8 @@ class AgentLoop:
         """
         if reporter is None:
             reporter = NullReporter()
+
+        self._reset_tool_result_turn_budget()
 
         if msg.channel == "system":
             return await self._process_system_message(msg)
@@ -2036,7 +2069,7 @@ class AgentLoop:
                     if tool_call.name in _IDLE_EXEMPT_TOOLS:
                         message_tool_count += 1
                     result_text = self._add_tool_error_hint(
-                        self._truncate_tool_result(str(result))
+                        self._prepare_tool_result(str(result), tool_call.name, tool_call.id)
                     )
 
                     success = not (isinstance(result_text, str) and result_text.startswith("Error"))
@@ -2265,6 +2298,7 @@ class AgentLoop:
         the response back to the correct destination.
         """
         logger.info(f"Processing system message from {msg.sender_id}")
+        self._reset_tool_result_turn_budget()
 
         if ":" in msg.chat_id:
             parts = msg.chat_id.split(":", 1)
@@ -2370,7 +2404,7 @@ class AgentLoop:
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
                     result = await self.tools.execute(tool_call.name, normalized_args)
                     result_text = self._add_tool_error_hint(
-                        self._truncate_tool_result(str(result))
+                        self._prepare_tool_result(str(result), tool_call.name, tool_call.id)
                     )
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result_text

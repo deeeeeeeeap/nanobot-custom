@@ -22,29 +22,55 @@ dependencies = [
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
     "websockets>=12.0",
-    "websocket-client>=1.6.0",
     "httpx[socks]>=0.25.0",
     "loguru>=0.7.0",
     "readability-lxml>=0.8.0",
     "rich>=13.0.0",
     "croniter>=2.0.0",
-    "dingtalk-stream>=0.4.0",
     "python-telegram-bot[socks]>=21.0",
-    "lark-oapi>=1.0.0",
-    "socksio>=1.0.0",
-    "python-socketio>=5.11.0",
-    "msgpack>=1.0.8",
-    "slack-sdk>=3.26.0",
-    "qq-botpy>=1.0.0",
     "python-socks[asyncio]>=2.4.0",
     "Jinja2>=3.1.0",
 ]
 
 [project.optional-dependencies]
+discord = [
+    "websockets>=12.0",
+]
+slack = [
+    "slack-sdk>=3.26.0",
+]
+feishu = [
+    "lark-oapi>=1.0.0",
+]
+dingtalk = [
+    "dingtalk-stream>=0.4.0",
+    "websocket-client>=1.6.0",
+]
+qq = [
+    "qq-botpy>=1.0.0",
+]
+whatsapp = [
+    "websockets>=12.0",
+]
+mochat = [
+    "python-socketio>=5.11.0",
+    "msgpack>=1.0.8",
+]
+vector = [
+    "sentence-transformers>=2.7.0",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "ruff>=0.1.0",
+    "dingtalk-stream>=0.4.0",
+    "lark-oapi>=1.0.0",
+    "python-socketio>=5.11.0",
+    "msgpack>=1.0.8",
+    "slack-sdk>=3.26.0",
+    "qq-botpy>=1.0.0",
+    "sentence-transformers>=2.7.0",
+    "websocket-client>=1.6.0",
 ]
 
 [project.scripts]

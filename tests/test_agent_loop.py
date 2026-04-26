@@ -18,6 +18,7 @@ from nanobot.agent.loop import (
 )
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
+from nanobot.config.schema import ResultStorageConfig
 from nanobot.exceptions import ConfigError
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.session.manager import SessionManager
@@ -655,6 +656,52 @@ def test_tool_result_budget_keeps_head_and_tail(monkeypatch, tmp_path: Path) -> 
     assert reduced.startswith("A" * 100)
     assert "省略" in reduced
     assert reduced.endswith("B" * 100)
+
+
+def test_prepare_tool_result_persists_large_output(monkeypatch, tmp_path: Path) -> None:
+    loop = _make_loop(monkeypatch, tmp_path)
+    loop.tool_result_max_chars = 9000
+    loop.result_storage_config = ResultStorageConfig(threshold_chars=1000, preview_chars=500)
+
+    prepared = loop._prepare_tool_result("X" * 1200, "exec", "call-large")
+
+    assert "Full output saved to workspace path: tool-results/" in prepared
+    persisted = list((tmp_path / "tool-results").glob("*.txt"))
+    assert len(persisted) == 1
+    assert persisted[0].read_text(encoding="utf-8") == "X" * 1200
+
+
+def test_prepare_tool_result_uses_turn_budget(monkeypatch, tmp_path: Path) -> None:
+    loop = _make_loop(monkeypatch, tmp_path)
+    loop.tool_result_max_chars = 9000
+    loop.result_storage_config = ResultStorageConfig(
+        threshold_chars=4000,
+        turn_budget_chars=5000,
+        preview_chars=500,
+    )
+    loop._reset_tool_result_turn_budget()
+
+    first = loop._prepare_tool_result("A" * 3000, "exec", "call-1")
+    second = loop._prepare_tool_result("B" * 3000, "exec", "call-2")
+
+    assert first == "A" * 3000
+    assert "Full output saved to workspace path: tool-results/" in second
+    persisted = list((tmp_path / "tool-results").glob("*.txt"))
+    assert len(persisted) == 1
+    assert persisted[0].read_text(encoding="utf-8") == "B" * 3000
+
+
+def test_prepare_tool_result_reports_storage_error(monkeypatch, tmp_path: Path) -> None:
+    loop = _make_loop(monkeypatch, tmp_path)
+    loop.result_storage_config = ResultStorageConfig(threshold_chars=1000)
+
+    def _fail_persist(**kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("nanobot.agent.loop.persist_tool_result_if_needed", _fail_persist)
+    prepared = loop._prepare_tool_result("X" * 1200, "exec", "call-fail")
+
+    assert prepared == "Error: tool result storage failed for exec: disk full"
 
 
 async def test_new_command_returns_feedback(monkeypatch, tmp_path: Path) -> None:

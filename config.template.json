@@ -5,7 +5,10 @@
             "model": "minimax/MiniMax-M2.1",
             "maxTokens": 8192,
             "temperature": 0.7,
-            "maxToolIterations": 20
+            "maxToolIterations": 20,
+            "toolResultMaxChars": 8000,
+            "compactionEnabled": true,
+            "compactionTargetRatio": 0.35
         }
     },
     "channels": {
@@ -25,6 +28,12 @@
         "minimax": {
             "apiKey": "在这里填入 MiniMax API Key",
             "apiBase": "https://api.minimaxi.com/anthropic"
+        },
+        "codex": {
+            "enabled": false,
+            "codexHome": "~/.codex",
+            "model": "gpt-5.3-codex",
+            "timeout": 300
         }
     },
     "gateway": {
@@ -37,6 +46,23 @@
                 "apiKey": "在这里填入 Brave Search API Key（可选）",
                 "maxResults": 5
             }
+        },
+        "resultStorage": {
+            "enabled": true,
+            "thresholdChars": 8000,
+            "turnBudgetChars": 60000,
+            "path": "tool-results",
+            "previewChars": 3000
         }
+    },
+    "search": {
+        "enabled": true,
+        "autoIndex": false,
+        "vectorEnabled": false
+    },
+    "logging": {
+        "level": "INFO",
+        "maxFileBytes": 52428800,
+        "maxFiles": 3
     }
 }

@@ -1,78 +1,121 @@
-# nanobot 新 VPS 部署指南
+# nanobot 低配 VPS 部署指南
 
-## 🚀 快速部署
+目标环境：1C1G Linux VPS，常驻 Telegram / cron / Codex / LiteLLM。默认安装不拉取 Slack、飞书、钉钉、QQ、向量搜索等重依赖。
 
-### 1. 上传项目到新 VPS
-
-```bash
-# 在新 VPS 上创建目录
-mkdir -p /root/nanobot
-cd /root/nanobot
-```
-
-用 FinalShell 或 scp 将本地 `nanobot-main` 文件夹上传到 `/root/nanobot/`
-
-### 2. 安装 pipx（如果没有）
+## 1. 安装
 
 ```bash
 apt update
-apt install pipx -y
-pipx ensurepath
-source ~/.bashrc
+apt install -y git python3 python3-venv
+
+git clone https://github.com/deeeeeeeeap/nanobot-custom.git /opt/nanobot
+cd /opt/nanobot
+
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -e .
 ```
 
-### 3. 安装 nanobot
+可选功能按需安装：
 
 ```bash
-cd /root/nanobot
-pipx install -e . --force
+pip install -e '.[slack]'
+pip install -e '.[feishu]'
+pip install -e '.[dingtalk]'
+pip install -e '.[qq]'
+pip install -e '.[whatsapp]'
+pip install -e '.[vector]'
+pip install -e '.[dev]'
 ```
 
-### 4. 初始化配置
+## 2. 初始化与诊断
 
 ```bash
-nanobot onboard
+nanobot setup
+nanobot doctor
 ```
 
-### 5. 配置 API Keys
+`setup` 会默认应用 `vps-1c1g` profile：
 
-```bash
-nano ~/.nanobot/config.json
-```
+- 关闭语义向量搜索与自动索引。
+- 限制 `maxToolIterations` 和工具结果内联长度。
+- 启用上下文压缩。
+- 大工具结果落盘到 workspace 的 `tool-results/`。
+- 收紧日志轮转到 50MB x 3。
 
-填入以下内容（替换占位符）：
+如果已有配置，wizard 会保留现有值；密钥只显示遮蔽值。
+
+## 3. 最小配置示例
 
 ```json
 {
   "agents": {
     "defaults": {
-      "model": "minimax/MiniMax-M2.1"
+      "workspace": "~/.nanobot/workspace",
+      "model": "openai/gpt-5.3-codex",
+      "maxToolIterations": 20,
+      "toolResultMaxChars": 8000,
+      "compactionEnabled": true,
+      "compactionTargetRatio": 0.35
     }
   },
   "channels": {
     "telegram": {
       "enabled": true,
-      "token": "你的Telegram-Bot-Token",
-      "allowFrom": ["你的用户ID"]
+      "token": "你的 Telegram Bot Token",
+      "allowFrom": ["你的 Telegram 用户 ID"]
     }
   },
   "providers": {
+    "codex": {
+      "enabled": true,
+      "codexHome": "~/.codex",
+      "model": "gpt-5.3-codex",
+      "timeout": 300
+    },
     "minimax": {
-      "apiKey": "你的MiniMax-API-Key",
-      "apiBase": "https://api.minimaxi.com/anthropic"
+      "apiKey": "你的 MiniMax API Key",
+      "apiBase": "https://api.minimaxi.com/v1"
     }
   },
   "tools": {
     "web": {
       "search": {
-        "apiKey": "你的Brave-Search-API-Key"
+        "apiKey": "你的 Brave Search API Key（可选）"
       }
+    },
+    "resultStorage": {
+      "enabled": true,
+      "thresholdChars": 8000,
+      "turnBudgetChars": 60000,
+      "path": "tool-results",
+      "previewChars": 3000
     }
+  },
+  "search": {
+    "autoIndex": false,
+    "vectorEnabled": false
+  },
+  "logging": {
+    "maxFileBytes": 52428800,
+    "maxFiles": 3
   }
 }
 ```
 
-### 6. 创建 systemd 服务
+## 4. Codex 登录
+
+Codex Provider 读取 `~/.codex/auth.json`：
+
+```bash
+mkdir -p ~/.codex
+scp ~/.codex/auth.json root@你的VPS:~/.codex/auth.json
+nanobot doctor
+```
+
+`doctor` 不会联网验证 token；缺失时只给出本地诊断。
+
+## 5. systemd
 
 ```bash
 cat > /etc/systemd/system/nanobot.service << 'EOF'
@@ -83,50 +126,33 @@ After=network.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/root/nanobot
-ExecStart=/root/.local/bin/nanobot gateway
+WorkingDirectory=/opt/nanobot
+ExecStart=/opt/nanobot/.venv/bin/nanobot gateway
 Restart=always
 RestartSec=10
+Environment=PYTHONUNBUFFERED=1
 
 [Install]
 WantedBy=multi-user.target
 EOF
-```
 
-### 7. 启动服务
-
-```bash
 systemctl daemon-reload
-systemctl enable nanobot
-systemctl start nanobot
+systemctl enable --now nanobot
 systemctl status nanobot
 ```
 
-### 8. 查看日志
+## 6. 排错流程
 
 ```bash
+nanobot doctor
 journalctl -u nanobot -f
-```
-
----
-
-## 📱 Telegram 命令
-
-- `/start` - 开始使用
-- `/model` - 查看/切换模型
-
-## 🔧 常用操作
-
-```bash
-# 重启服务
 systemctl restart nanobot
-
-# 停止服务
-systemctl stop nanobot
-
-# 查看状态
-nanobot status
-
-# 查看配置
-cat ~/.nanobot/config.json
 ```
+
+常见情况：
+
+- `Config missing`：运行 `nanobot setup`。
+- `Telegram token missing`：重新运行 setup 或编辑 `~/.nanobot/config.json`。
+- `Codex auth missing`：复制 `~/.codex/auth.json` 到 VPS。
+- `Optional slack/feishu/... missing`：对应渠道未启用可以忽略；启用后安装对应 extra。
+- `VPS profile not fully applied`：运行 `nanobot onboard --wizard --profile vps-1c1g`。

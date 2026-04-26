@@ -268,37 +268,372 @@ def main(
 
 
 @app.command()
-def onboard():
+def onboard(
+    wizard: bool = typer.Option(False, "--wizard", help="Run the interactive setup wizard"),
+    profile: str | None = typer.Option(
+        None,
+        "--profile",
+        help="Apply a runtime profile, e.g. vps-1c1g",
+    ),
+):
     """Initialize nanobot configuration and workspace."""
-    from nanobot.config.loader import get_config_path, save_config
+    _initialize_config(wizard=wizard, profile=profile, force_wizard_profile=False)
+
+
+@app.command()
+def setup(
+    profile: str = typer.Option("vps-1c1g", "--profile", help="Setup profile to apply"),
+):
+    """Run the practical first-run setup wizard."""
+    _initialize_config(wizard=True, profile=profile, force_wizard_profile=True)
+
+
+def _initialize_config(*, wizard: bool, profile: str | None, force_wizard_profile: bool) -> None:
+    from nanobot.config.loader import get_config_path, load_config, save_config
     from nanobot.config.schema import Config
-    from nanobot.utils.helpers import get_workspace_path
-    
+    from nanobot.exceptions import ConfigError
+
     config_path = get_config_path()
-    
-    if config_path.exists():
+    config_exists = config_path.exists()
+
+    if config_exists and not wizard and profile is None:
         console.print(f"[yellow]Config already exists at {config_path}[/yellow]")
         if not typer.confirm("Overwrite?"):
             raise typer.Exit()
-    
-    # Create default config
-    config = Config()
+        config = Config()
+    elif config_exists:
+        try:
+            config = load_config(config_path)
+        except ConfigError as e:
+            console.print(f"[red]Invalid existing config:[/red] {e}")
+            raise typer.Exit(1) from e
+        console.print(f"[cyan]Using existing config at {config_path}; blank wizard input keeps current values.[/cyan]")
+    else:
+        config = Config()
+
+    if profile:
+        _apply_runtime_profile(config, profile)
+
+    if wizard:
+        _run_setup_wizard(config, default_profile=profile if force_wizard_profile else None)
+
     save_config(config)
-    console.print(f"[green]OK[/green] Created config at {config_path}")
-    
-    # Create workspace
-    workspace = get_workspace_path()
-    console.print(f"[green]OK[/green] Created workspace at {workspace}")
-    
-    # Create default bootstrap files
+    console.print(f"[green]OK[/green] Saved config at {config_path}")
+
+    workspace = config.workspace_path
+    workspace.mkdir(parents=True, exist_ok=True)
+    console.print(f"[green]OK[/green] Workspace ready at {workspace}")
     _create_workspace_templates(workspace)
-    
+
     console.print(f"\n{__logo__} nanobot is ready!")
+    _print_config_summary(config)
     console.print("\nNext steps:")
-    console.print("  1. Add your API key to [cyan]~/.nanobot/config.json[/cyan]")
-    console.print("     Get one at: https://openrouter.ai/keys")
-    console.print("  2. Chat: [cyan]nanobot agent -m \"Hello!\"[/cyan]")
-    console.print("\n[dim]Want Telegram/WhatsApp? See: https://github.com/HKUDS/nanobot#-chat-apps[/dim]")
+    console.print("  1. Check local setup: [cyan]nanobot doctor[/cyan]")
+    console.print("  2. Start gateway: [cyan]nanobot gateway[/cyan]")
+    console.print("  3. Chat once: [cyan]nanobot agent -m \"Hello\"[/cyan]")
+
+
+def _apply_runtime_profile(config, profile: str) -> None:
+    normalized = (profile or "").strip().lower()
+    if normalized in {"", "none"}:
+        return
+    if normalized != "vps-1c1g":
+        console.print(f"[red]Unknown profile: {profile}[/red]")
+        raise typer.Exit(1)
+    _apply_vps_profile(config)
+
+
+def _apply_vps_profile(config):
+    """Apply low-memory defaults suitable for a 1C1G VPS."""
+    config.search.vector_enabled = False
+    config.search.auto_index = False
+    config.agents.defaults.max_tool_iterations = 20
+    config.agents.defaults.tool_result_max_chars = 8000
+    config.agents.defaults.compaction_enabled = True
+    config.agents.defaults.compaction_target_ratio = 0.35
+    config.logging.max_file_bytes = 50 * 1024 * 1024
+    config.logging.max_files = 3
+    config.tools.result_storage.enabled = True
+    config.tools.result_storage.threshold_chars = 8000
+    config.tools.result_storage.turn_budget_chars = 60000
+    config.tools.result_storage.path = "tool-results"
+    config.tools.result_storage.preview_chars = 3000
+
+    return config
+
+
+def _mask_secret(value: str | None) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return "<not set>"
+    if len(raw) <= 4:
+        return "***"
+    if len(raw) <= 10:
+        return f"{raw[:1]}***{raw[-1:]} ({len(raw)} chars)"
+    return f"{raw[:3]}...{raw[-3:]} ({len(raw)} chars)"
+
+
+def _prompt_keep_or_new(label: str, current: str = "", *, secret: bool = False) -> str:
+    display = _mask_secret(current) if secret else (current or "<not set>")
+    prompt = f"{label} [{display}]"
+    value = typer.prompt(prompt, default="", hide_input=secret, show_default=False)
+    return current if value == "" else value.strip()
+
+
+def _prompt_bool(label: str, current: bool) -> bool:
+    return typer.confirm(f"{label} (current: {'yes' if current else 'no'})", default=current)
+
+
+def _run_setup_wizard(config, default_profile: str | None = None):
+    console.print(f"\n{__logo__} nanobot setup wizard")
+    console.print("[dim]Press Enter to keep existing values. Secrets are masked in summaries.[/dim]\n")
+
+    apply_vps = default_profile == "vps-1c1g" or typer.confirm(
+        "Apply low-resource VPS profile (1C1G recommended)?",
+        default=True,
+    )
+    if apply_vps:
+        _apply_vps_profile(config)
+        console.print("[green]OK[/green] Applied vps-1c1g profile")
+
+    config.agents.defaults.workspace = _prompt_keep_or_new(
+        "Workspace path",
+        config.agents.defaults.workspace,
+    )
+    config.agents.defaults.model = _prompt_keep_or_new(
+        "Default model",
+        config.agents.defaults.model,
+    )
+
+    config.providers.codex.enabled = _prompt_bool(
+        "Enable native Codex provider",
+        config.providers.codex.enabled,
+    )
+    if config.providers.codex.enabled:
+        config.providers.codex.codex_home = _prompt_keep_or_new(
+            "Codex home",
+            config.providers.codex.codex_home,
+        )
+        config.providers.codex.model = _prompt_keep_or_new(
+            "Codex model",
+            config.providers.codex.model,
+        )
+        timeout_raw = _prompt_keep_or_new("Codex timeout seconds", str(config.providers.codex.timeout))
+        try:
+            config.providers.codex.timeout = int(timeout_raw)
+        except ValueError:
+            console.print("[yellow]Invalid timeout ignored; keeping previous value.[/yellow]")
+
+    provider_name = typer.prompt(
+        "LiteLLM fallback provider (openrouter/minimax/openai/antigravity; blank to skip)",
+        default="",
+        show_default=False,
+    ).strip().lower()
+    if provider_name:
+        provider = getattr(config.providers, provider_name, None)
+        if provider is None:
+            console.print(f"[yellow]Unknown provider '{provider_name}', skipped.[/yellow]")
+        else:
+            provider.api_key = _prompt_keep_or_new(
+                f"{provider_name} API key",
+                provider.api_key,
+                secret=True,
+            )
+            base_default = provider.api_base or ""
+            provider.api_base = _prompt_keep_or_new(
+                f"{provider_name} API base",
+                base_default,
+            ) or None
+
+    config.channels.telegram.enabled = _prompt_bool(
+        "Enable Telegram channel",
+        config.channels.telegram.enabled,
+    )
+    if config.channels.telegram.enabled:
+        config.channels.telegram.token = _prompt_keep_or_new(
+            "Telegram bot token",
+            config.channels.telegram.token,
+            secret=True,
+        )
+        allow_current = ",".join(config.channels.telegram.allow_from)
+        allow_raw = _prompt_keep_or_new("Telegram allowFrom (comma-separated)", allow_current)
+        config.channels.telegram.allow_from = [
+            item.strip() for item in allow_raw.split(",") if item.strip()
+        ]
+        if not config.channels.telegram.token:
+            config.channels.telegram.enabled = False
+            console.print("[yellow]Telegram token is empty; Telegram was disabled.[/yellow]")
+
+    config.tools.web.search.api_key = _prompt_keep_or_new(
+        "Brave Search API key (optional)",
+        config.tools.web.search.api_key,
+        secret=True,
+    )
+    _print_config_summary(config)
+
+
+def _print_config_summary(config) -> None:
+    table = Table(title="Config Summary")
+    table.add_column("Item", style="cyan")
+    table.add_column("Value")
+    table.add_row("Workspace", str(config.workspace_path))
+    table.add_row("Model", config.agents.defaults.model)
+    table.add_row("Codex", "enabled" if config.providers.codex.enabled else "disabled")
+    table.add_row("Telegram", "enabled" if config.channels.telegram.enabled else "disabled")
+    table.add_row("Telegram token", _mask_secret(config.channels.telegram.token))
+    table.add_row("Brave key", _mask_secret(config.tools.web.search.api_key))
+    table.add_row("Vector search", "enabled" if config.search.vector_enabled else "disabled")
+    table.add_row(
+        "Tool result storage",
+        f"{'enabled' if config.tools.result_storage.enabled else 'disabled'}, "
+        f"threshold={config.tools.result_storage.threshold_chars}, "
+        f"path={config.tools.result_storage.path}",
+    )
+    console.print(table)
+
+
+def _module_available(module: str) -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec(module) is not None
+
+
+def _is_vps_profile_effective(config) -> bool:
+    return (
+        config.search.vector_enabled is False
+        and config.search.auto_index is False
+        and config.agents.defaults.max_tool_iterations <= 20
+        and config.agents.defaults.tool_result_max_chars <= 8000
+        and config.agents.defaults.compaction_enabled is True
+        and config.tools.result_storage.enabled is True
+        and config.tools.result_storage.threshold_chars <= 8000
+        and config.logging.max_file_bytes <= 50 * 1024 * 1024
+        and config.logging.max_files <= 3
+    )
+
+
+def _codex_auth_path(config) -> Path:
+    env_auth = os.environ.get("CODEX_AUTH_PATH")
+    if env_auth:
+        return Path(env_auth).expanduser()
+    return Path(config.providers.codex.codex_home).expanduser() / "auth.json"
+
+
+@app.command()
+def doctor():
+    """Check local configuration, dependencies, workspace, and auth state."""
+    from nanobot.config.loader import get_config_path, load_config
+    from nanobot.exceptions import ConfigError
+
+    table = Table(title="nanobot doctor")
+    table.add_column("Check", style="cyan")
+    table.add_column("Status")
+    table.add_column("Detail")
+    errors = 0
+    warnings = 0
+
+    def add(name: str, status: str, detail: str) -> None:
+        nonlocal errors, warnings
+        if status == "FAIL":
+            errors += 1
+            style = "[red]FAIL[/red]"
+        elif status == "WARN":
+            warnings += 1
+            style = "[yellow]WARN[/yellow]"
+        else:
+            style = "[green]OK[/green]"
+        table.add_row(name, style, detail)
+
+    if sys.version_info >= (3, 11):
+        add("Python", "OK", sys.version.split()[0])
+    else:
+        add("Python", "FAIL", f"{sys.version.split()[0]}; require >=3.11")
+
+    for module in ("typer", "litellm", "pydantic", "httpx", "loguru", "rich", "croniter", "telegram"):
+        add(f"Dependency {module}", "OK" if _module_available(module) else "FAIL", module)
+
+    config_path = get_config_path()
+    if not config_path.exists():
+        add("Config", "FAIL", f"missing: {config_path}; run nanobot setup")
+        console.print(table)
+        raise typer.Exit(1)
+
+    add("Config", "OK", str(config_path))
+    try:
+        config = load_config(config_path)
+    except ConfigError as e:
+        add("Config parse", "FAIL", str(e))
+        console.print(table)
+        raise typer.Exit(1) from e
+    add("Config parse", "OK", "valid")
+
+    workspace = config.workspace_path
+    if not workspace.exists():
+        add("Workspace", "WARN", f"missing: {workspace}; run nanobot setup")
+    elif not workspace.is_dir():
+        add("Workspace", "FAIL", f"not a directory: {workspace}")
+    else:
+        add("Workspace", "OK", str(workspace))
+        probe = workspace / ".nanobot_write_test"
+        try:
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+            add("Workspace write", "OK", "writable")
+        except OSError as e:
+            add("Workspace write", "FAIL", str(e))
+
+    if config.channels.telegram.enabled:
+        add(
+            "Telegram token",
+            "OK" if config.channels.telegram.token else "FAIL",
+            "configured" if config.channels.telegram.token else "missing token",
+        )
+    else:
+        add("Telegram token", "WARN", "channel disabled")
+
+    if config.providers.codex.enabled:
+        auth_path = _codex_auth_path(config)
+        add(
+            "Codex auth",
+            "OK" if auth_path.exists() else "WARN",
+            f"auth file {'found' if auth_path.exists() else 'missing'} at {auth_path}",
+        )
+    else:
+        add("Codex auth", "WARN", "provider disabled")
+
+    add(
+        "Brave Search key",
+        "OK" if config.tools.web.search.api_key else "WARN",
+        "configured" if config.tools.web.search.api_key else "not set; web search tool will be limited",
+    )
+    add(
+        "VPS profile",
+        "OK" if _is_vps_profile_effective(config) else "WARN",
+        "vps-1c1g settings active" if _is_vps_profile_effective(config) else "not fully applied",
+    )
+
+    optional_modules = {
+        "slack": ("slack_sdk", config.channels.slack.enabled),
+        "feishu": ("lark_oapi", config.channels.feishu.enabled),
+        "dingtalk": ("dingtalk_stream", config.channels.dingtalk.enabled),
+        "qq": ("botpy", config.channels.qq.enabled),
+        "mochat": ("socketio", config.channels.mochat.enabled),
+    }
+    for name, (module, enabled) in optional_modules.items():
+        if not enabled:
+            add(f"Optional {name}", "OK", "disabled; dependency not required")
+        else:
+            add(
+                f"Optional {name}",
+                "OK" if _module_available(module) else "FAIL",
+                f"{module} {'available' if _module_available(module) else 'missing'}",
+            )
+
+    console.print(table)
+    if errors:
+        console.print(f"[red]{errors} failure(s), {warnings} warning(s).[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]Doctor complete[/green] ({warnings} warning(s))")
 
 
 
@@ -491,6 +826,7 @@ def gateway(
         context_guard_min_tokens=config.agents.defaults.context_guard_min_tokens,
         context_guard_warn_tokens=config.agents.defaults.context_guard_warn_tokens,
         tool_result_max_chars=config.agents.defaults.tool_result_max_chars,
+        result_storage_config=config.tools.result_storage,
         compaction_enabled=config.agents.defaults.compaction_enabled,
         compaction_target_ratio=config.agents.defaults.compaction_target_ratio,
     )
@@ -693,6 +1029,7 @@ def agent(
         context_guard_min_tokens=config.agents.defaults.context_guard_min_tokens,
         context_guard_warn_tokens=config.agents.defaults.context_guard_warn_tokens,
         tool_result_max_chars=config.agents.defaults.tool_result_max_chars,
+        result_storage_config=config.tools.result_storage,
         compaction_enabled=config.agents.defaults.compaction_enabled,
         compaction_target_ratio=config.agents.defaults.compaction_target_ratio,
     )
@@ -1528,6 +1865,7 @@ def memory_compress(
         context_guard_min_tokens=config.agents.defaults.context_guard_min_tokens,
         context_guard_warn_tokens=config.agents.defaults.context_guard_warn_tokens,
         tool_result_max_chars=config.agents.defaults.tool_result_max_chars,
+        result_storage_config=config.tools.result_storage,
         compaction_enabled=config.agents.defaults.compaction_enabled,
         compaction_target_ratio=config.agents.defaults.compaction_target_ratio,
     )
