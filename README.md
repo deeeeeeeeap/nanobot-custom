@@ -1,117 +1,80 @@
 <div align="center">
-  <img src="nanobot_logo.png" alt="nanobot" width="500">
-  <h1>🦾 碳核 (Carbon-Core)</h1>
-  <p>基于 nanobot 的超轻量级个人 AI 助手 — 不空谈，只行动</p>
+  <img src="nanobot_logo.png" alt="nanobot" width="460">
+  <h1>Carbon-Core / 碳核</h1>
+  <p>面向低配 VPS 的个人 AI 助手：Telegram 常驻、定时任务、工具执行、记忆、Codex/LiteLLM 多模型路由。</p>
   <p>
-    <a href="README_EN.md">📖 English</a> •
-    <a href="#-快速部署">🚀 部署</a> •
-    <a href="#-特性一览">✨ 特性</a> •
-    <a href="#-支持的模型">📦 模型</a>
+    <a href="#快速开始">快速开始</a> ·
+    <a href="#低配-vps-推荐">低配 VPS</a> ·
+    <a href="#配置">配置</a> ·
+    <a href="#部署">部署</a> ·
+    <a href="#测试">测试</a>
   </p>
   <p>
-    <img src="https://img.shields.io/badge/python-≥3.11-blue" alt="Python">
+    <img src="https://img.shields.io/badge/python-%E2%89%A53.11-blue" alt="Python">
+    <img src="https://img.shields.io/badge/tests-253%20passed-brightgreen" alt="Tests">
+    <img src="https://img.shields.io/badge/default-Telegram%20%2B%20cron%20%2B%20Codex%2FLiteLLM-green" alt="Default install">
     <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
-    <img src="https://img.shields.io/badge/tests-212_passed-brightgreen" alt="Tests">
-    <img src="https://img.shields.io/badge/channels-8-blueviolet" alt="Channels">
   </p>
 </div>
 
-> *"我是碳核，你的碳基生命在硅基世界的延伸。无论是探测服务器漏洞，还是想听一首我推荐的歌，我都在。"* 🦾
+## 项目定位
 
-## ✨ 特性一览
+`nanobot-custom` 是基于 upstream nanobot 深度定制的轻量个人 Agent。当前默认部署目标是：
 
-<table>
-<tr>
-<td width="50%">
+- 1C1G Linux VPS。
+- Telegram 长轮询常驻。
+- cron / remind / heartbeat 自动化。
+- Codex Provider + LiteLLM fallback。
+- 本地 workspace、长期记忆、文件/命令/web/search 工具。
+- 默认轻依赖，非核心渠道和向量搜索按需安装。
 
-### 🧠 智能核心
-- 🤖 **多模型热切换** — Claude / Gemini / GPT / Codex / DeepSeek / MiniMax / Kimi
-- 🌐 **Antigravity 网关** — 多 Google 账号轮换，免费用 Claude & Gemini
-- 🔌 **原生 Codex Provider** — 直连 OpenAI Responses API，无需中间 Bridge
-- 🔐 **OAuth 自动刷新** — Codex token 过期自动续期（HTTP + CLI 兜底）
-- 🧬 **思维链支持** — DeepSeek-R1、Claude Thinking 推理过程可视化
-- 🔄 **交错思维链** — 工具执行后自动反思，提升多步推理质量
-- ⚡ **反空转干预** — 执行型请求 `tool_choice=required` 源头阻断空转
-- 💰 **Prompt Caching 架构** — 前缀稳定化 + cache-safe compaction + 缓存命中率监控
-- 📊 **缓存指纹观测** — 自动检测前缀漂移，定位缓存失效根因
+核心原则：**先稳定运行，再按需加能力**。默认安装不会拉起 Slack、飞书、钉钉、QQ、WhatsApp bridge、Mochat、向量搜索等重组件。
 
-</td>
-<td width="50%">
+## 特性
 
-### 🛡️ 安全可靠
-- 🛡️ **防幻觉机制** — 自动拦截编造的命令输出、虚假搜索结果
-- 🔒 **命令安全护栏** — 智能拦截危险操作 + `$()` 受控放行
-- 🔗 **URL 真实性验证** — 模型给出的链接也要查验
-- 📊 **实时状态反馈** — 🤔→🔧→✅ 执行进度一目了然
-- 🧠 **双层记忆** — 长期事实 + 事件日志，跨会话永久记忆
-- 🔎 **知识搜索** — BM25 全文检索 + 可选语义向量搜索
-- 🔀 **智能容错** — Codex/非 Codex 模型自动路由 + failover 兜底
+### 低配 VPS 优化
 
-</td>
-</tr>
-<tr>
-<td>
+- `nanobot setup`：交互式初始化，默认应用 `vps-1c1g` profile。
+- `nanobot doctor`：检查 Python、依赖、配置、workspace 写权限、Telegram token、Codex auth、Brave key、低配 profile。
+- 默认关闭向量搜索与自动索引，避免低内存机器拉起大模型 embedding 依赖。
+- 大工具结果落盘到 workspace 的 `tool-results/`，上下文只保留 preview 和路径。
+- `turnBudgetChars` 对单轮工具结果总量生效，避免多个中等结果累计撑爆上下文。
+- 日志轮转收紧到 50MB x 3。
 
-### ⏰ 自动化
-- ⏰ **提醒模式** — 定时发送静态提醒
-- 🤖 **Agent 模式** — 定时执行完整工具链任务（天气预报、系统巡检）
-- 🎯 **一次性定时 `at`** — 指定时间执行一次，完成自动删除
-- 🚀 **子代理** — 后台派遣长任务，无需持续盯着
-- 💓 **心跳保活** — 7×24 在线，崩溃自动重启
+### Agent 能力
 
-</td>
-<td>
+- 多模型：Codex、OpenAI、Claude、Gemini、DeepSeek、MiniMax、Kimi、OpenRouter、Antigravity 等。
+- Codex / 非 Codex 自动路由，支持 fallback。
+- 工具链：shell、文件读写、web fetch/search、记忆、cron、子代理、消息发送。
+- 自动上下文压缩：超上下文预算时压缩旧消息，保护最近用户请求和最近 tail。
+- Prompt caching 友好：稳定 system 前缀、cache fingerprint、cache-safe compaction。
+- 防幻觉：拦截编造命令输出、虚假搜索结果等明显异常。
+- 反空转：执行型请求优先强制工具调用，减少“只说不做”。
 
-### 📱 全平台接入
-- Telegram ✅ (reply-to 引用) | 飞书 ✅ | 钉钉 ✅ | Slack ✅
-- Email ✅ | QQ ✅ | Discord ✅ (长消息自动分片) | WhatsApp ✅
+### 渠道与自动化
 
-</td>
-</tr>
-</table>
+- 默认渠道：Telegram。
+- 可选渠道：Discord、Slack、飞书、钉钉、QQ、WhatsApp、Mochat。
+- 定时任务：
+  - 静态提醒。
+  - Agent 模式定时执行。
+  - 一次性 `at` 任务。
+  - heartbeat 后台任务。
 
-## 🏗️ 架构概览
+## 快速开始
 
-```
-用户消息
-  ↓
-┌─────────────┐    ┌──────────────────────┐
-│  8 种 Channel │───→│     AgentLoop        │
-└─────────────┘    │  ┌─────────────────┐  │
-                   │  │ _pick_provider  │  │
-                   │  │  for_model()    │  │
-                   │  └───┬────────┬────┘  │
-                   │      ↓        ↓       │
-                   │ CodexProvider  LiteLLM │ ← 自动路由
-                   │  (Responses   Provider │
-                   │   API + SSE)    (通用) │
-                   │      ↓        ↓       │
-                   │  CodexAuth   litellm   │
-                   │  (OAuth 自动   (多模型  │
-                   │   刷新)       适配)    │
-                   └──────────────────────┘
-                          ↓
-                   ┌──────────────┐
-                   │  工具链执行    │
-                   │ Shell / File  │
-                   │ Web / Memory  │
-                   │ Cron / Search │
-                   └──────────────┘
-```
-
-## 🚀 快速部署
-
-### 1. 克隆 & 安装
+### 1. 安装
 
 ```bash
 git clone https://github.com/deeeeeeeeap/nanobot-custom.git /opt/nanobot
 cd /opt/nanobot
 
-# 1C1G VPS 推荐：默认只安装核心 + Telegram + cron + Codex/LiteLLM
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -e .
 ```
+
+默认安装内容：核心运行依赖 + Telegram + cron + Codex/LiteLLM 必需项。
 
 ### 2. 初始化
 
@@ -120,76 +83,180 @@ nanobot setup
 nanobot doctor
 ```
 
-### 3. 配置 `~/.nanobot/config.json`
+`setup` 会保留已有配置中的密钥；摘要输出会遮蔽 token/API key。
+
+### 3. 启动
+
+```bash
+nanobot gateway
+```
+
+本地 CLI 测试：
+
+```bash
+nanobot agent -m "你好，简单介绍一下当前配置"
+```
+
+## 低配 VPS 推荐
+
+1C1G VPS 推荐保持默认轻量安装，只启用 Telegram + 一个主模型 provider：
+
+```bash
+pip install -e .
+nanobot setup
+nanobot doctor
+nanobot gateway
+```
+
+`vps-1c1g` profile 会写入/调整：
 
 ```json
 {
   "agents": {
     "defaults": {
+      "maxToolIterations": 20,
+      "toolResultMaxChars": 8000,
+      "compactionEnabled": true,
+      "compactionTargetRatio": 0.35
+    }
+  },
+  "tools": {
+    "resultStorage": {
+      "enabled": true,
+      "thresholdChars": 8000,
+      "turnBudgetChars": 60000,
+      "path": "tool-results",
+      "previewChars": 3000
+    }
+  },
+  "search": {
+    "autoIndex": false,
+    "vectorEnabled": false
+  },
+  "logging": {
+    "maxFileBytes": 52428800,
+    "maxFiles": 3
+  }
+}
+```
+
+注意：profile 不会关闭你已经启用的 optional channel，但低配机器建议只保留必要渠道。
+
+## 配置
+
+默认配置文件：
+
+```text
+~/.nanobot/config.json
+```
+
+最小 Telegram + Codex 示例：
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "workspace": "~/.nanobot/workspace",
       "model": "openai/gpt-5.3-codex",
-      "model_fallbacks": ["antigravity/claude-opus-4-6-thinking"]
+      "maxToolIterations": 20,
+      "toolResultMaxChars": 8000,
+      "compactionEnabled": true
     }
   },
   "channels": {
     "telegram": {
       "enabled": true,
-      "token": "你的Telegram-Bot-Token",
-      "allow_from": ["你的用户ID"]
+      "token": "YOUR_TELEGRAM_BOT_TOKEN",
+      "allowFrom": ["YOUR_TELEGRAM_USER_ID"]
     }
   },
   "providers": {
     "codex": {
       "enabled": true,
-      "codex_home": "~/.codex",
+      "codexHome": "~/.codex",
       "model": "gpt-5.3-codex",
-      "timeout": 120
-    },
-    "antigravity": {
-      "api_key": "你的API-Key",
-      "api_base": "http://127.0.0.1:8045/v1"
+      "timeout": 300
     }
   },
   "tools": {
     "web": {
       "search": {
-        "api_key": "你的Brave-Search-API-Key"
+        "apiKey": ""
       }
     },
-    "result_storage": {
+    "resultStorage": {
       "enabled": true,
-      "threshold_chars": 8000,
-      "turn_budget_chars": 60000,
+      "thresholdChars": 8000,
+      "turnBudgetChars": 60000,
       "path": "tool-results"
     }
   }
 }
 ```
 
-### 4. Codex 登录
+LiteLLM provider 示例：
 
-Codex Provider 需要 OAuth token（存储在 `~/.codex/auth.json`）：
-
-```bash
-# 方案 A（推荐）：从已登录的本地机器复制 token
-scp ~/.codex/auth.json root@你的VPS:~/.codex/auth.json
-
-# 方案 B：在 VPS 上通过 Codex CLI 登录
-npx @anthropic-ai/codex   # 进入交互模式后完成授权
+```json
+{
+  "agents": {
+    "defaults": {
+      "model": "minimax/MiniMax-M2.1"
+    }
+  },
+  "providers": {
+    "minimax": {
+      "apiKey": "YOUR_MINIMAX_API_KEY",
+      "apiBase": "https://api.minimaxi.com/v1"
+    }
+  }
+}
 ```
 
-> 💡 Token 过期后 Nanobot 会自动刷新（先尝试 HTTP refresh → 失败则 CLI 兜底），无需手动干预。
+不要把真实 token/API key 提交到仓库。
 
-### 5. 部署 Antigravity 网关（可选）
+## Codex auth
 
-```bash
-docker run -d --name antigravity-manager \
-  -p 8045:8045 \
-  -e API_KEY=你的API密钥 \
-  -v ~/.antigravity_tools:/root/.antigravity_tools \
-  lbjlaq/antigravity-manager:latest
+Codex Provider 默认读取：
+
+```text
+~/.codex/auth.json
 ```
 
-### 6. systemd 服务
+推荐从已登录机器复制：
+
+```bash
+mkdir -p ~/.codex
+scp ~/.codex/auth.json root@YOUR_VPS:~/.codex/auth.json
+nanobot doctor
+```
+
+`doctor` 只做本地文件存在性检查，不会联网验证 token。
+
+## 可选功能安装
+
+默认不安装非核心渠道 SDK。需要时按需安装：
+
+```bash
+pip install -e '.[discord]'
+pip install -e '.[slack]'
+pip install -e '.[feishu]'
+pip install -e '.[dingtalk]'
+pip install -e '.[qq]'
+pip install -e '.[whatsapp]'
+pip install -e '.[mochat]'
+pip install -e '.[vector]'
+pip install -e '.[dev]'
+```
+
+说明：
+
+- `.[vector]` 会安装向量搜索依赖，低配 VPS 不建议默认开启。
+- `.[dev]` 包含测试和各 optional channel 依赖，适合开发/CI。
+- 未启用的 optional channel 不会 import 对应 SDK。
+
+## 部署
+
+systemd 示例：
 
 ```bash
 cat > /etc/systemd/system/nanobot.service << 'EOF'
@@ -210,196 +277,115 @@ Environment=PYTHONUNBUFFERED=1
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload && systemctl enable --now nanobot
+systemctl daemon-reload
+systemctl enable --now nanobot
+systemctl status nanobot
 ```
 
-## 🔧 日常操作
+常用命令：
 
 ```bash
-# 查看日志
 journalctl -u nanobot -f
+systemctl restart nanobot
+nanobot doctor
+nanobot status
+```
 
-# 只看 cron 定时任务日志
-journalctl -u nanobot --no-pager | grep -i cron
+更多部署细节见 [`DEPLOY.md`](DEPLOY.md)。
 
-# 快速更新
-cd /opt/nanobot && git pull && systemctl restart nanobot
+## Telegram 命令
 
-# 冒烟测试（验证 Codex 连通性）
-python3 scripts/smoke_test_codex.py --model openai/gpt-5.3-codex
+| 命令 | 说明 |
+| --- | --- |
+| `/help` | 查看命令 |
+| `/status` | 查看运行状态 |
+| `/model` | 查看当前模型和 provider 状态 |
+| `/model <模型名>` | 切换模型 |
+| `/new` | 整合记忆后开始新会话 |
+| `/clear` | 清空当前会话历史 |
+| `/stop` | 中断当前会话下的后台子代理 |
 
-# 本地诊断，不联网也能完成本地项检查
+## CLI 命令
+
+```bash
+nanobot setup
+nanobot onboard --wizard --profile vps-1c1g
+nanobot doctor
+nanobot gateway
+nanobot agent -m "hello"
+nanobot status
+nanobot search status
+nanobot search query "关键词"
+nanobot memory status
+nanobot memory compress --session cli:default
+```
+
+## 架构
+
+```text
+Telegram / CLI / Cron / Optional Channels
+        |
+        v
+MessageBus + SessionManager
+        |
+        v
+AgentLoop
+  - ContextBuilder
+  - Compaction / context guard
+  - Tool loop detector
+  - Hallucination detector
+  - Cost/cache tracking
+        |
+        +--> CodexProvider
+        +--> LiteLLMProvider
+        |
+        +--> ToolRegistry
+             - file / shell / web / memory / cron / spawn / message
+```
+
+## 目录结构
+
+```text
+nanobot/
+├── agent/                 # AgentLoop、上下文、工具、缓存指纹、防幻觉
+├── channels/              # Telegram 和 optional channels
+├── cli/                   # Typer CLI
+├── config/                # Pydantic schema 和 loader
+├── cron/                  # 定时任务
+├── memory/                # 结构化记忆压缩、提取、去重
+├── providers/             # Codex / LiteLLM providers
+├── search/                # FTS5 和可选向量搜索
+└── session/               # 会话持久化
+```
+
+## 测试
+
+```bash
+python -m pytest -q
+```
+
+当前基线：
+
+```text
+253 passed, 2 skipped
+```
+
+## 排错
+
+优先运行：
+
+```bash
 nanobot doctor
 ```
 
-## 📦 可选功能安装
+常见问题：
 
-默认安装面向低配 VPS，不会安装非核心渠道 SDK、向量搜索大依赖或 WhatsApp bridge。需要时按需安装：
+- `Config missing`：运行 `nanobot setup`。
+- `Telegram token missing`：检查 `channels.telegram.token`。
+- `Codex auth missing`：检查 `~/.codex/auth.json`。
+- optional channel SDK missing：安装对应 extra，或关闭对应 channel。
+- VPS profile not fully applied：运行 `nanobot onboard --wizard --profile vps-1c1g`。
 
-```bash
-pip install -e '.[slack]'
-pip install -e '.[feishu]'
-pip install -e '.[dingtalk]'
-pip install -e '.[qq]'
-pip install -e '.[whatsapp]'
-pip install -e '.[vector]'
-pip install -e '.[dev]'
-```
+## 致谢
 
-## 📱 Telegram 命令
-
-| 命令 | 说明 |
-|------|------|
-| `/model` | 查看当前模型 & 可用 providers |
-| `/model <模型名>` | 热切换模型 |
-| `/status` | 系统状态 |
-| `/new` | 整合记忆后开始新对话 |
-| `/help` | 显示可用命令 |
-| `/clear` | 清除会话历史（磁盘 + 内存缓存） |
-
-## 🤖 碳核定制功能
-
-以下功能为本 fork 独有，上游 nanobot 不包含：
-
-### 🔌 原生 Codex Provider
-
-直接调用 OpenAI Responses API（`chatgpt.com/backend-api/codex/responses`），无需 Bridge 中转：
-
-- **流式 SSE 解析** — 逐行处理响应流，不全量缓存
-- **OAuth 自动刷新** — `CodexAuth` 管理 token 生命周期（HTTP refresh → CLI 兜底）
-- **原子化保存** — 单用 refresh token 通过 tmp 文件 + `os.replace` 防丢
-- **并发安全** — `asyncio.Lock` 防止多请求同时刷新 token
-- **服务端压缩** — 可选服务端 context compaction（默认关闭）
-- **智能路由** — `_pick_provider_for_model()` 自动将 codex/非 codex 模型分发到正确 provider
-
-### 🛡️ 防幻觉系统
-
-```
-用户: 帮我查磁盘使用情况
-模型: (编造了一段 du -sh 输出)
-碳核: ⚠️ 检测到异常 — 我刚才试图用文字描述操作结果...请重新发送请求
-```
-
-### ⚡ 反空转干预（v3 — `tool_choice` 源头阻断）
-
-```
-执行型请求 → tool_choice="required" → API 层强制模型必须调工具
-问答型请求 → tool_choice="auto"      → 正常对话不干预
-required 失败 → 自动回退 auto 一次    → 记录 [E_TOOL_CHOICE_FALLBACK] 告警
-```
-
-### 🔐 Shell $() 受控放行
-
-```
-✅ echo $(date)              — 白名单放行
-✅ echo $(cat notes.txt)     — 放行
-❌ echo $(rm -rf /)          — 拦截
-❌ echo $(date; whoami)      — 复合命令拦截
-```
-
-### ⏰ 定时任务 Agent 模式
-
-- **提醒模式**：发送静态文本
-- **Agent 模式**：定时触发完整 Agent 处理（可调用所有工具）
-- **一次性定时 `at`**：到时执行，完成自动删除
-- 120 秒超时 + 错误兜底通知 + session 隔离
-
-### � 双层记忆 + 知识搜索
-
-```
-MEMORY.md    — 长期事实，始终加载到上下文
-HISTORY.md   — 事件日志，通过 grep 按关键词搜索
-index.sqlite — 本地 FTS5 全文索引，BM25 关键词检索
-```
-
-```bash
-nanobot search status          # 查看索引状态
-nanobot search query "关键词"   # CLI 搜索测试
-nanobot search reindex          # 手动重建索引
-nanobot search embed            # 激活语义搜索
-```
-
-### 💰 Prompt Caching 缓存优先架构
-
-基于 Claude Code 团队最佳实践，以缓存命中率为核心设计约束：
-
-- **前缀稳定化** — system prompt 只保留低频变化内容（identity、bootstrap、profile、skills summary），高频变化的 L1 记忆和运行时信息通过 `[system-reminder]` user message 注入
-- **Cache-Safe Compaction** — 上下文压缩时复用父对话的完整前缀（system prompt + tools + history），仅追加压缩指令，最大化缓存复用
-- **缓存指纹观测** — 每轮记录前缀指纹（model / system prompt / tools / skills 的 hash），自动检测哪一部分导致缓存失效
-- **Provider 缓存指标** — 从 LiteLLM 响应提取 `cache_read_tokens` / `cache_creation_tokens`，记录命中率日志
-- **Skills 确定性排序** — skills 目录遍历使用稳定排序，避免前缀漂移
-
-### 🪶 低配 VPS 运行优化
-
-- `nanobot setup` 等价于实用初始化向导，默认应用 `vps-1c1g` profile。
-- `nanobot onboard --wizard --profile vps-1c1g` 可保留已有密钥并补齐 Telegram/Codex/Brave 配置。
-- `nanobot doctor` 检查 Python、依赖、配置、workspace 写权限、Telegram token、Codex auth、Brave key 和低配 profile。
-- 大工具输出默认落盘到 workspace 下 `tool-results/`，上下文只保留 preview 和路径引用，降低 token 与内存压力。
-
-### 📋 推特智能监控
-
-- Web 管理面板 — 关注名单管理、凭证配置
-- 自动抓取 — 系统 cron 定时抓取关注用户推文
-- AI 总结推送 — Agent 读取摘要、智能总结、推送到 Telegram
-
-## 📦 支持的模型
-
-| Provider | 模型 | Function Calling | 备注 |
-|----------|------|:----------------:|------|
-| **Codex** | `openai/gpt-5.3-codex` | ✅ | 原生 Provider，自动 OAuth 刷新 |
-| Antigravity | `antigravity/claude-opus-4-6-thinking` | ✅ | 网关轮换 |
-| Antigravity | `antigravity/gemini-3-flash-preview` | ✅ | 网关轮换 |
-| Antigravity | `antigravity/gemini-3-pro` | ✅ | 网关轮换 |
-| MiniMax | `minimax/MiniMax-M2.1` | ✅ | |
-| Gemini | `gemini-2.5-flash-preview` | ✅ | |
-| Claude | `anthropic/claude-sonnet-4-5` | ✅ | |
-| DeepSeek | `deepseek/deepseek-chat` | ✅ | |
-| Kimi | `moonshot/kimi-k2.5` | ✅ | |
-
-## 🧪 测试
-
-```bash
-# 运行完整测试套件
-pytest -q
-
-# 仅 Codex 相关测试
-pytest tests/test_codex_provider.py tests/test_codex_auth.py tests/test_codex_adapter.py -v
-```
-
-## 📁 项目结构
-
-```
-nanobot/
-├── agent/
-│   ├── loop.py              # AgentLoop 核心 + cache-safe compaction
-│   ├── context.py           # ContextBuilder（前缀稳定化）
-│   ├── cache_fingerprint.py # 缓存前缀指纹 & 漂移检测
-│   ├── skills.py            # Skills 加载（确定性排序）
-│   ├── hallucination_detector.py  # 防幻觉检测
-│   └── tools/               # 工具注册（shell/file/web/memory）
-├── providers/
-│   ├── codex_provider.py    # 原生 Codex Responses API Provider
-│   ├── codex_auth.py        # OAuth token 自动刷新管理
-│   ├── codex_adapter.py     # 消息格式转换 + 孤儿工具清理
-│   ├── litellm_provider.py  # 通用 LiteLLM 多模型适配 + 缓存指标提取
-│   ├── registry.py          # Provider 注册表（含缓存能力标记）
-│   └── base.py              # Provider 抽象基类 + LLMResponse
-├── channels/        # 8 种消息渠道适配器
-├── config/          # 配置加载 & Pydantic Schema
-├── memory/          # 双层记忆（压缩/提取/去重）
-├── search/          # FTS5 全文索引 + 向量搜索
-├── session/         # 会话管理 & 持久化
-├── cron/            # 定时任务引擎
-├── cli/             # Typer CLI 命令集
-└── prompts/         # Jinja2 提示词模板
-```
-
-## 🙏 致谢
-
-本项目 fork 自 [HKUDS/nanobot](https://github.com/HKUDS/nanobot) v0.1.4.post1，在其基础上进行了大量定制开发。
-
----
-
-<p align="center">
-  🦾 碳核 — 不空谈，只行动
-</p>
+本项目 fork 自 [HKUDS/nanobot](https://github.com/HKUDS/nanobot)，并在其基础上增加了 Codex Provider、低配 VPS profile、诊断、轻量安装、上下文/工具结果优化、Telegram/cron 运行增强等定制能力。
