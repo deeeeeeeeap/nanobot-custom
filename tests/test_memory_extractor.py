@@ -59,6 +59,21 @@ async def test_extract_and_create_memory(tmp_path: Path) -> None:
     assert "喜欢中文" in text
 
 
+def test_memory_extractor_truncates_large_messages(tmp_path: Path) -> None:
+    extractor = MemoryExtractor(
+        provider=_Provider(),
+        workspace=tmp_path,
+        model="test/model",
+        max_message_chars=512,
+    )
+
+    formatted = extractor._format_messages([{"role": "user", "content": "X" * 800}])
+
+    assert "X" * 512 in formatted
+    assert "X" * 600 not in formatted
+    assert "[truncated]" in formatted
+
+
 async def test_profile_memory_merge(tmp_path: Path) -> None:
     extractor = MemoryExtractor(
         provider=_Provider(),

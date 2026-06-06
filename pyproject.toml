@@ -52,6 +52,9 @@ qq = [
 whatsapp = [
     "websockets>=12.0",
 ]
+duckduckgo = [
+    "ddgs>=9.0.0",
+]
 mochat = [
     "python-socketio>=5.11.0",
     "msgpack>=1.0.8",

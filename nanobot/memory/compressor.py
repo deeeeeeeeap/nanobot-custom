@@ -30,6 +30,7 @@ class SessionCompressor:
         indexer: Indexer | None = None,
         max_memories_per_category: int = 50,
         output_language: str = "zh-CN",
+        max_message_chars: int = 4000,
     ):
         self._extractor = extractor
         self._deduplicator = deduplicator
@@ -39,6 +40,7 @@ class SessionCompressor:
         self._indexer = indexer
         self._max_memories_per_category = max_memories_per_category
         self._output_language = output_language
+        self._max_message_chars = max(512, max_message_chars)
 
     async def compress(self, messages: list[dict[str, Any]], session_key: str) -> CompressionResult:
         """Compress a session into structured memories."""
@@ -101,6 +103,8 @@ class SessionCompressor:
             role = str(msg.get("role", "unknown")).upper()
             content = str(msg.get("content", "")).strip()
             if content:
+                if len(content) > self._max_message_chars:
+                    content = f"{content[:self._max_message_chars]}\n[truncated]"
                 lines.append(f"[{role}] {content}")
         prompt = render_prompt(
             "structured_summary",

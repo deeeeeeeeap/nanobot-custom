@@ -440,13 +440,13 @@ class SessionManager:
                     "metadata": session.metadata,
                     "last_consolidated": session.last_consolidated,
                 }
-                lines = [json.dumps(metadata_line, ensure_ascii=False)]
-                lines.extend(json.dumps(msg, ensure_ascii=False) for msg in session.messages)
-                payload = "\n".join(lines) + "\n"
-
                 path.parent.mkdir(parents=True, exist_ok=True)
                 with open(tmp_path, "w", encoding="utf-8", newline="\n") as f:
-                    f.write(payload)
+                    f.write(json.dumps(metadata_line, ensure_ascii=False))
+                    f.write("\n")
+                    for msg in session.messages:
+                        f.write(json.dumps(msg, ensure_ascii=False))
+                        f.write("\n")
                     if fsync:
                         f.flush()
                         os.fsync(f.fileno())
@@ -548,6 +548,16 @@ class SessionManager:
                                 entry.get("updated_at", "")
                             ):
                                 sessions_by_key[key] = entry
+                        else:
+                            fallback_key = self._decode_session_stem(path.stem) or path.stem.replace("_", ":")
+                            repaired = self._repair_path(path, fallback_key)
+                            if repaired is not None:
+                                sessions_by_key[repaired.key] = {
+                                    "key": repaired.key,
+                                    "created_at": repaired.created_at.isoformat(),
+                                    "updated_at": repaired.updated_at.isoformat(),
+                                    "path": str(path),
+                                }
             except (json.JSONDecodeError, UnicodeDecodeError, OSError):
                 fallback_key = self._decode_session_stem(path.stem) or path.stem.replace("_", ":")
                 repaired = self._repair_path(path, fallback_key)

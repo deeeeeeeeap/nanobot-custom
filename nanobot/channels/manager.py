@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 from typing import Any, TYPE_CHECKING
 
 from loguru import logger
@@ -33,6 +34,21 @@ class ChannelManager:
         self._dispatch_task: asyncio.Task | None = None
         
         self._init_channels()
+
+    @staticmethod
+    def _dependency_available(module: str) -> bool:
+        return importlib.util.find_spec(module) is not None
+
+    def _skip_missing_dependency(self, channel: str, module: str, extra: str) -> bool:
+        if self._dependency_available(module):
+            return False
+        logger.warning(
+            "{} channel enabled but optional dependency {} is missing; install pip install -e '.[{}]' or disable it",
+            channel,
+            module,
+            extra,
+        )
+        return True
     
     def _init_channels(self) -> None:
         """Initialize channels based on config."""
@@ -53,59 +69,64 @@ class ChannelManager:
         
         # WhatsApp channel
         if self.config.channels.whatsapp.enabled:
-            try:
-                from nanobot.channels.whatsapp import WhatsAppChannel
-                self.channels["whatsapp"] = WhatsAppChannel(
-                    self.config.channels.whatsapp, self.bus
-                )
-                logger.info("WhatsApp channel enabled")
-            except ImportError as e:
-                logger.warning(f"WhatsApp channel not available: {e}")
+            if not self._skip_missing_dependency("WhatsApp", "websockets", "whatsapp"):
+                try:
+                    from nanobot.channels.whatsapp import WhatsAppChannel
+                    self.channels["whatsapp"] = WhatsAppChannel(
+                        self.config.channels.whatsapp, self.bus
+                    )
+                    logger.info("WhatsApp channel enabled")
+                except ImportError as e:
+                    logger.warning(f"WhatsApp channel not available: {e}")
 
         # Discord channel
         if self.config.channels.discord.enabled:
-            try:
-                from nanobot.channels.discord import DiscordChannel
-                self.channels["discord"] = DiscordChannel(
-                    self.config.channels.discord, self.bus
-                )
-                logger.info("Discord channel enabled")
-            except ImportError as e:
-                logger.warning(f"Discord channel not available: {e}")
+            if not self._skip_missing_dependency("Discord", "websockets", "discord"):
+                try:
+                    from nanobot.channels.discord import DiscordChannel
+                    self.channels["discord"] = DiscordChannel(
+                        self.config.channels.discord, self.bus
+                    )
+                    logger.info("Discord channel enabled")
+                except ImportError as e:
+                    logger.warning(f"Discord channel not available: {e}")
         
         # Feishu channel
         if self.config.channels.feishu.enabled:
-            try:
-                from nanobot.channels.feishu import FeishuChannel
-                self.channels["feishu"] = FeishuChannel(
-                    self.config.channels.feishu, self.bus
-                )
-                logger.info("Feishu channel enabled")
-            except ImportError as e:
-                logger.warning(f"Feishu channel not available: {e}")
+            if not self._skip_missing_dependency("Feishu", "lark_oapi", "feishu"):
+                try:
+                    from nanobot.channels.feishu import FeishuChannel
+                    self.channels["feishu"] = FeishuChannel(
+                        self.config.channels.feishu, self.bus
+                    )
+                    logger.info("Feishu channel enabled")
+                except ImportError as e:
+                    logger.warning(f"Feishu channel not available: {e}")
 
         # Mochat channel
         if self.config.channels.mochat.enabled:
-            try:
-                from nanobot.channels.mochat import MochatChannel
+            if not self._skip_missing_dependency("Mochat", "socketio", "mochat"):
+                try:
+                    from nanobot.channels.mochat import MochatChannel
 
-                self.channels["mochat"] = MochatChannel(
-                    self.config.channels.mochat, self.bus
-                )
-                logger.info("Mochat channel enabled")
-            except ImportError as e:
-                logger.warning(f"Mochat channel not available: {e}")
+                    self.channels["mochat"] = MochatChannel(
+                        self.config.channels.mochat, self.bus
+                    )
+                    logger.info("Mochat channel enabled")
+                except ImportError as e:
+                    logger.warning(f"Mochat channel not available: {e}")
 
         # DingTalk channel
         if self.config.channels.dingtalk.enabled:
-            try:
-                from nanobot.channels.dingtalk import DingTalkChannel
-                self.channels["dingtalk"] = DingTalkChannel(
-                    self.config.channels.dingtalk, self.bus
-                )
-                logger.info("DingTalk channel enabled")
-            except ImportError as e:
-                logger.warning(f"DingTalk channel not available: {e}")
+            if not self._skip_missing_dependency("DingTalk", "dingtalk_stream", "dingtalk"):
+                try:
+                    from nanobot.channels.dingtalk import DingTalkChannel
+                    self.channels["dingtalk"] = DingTalkChannel(
+                        self.config.channels.dingtalk, self.bus
+                    )
+                    logger.info("DingTalk channel enabled")
+                except ImportError as e:
+                    logger.warning(f"DingTalk channel not available: {e}")
 
         # Email channel
         if self.config.channels.email.enabled:
@@ -120,26 +141,28 @@ class ChannelManager:
 
         # Slack channel
         if self.config.channels.slack.enabled:
-            try:
-                from nanobot.channels.slack import SlackChannel
-                self.channels["slack"] = SlackChannel(
-                    self.config.channels.slack, self.bus
-                )
-                logger.info("Slack channel enabled")
-            except ImportError as e:
-                logger.warning(f"Slack channel not available: {e}")
+            if not self._skip_missing_dependency("Slack", "slack_sdk", "slack"):
+                try:
+                    from nanobot.channels.slack import SlackChannel
+                    self.channels["slack"] = SlackChannel(
+                        self.config.channels.slack, self.bus
+                    )
+                    logger.info("Slack channel enabled")
+                except ImportError as e:
+                    logger.warning(f"Slack channel not available: {e}")
 
         # QQ channel
         if self.config.channels.qq.enabled:
-            try:
-                from nanobot.channels.qq import QQChannel
-                self.channels["qq"] = QQChannel(
-                    self.config.channels.qq,
-                    self.bus,
-                )
-                logger.info("QQ channel enabled")
-            except ImportError as e:
-                logger.warning(f"QQ channel not available: {e}")
+            if not self._skip_missing_dependency("QQ", "botpy", "qq"):
+                try:
+                    from nanobot.channels.qq import QQChannel
+                    self.channels["qq"] = QQChannel(
+                        self.config.channels.qq,
+                        self.bus,
+                    )
+                    logger.info("QQ channel enabled")
+                except ImportError as e:
+                    logger.warning(f"QQ channel not available: {e}")
     
     async def _start_channel(self, name: str, channel: BaseChannel) -> None:
         """Start a channel and log any exceptions."""

@@ -14,6 +14,7 @@ from loguru import logger
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.providers.codex_adapter import convert_messages_to_payload, parse_response_output
 from nanobot.providers.codex_auth import CodexAuth
+from nanobot.providers.redaction import redact_provider_error
 
 _DEFAULT_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses"
 
@@ -152,7 +153,7 @@ class CodexProvider(LLMProvider):
                 status_code, result = await self._send_request(payload, headers)
 
             if status_code >= 400:
-                body = str(result)
+                body = redact_provider_error(result)
                 error_type = self._classify_error(status_code, body)
                 logger.warning(
                     "Codex request failed: req_id={}, status={}, type={}, detail={}",
@@ -172,6 +173,17 @@ class CodexProvider(LLMProvider):
                 if isinstance(result, _ParsedSSE)
                 else _ParsedSSE(content=None, tool_calls=[], reasoning_content=None)
             )
+            if not parsed.content and not parsed.tool_calls and not parsed.reasoning_content:
+                logger.warning(
+                    "Codex request returned no parseable SSE output: req_id={}, status={}",
+                    request_id,
+                    status_code,
+                )
+                return LLMResponse(
+                    content="Error calling LLM: Codex API returned no parseable SSE output",
+                    finish_reason="error",
+                    error_type="format",
+                )
             finish_reason = "tool_calls" if parsed.tool_calls else "stop"
             logger.info(
                 "Codex request success: req_id={}, finish_reason={}, tool_calls={}, content_chars={}",
@@ -187,12 +199,13 @@ class CodexProvider(LLMProvider):
                 reasoning_content=parsed.reasoning_content,
             )
         except RuntimeError as e:
-            msg = f"Error calling LLM: {e}"
+            detail = redact_provider_error(e)
+            msg = f"Error calling LLM: {detail}"
             logger.warning(
                 "Codex runtime error: req_id={}, type={}, detail={}",
                 request_id,
                 self._classify_error(None, str(e)),
-                self._summarize_error_text(str(e)),
+                self._summarize_error_text(detail),
             )
             return LLMResponse(
                 content=msg,
@@ -200,12 +213,13 @@ class CodexProvider(LLMProvider):
                 error_type=self._classify_error(None, str(e)),
             )
         except (httpx.HTTPError, OSError, ValueError, json.JSONDecodeError) as e:
-            msg = f"Error calling LLM: {e}"
+            detail = redact_provider_error(e)
+            msg = f"Error calling LLM: {detail}"
             logger.warning(
                 "Codex transport/parsing error: req_id={}, type={}, detail={}",
                 request_id,
                 self._classify_error(None, str(e)),
-                self._summarize_error_text(str(e)),
+                self._summarize_error_text(detail),
             )
             return LLMResponse(
                 content=msg,
@@ -213,8 +227,13 @@ class CodexProvider(LLMProvider):
                 error_type=self._classify_error(None, str(e)),
             )
         except Exception as e:
-            logger.exception("Unexpected Codex provider failure (req_id={})", request_id)
-            msg = f"Error calling LLM: Unexpected LLM failure: {e}"
+            detail = redact_provider_error(e)
+            logger.warning(
+                "Unexpected Codex provider failure: req_id={}, detail={}",
+                request_id,
+                self._summarize_error_text(detail),
+            )
+            msg = f"Error calling LLM: Unexpected LLM failure: {detail}"
             return LLMResponse(
                 content=msg,
                 finish_reason="error",

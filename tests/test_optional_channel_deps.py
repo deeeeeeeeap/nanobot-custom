@@ -1,9 +1,5 @@
 import builtins
 
-from nanobot.bus.queue import MessageBus
-from nanobot.channels.manager import ChannelManager
-from nanobot.config.schema import Config
-
 
 def test_disabled_optional_channels_do_not_import_optional_sdks(monkeypatch) -> None:
     blocked_prefixes = ("slack_sdk", "lark_oapi", "dingtalk_stream", "botpy", "socketio")
@@ -16,6 +12,10 @@ def test_disabled_optional_channels_do_not_import_optional_sdks(monkeypatch) -> 
 
     monkeypatch.setattr(builtins, "__import__", guarded_import)
 
+    from nanobot.bus.queue import MessageBus
+    from nanobot.channels.manager import ChannelManager
+    from nanobot.config.schema import Config
+
     config = Config()
     config.channels.telegram.enabled = False
     config.channels.slack.enabled = False
@@ -25,4 +25,24 @@ def test_disabled_optional_channels_do_not_import_optional_sdks(monkeypatch) -> 
     config.channels.mochat.enabled = False
 
     manager = ChannelManager(config, MessageBus())
+    assert manager.enabled_channels == []
+
+
+def test_enabled_optional_channel_missing_sdk_is_not_registered(monkeypatch) -> None:
+    from nanobot.bus.queue import MessageBus
+    from nanobot.channels.manager import ChannelManager
+    from nanobot.config.schema import Config
+
+    monkeypatch.setattr(
+        "nanobot.channels.manager.importlib.util.find_spec",
+        lambda module: None if module == "slack_sdk" else object(),
+    )
+
+    config = Config()
+    config.channels.telegram.enabled = False
+    config.channels.slack.enabled = True
+
+    manager = ChannelManager(config, MessageBus())
+
+    assert "slack" not in manager.channels
     assert manager.enabled_channels == []

@@ -10,6 +10,7 @@ from loguru import logger
 
 from nanobot.providers.base import LLMProvider, LLMResponse
 from nanobot.providers.openai_responses import convert_messages_to_payload, parse_response_output
+from nanobot.providers.redaction import redact_provider_error
 
 
 class OpenAIResponsesProvider(LLMProvider):
@@ -104,22 +105,23 @@ class OpenAIResponsesProvider(LLMProvider):
                 response.raise_for_status()
         except httpx.TimeoutException as exc:
             return LLMResponse(
-                content=f"Error calling Responses API: request timed out: {exc}",
+                content=f"Error calling Responses API: request timed out: {redact_provider_error(exc)}",
                 finish_reason="error",
                 error_type="timeout",
             )
         except httpx.HTTPStatusError as exc:
-            message = exc.response.text[:500]
+            message = redact_provider_error(exc.response.text, max_chars=500)
             return LLMResponse(
                 content=f"Error calling Responses API: HTTP {exc.response.status_code}: {message}",
                 finish_reason="error",
                 error_type=self._error_type(exc.response.status_code, message),
             )
         except httpx.HTTPError as exc:
+            message = redact_provider_error(exc)
             return LLMResponse(
-                content=f"Error calling Responses API: {exc}",
+                content=f"Error calling Responses API: {message}",
                 finish_reason="error",
-                error_type=self._error_type(None, str(exc)),
+                error_type=self._error_type(None, message),
             )
 
         try:

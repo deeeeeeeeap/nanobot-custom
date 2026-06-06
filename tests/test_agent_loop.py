@@ -1,4 +1,5 @@
 ﻿import asyncio
+import contextvars
 import weakref
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -746,6 +747,30 @@ def test_prepare_tool_result_uses_turn_budget(monkeypatch, tmp_path: Path) -> No
     assert persisted[0].read_text(encoding="utf-8") == "B" * 3000
 
 
+def test_prepare_tool_result_turn_budget_is_context_local(monkeypatch, tmp_path: Path) -> None:
+    loop = _make_loop(monkeypatch, tmp_path)
+    loop.tool_result_max_chars = 9000
+    loop.result_storage_config = ResultStorageConfig(
+        threshold_chars=4000,
+        turn_budget_chars=5000,
+        preview_chars=500,
+    )
+
+    ctx_one = contextvars.copy_context()
+    ctx_two = contextvars.copy_context()
+    ctx_one.run(loop._reset_tool_result_turn_budget)
+    ctx_two.run(loop._reset_tool_result_turn_budget)
+    first = ctx_one.run(loop._prepare_tool_result, "A" * 3000, "exec", "ctx-1-a")
+    other = ctx_two.run(loop._prepare_tool_result, "C" * 3000, "exec", "ctx-2-a")
+    persisted = ctx_one.run(loop._prepare_tool_result, "B" * 3000, "exec", "ctx-1-b")
+    still_inline = ctx_two.run(loop._prepare_tool_result, "D" * 1000, "exec", "ctx-2-b")
+
+    assert first == "A" * 3000
+    assert other == "C" * 3000
+    assert "Full output saved to workspace path: tool-results/" in persisted
+    assert still_inline == "D" * 1000
+
+
 def test_prepare_tool_result_reports_storage_error(monkeypatch, tmp_path: Path) -> None:
     loop = _make_loop(monkeypatch, tmp_path)
     loop.result_storage_config = ResultStorageConfig(threshold_chars=1000)
@@ -1148,6 +1173,101 @@ async def test_failover_switches_to_fallback_model(monkeypatch, tmp_path: Path) 
     assert reply == "fallback ok"
     assert provider.models[0] == "openai/gpt-4o-mini"
     assert provider.models[1] == "anthropic/claude-3-5-sonnet"
+
+
+async def test_failover_updates_actual_fallback_provider_env(monkeypatch, tmp_path: Path) -> None:
+    from nanobot.config.schema import Config
+    from nanobot.providers.codex_provider import CodexProvider
+
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setattr("nanobot.agent.loop.detect_hallucination", lambda *a, **k: _NoHallucination())
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+
+    codex = CodexProvider(
+        default_model="gpt-5.3-codex",
+        auth=SimpleNamespace(),
+        responses_url="http://localhost:8081/v1/responses",
+    )
+    fallback = FallbackProvider()
+
+    async def _codex_error(**kwargs):
+        return LLMResponse(
+            content="Error calling LLM: timeout",
+            finish_reason="error",
+            error_type="timeout",
+        )
+
+    codex._safe_chat = _codex_error  # type: ignore[method-assign]
+    config = Config()
+    config.providers.anthropic.api_key = "sk-fallback"
+    config.providers.anthropic.api_base = "https://relay.example/v1"
+
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=codex,
+        fallback_provider=fallback,
+        workspace=tmp_path,
+        model="gpt-5.3-codex",
+    )
+    loop.model_fallbacks = ["anthropic/claude-3-5-sonnet"]
+    loop.failover_retry_once = False
+
+    response, active_model = await loop._chat_with_failover(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=None,
+        tool_choice="auto",
+        primary_model="gpt-5.3-codex",
+        runtime_config=config,
+    )
+
+    assert response is not None
+    assert response.content == "fallback ok"
+    assert active_model == "anthropic/claude-3-5-sonnet"
+    assert codex.api_key is None
+    assert fallback.api_key == "sk-fallback"
+    assert fallback.api_base == "https://relay.example/v1"
+
+
+def test_runtime_provider_selection_rebuilds_matched_non_codex_provider(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from nanobot.config.schema import Config
+    from nanobot.providers.codex_provider import CodexProvider
+    from nanobot.providers.litellm_provider import LiteLLMProvider
+
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setattr("nanobot.agent.loop.detect_hallucination", lambda *a, **k: _NoHallucination())
+
+    codex = CodexProvider(
+        default_model="gpt-5.3-codex",
+        auth=SimpleNamespace(),
+        responses_url="http://localhost:8081/v1/responses",
+    )
+    openrouter_fallback = LiteLLMProvider(
+        api_key="sk-or-initial",
+        default_model="openai/gpt-4o-mini",
+        provider_name="openrouter",
+    )
+    config = Config()
+    config.providers.openrouter.api_key = "sk-or-initial"
+    config.providers.anthropic.api_key = "sk-ant-runtime"
+
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=codex,
+        fallback_provider=openrouter_fallback,
+        workspace=tmp_path,
+        model="gpt-5.3-codex",
+    )
+    provider = loop._pick_provider_for_model(
+        "anthropic/claude-3-5-sonnet",
+        runtime_config=config,
+    )
+
+    assert provider is not openrouter_fallback
+    assert isinstance(provider, LiteLLMProvider)
+    assert provider.api_key == "sk-ant-runtime"
+    assert provider._resolve_model("anthropic/claude-3-5-sonnet") == "anthropic/claude-3-5-sonnet"
 
 
 async def test_error_response_not_persisted_to_session_and_returns_friendly_text(

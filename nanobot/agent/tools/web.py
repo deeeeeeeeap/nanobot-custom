@@ -21,6 +21,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 from nanobot.agent.tools.base import Tool
+from nanobot.providers.redaction import redact_provider_error
 from nanobot.security.network import validate_resolved_url, validate_url_target
 
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36"
@@ -338,8 +339,13 @@ class WebSearchTool(Tool):
     async def _search_duckduckgo(self, query: str, n: int) -> tuple[bool, str]:
         try:
             from ddgs import DDGS
-        except Exception as e:
-            return False, json.dumps({"error": "missing_dependency", "message": str(e)})
+        except ImportError:
+            return False, json.dumps(
+                {
+                    "error": "missing_dependency",
+                    "message": "DuckDuckGo search requires ddgs; install pip install -e '.[duckduckgo]' or disable this provider.",
+                }
+            )
 
         try:
             ddgs = DDGS(timeout=10)
@@ -357,7 +363,7 @@ class WebSearchTool(Tool):
             ]
             return True, _format_search_results(query, items, n)
         except Exception as e:
-            return False, json.dumps({"error": "duckduckgo_error", "message": str(e)})
+            return False, json.dumps({"error": "duckduckgo_error", "message": redact_provider_error(e)})
 
     async def _search_tavily(self, query: str, n: int) -> tuple[bool, str]:
         api_key = os.environ.get("TAVILY_API_KEY", "")
@@ -502,9 +508,9 @@ class WebFetchTool(Tool):
 
     async def _fetch_jina(self, url: str, max_chars: int) -> str | None:
         """Try Jina Reader first. Returns None on failure so the caller can fall back."""
+        jina_key = os.environ.get("JINA_API_KEY", "")
         try:
             headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
-            jina_key = os.environ.get("JINA_API_KEY", "")
             if jina_key:
                 headers["Authorization"] = f"Bearer {jina_key}"
 
@@ -540,7 +546,20 @@ class WebFetchTool(Tool):
                     "text": _wrap_external_content(text),
                 }
             )
-        except Exception:
+        except httpx.HTTPStatusError as e:
+            if jina_key and e.response.status_code in {401, 403}:
+                return json.dumps(
+                    {
+                        "error": "jina_auth_error",
+                        "status": e.response.status_code,
+                        "message": "JINA_API_KEY was rejected by Jina Reader; update it or unset it to allow local fallback.",
+                        "url": url,
+                    }
+                )
+            return None
+        except (httpx.TimeoutException, httpx.NetworkError):
+            return None
+        except (ValueError, KeyError, TypeError):
             return None
 
     async def _fetch_readability(self, url: str, extract_mode: str, max_chars: int) -> str:

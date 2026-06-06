@@ -117,6 +117,79 @@ async def test_openai_responses_provider_rejects_non_object_response(monkeypatch
     assert "non-object response" in result.content
 
 
+async def test_openai_responses_provider_redacts_http_error_body(monkeypatch) -> None:
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, *, headers, json):
+            return httpx.Response(
+                401,
+                text="bad Authorization: Bearer sk-super-secret-token api_key=relay-secret",
+                request=httpx.Request("POST", url),
+            )
+
+    monkeypatch.setattr("nanobot.providers.openai_responses_provider.httpx.AsyncClient", FakeClient)
+
+    provider = OpenAIResponsesProvider(api_key="sk-test", api_base="https://relay.example/v1")
+    result = await provider.chat(messages=[{"role": "user", "content": "hi"}])
+
+    assert result.finish_reason == "error"
+    assert result.error_type == "auth"
+    assert "sk-super-secret-token" not in result.content
+    assert "relay-secret" not in result.content
+    assert "[REDACTED]" in result.content
+
+
+async def test_openai_responses_provider_omits_reasoning_when_none(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, *, headers, json):
+            captured["json"] = json
+            return httpx.Response(
+                200,
+                json={
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [{"type": "output_text", "text": "ok"}],
+                        }
+                    ]
+                },
+                request=httpx.Request("POST", url),
+            )
+
+    monkeypatch.setattr("nanobot.providers.openai_responses_provider.httpx.AsyncClient", FakeClient)
+
+    provider = OpenAIResponsesProvider(api_key="sk-test", api_base="https://relay.example/v1")
+    result = await provider.chat(
+        messages=[{"role": "user", "content": "hi"}],
+        reasoning_effort="none",
+    )
+
+    assert result.finish_reason == "stop"
+    payload = captured["json"]
+    assert isinstance(payload, dict)
+    assert "reasoning" not in payload
+    assert "include" not in payload
+
+
 def test_responses_converter_preserves_compound_tool_call_ids() -> None:
     payload, dropped = convert_messages_to_payload(
         messages=[

@@ -23,6 +23,27 @@ class _Provider(LLMProvider):
         return "test/model"
 
 
+class _CaptureProvider(LLMProvider):
+    def __init__(self) -> None:
+        super().__init__(None, None)
+        self.messages: list[dict[str, Any]] = []
+
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+    ) -> LLMResponse:
+        self.messages = messages
+        return LLMResponse(content="summary")
+
+    def get_default_model(self) -> str:
+        return "test/model"
+
+
 class _Extractor:
     def __init__(self, workspace: Path):
         self.workspace = workspace
@@ -56,6 +77,31 @@ class _Dedup:
             similar_memories=[],
             reason="",
         )
+
+
+async def test_session_compressor_truncates_large_summary_input(tmp_path: Path) -> None:
+    provider = _CaptureProvider()
+    compressor = SessionCompressor(
+        extractor=_Extractor(tmp_path),
+        deduplicator=_Dedup(),
+        memory_store=MemoryStore(tmp_path),
+        provider=provider,
+        model="test/model",
+        indexer=None,
+        max_message_chars=512,
+    )
+
+    summary = await compressor._build_structured_summary(
+        messages=[{"role": "user", "content": "X" * 800}],
+        session_key="telegram:truncate",
+    )
+
+    assert summary == "summary"
+    assert provider.messages
+    prompt = str(provider.messages[1]["content"])
+    assert "X" * 512 in prompt
+    assert "X" * 600 not in prompt
+    assert "[truncated]" in prompt
 
 
 async def test_session_compressor_create_and_summary(tmp_path: Path) -> None:

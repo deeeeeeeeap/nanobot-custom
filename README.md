@@ -120,6 +120,10 @@ nanobot gateway
       "compactionTargetRatio": 0.35
     }
   },
+  "memory": {
+    "compressThreshold": 30,
+    "maxMessageChars": 2000
+  },
   "tools": {
     "resultStorage": {
       "enabled": true,
@@ -127,8 +131,8 @@ nanobot gateway
       "turnBudgetChars": 60000,
       "path": "tool-results",
       "previewChars": 3000,
-      "maxFiles": 500,
-      "maxBytes": 268435456,
+      "maxFiles": 100,
+      "maxBytes": 67108864,
       "maxAgeDays": 30
     }
   },
@@ -192,8 +196,8 @@ nanobot gateway
       "thresholdChars": 8000,
       "turnBudgetChars": 60000,
       "path": "tool-results",
-      "maxFiles": 500,
-      "maxBytes": 268435456,
+      "maxFiles": 100,
+      "maxBytes": 67108864,
       "maxAgeDays": 30
     }
   }
@@ -279,6 +283,7 @@ pip install -e '.[dingtalk]'
 pip install -e '.[qq]'
 pip install -e '.[whatsapp]'
 pip install -e '.[mochat]'
+pip install -e '.[duckduckgo]'
 pip install -e '.[vector]'
 pip install -e '.[dev]'
 ```
@@ -286,7 +291,8 @@ pip install -e '.[dev]'
 说明：
 
 - `.[vector]` 会安装向量搜索依赖，低配 VPS 不建议默认开启。
-- `.[dev]` 包含测试和各 optional channel 依赖，适合开发/CI。
+- `.[duckduckgo]` 只在 `WEB_SEARCH_PROVIDER=duckduckgo` 或配置 DuckDuckGo fallback 时需要。
+- `.[dev]` 面向开发/CI；1C1G VPS 不建议安装。
 - 未启用的 optional channel 不会 import 对应 SDK。
 
 ## 部署
@@ -325,6 +331,8 @@ systemctl restart nanobot
 nanobot doctor
 nanobot status
 ```
+
+Docker 镜像适合需要 bridge/多渠道的场景；1C1G VPS 最小路径优先使用 venv + systemd，不建议把 Docker 作为默认启动方式。
 
 更多部署细节见 [`DEPLOY.md`](DEPLOY.md)。
 
@@ -402,7 +410,7 @@ python -m pytest -q
 当前基线：
 
 ```text
-253 passed, 2 skipped
+301 passed, 2 skipped
 ```
 
 ## 排错

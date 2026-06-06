@@ -10,6 +10,7 @@ from loguru import logger
 
 from nanobot.exceptions import ProviderError
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from nanobot.providers.redaction import redact_provider_error
 from nanobot.providers.registry import find_by_model, find_gateway
 
 _ALLOWED_MSG_KEYS = frozenset(
@@ -370,7 +371,7 @@ class LiteLLMProvider(LLMProvider):
             kwargs["extra_headers"] = self.extra_headers
         if self.extra_body:
             kwargs["extra_body"] = self.extra_body
-        if reasoning_effort:
+        if reasoning_effort and reasoning_effort.lower() != "none":
             kwargs["reasoning_effort"] = reasoning_effort
         if tools:
             kwargs["tools"] = tools
@@ -396,10 +397,11 @@ class LiteLLMProvider(LLMProvider):
                 )
             return self._parse_response(response, requested_model=original_model)
         except (TypeError, ValueError, OSError, TimeoutError) as e:
-            err = ProviderError(f"LLM request failed: {e}")
+            message = redact_provider_error(e)
+            err = ProviderError(f"LLM request failed: {message}")
             error_type = self._classify_error(
                 getattr(e, "status_code", None),
-                str(e),
+                message,
                 getattr(e, "code", None),
             )
             logger.error(str(err))
@@ -409,10 +411,11 @@ class LiteLLMProvider(LLMProvider):
                 error_type=error_type,
             )
         except RuntimeError as e:
-            err = ProviderError(f"LLM runtime failure: {e}")
+            message = redact_provider_error(e)
+            err = ProviderError(f"LLM runtime failure: {message}")
             error_type = self._classify_error(
                 getattr(e, "status_code", None),
-                str(e),
+                message,
                 getattr(e, "code", None),
             )
             logger.error(str(err))
@@ -422,10 +425,11 @@ class LiteLLMProvider(LLMProvider):
                 error_type=error_type,
             )
         except Exception as e:
-            err = ProviderError(f"Unexpected LLM failure: {e}")
+            message = redact_provider_error(e)
+            err = ProviderError(f"Unexpected LLM failure: {message}")
             error_type = self._classify_error(
                 getattr(e, "status_code", None),
-                str(e),
+                message,
                 getattr(e, "code", None),
             )
             logger.exception(str(err))

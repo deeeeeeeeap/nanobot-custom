@@ -168,6 +168,20 @@ def test_session_metadata_loads_legacy_files_without_new_fields(monkeypatch, tmp
     assert session.updated_at.isoformat().startswith("2026-02-16T00:00:01")
 
 
+def test_list_sessions_includes_legacy_files_without_metadata(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+    key = "telegram:legacy-list"
+    manager = SessionManager(tmp_path)
+    path = manager._get_legacy_session_path(key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"role":"user","content":"hello"}\n', encoding="utf-8")
+
+    sessions = manager.list_sessions()
+
+    assert any(item["key"] == key and item["path"] == str(path) for item in sessions)
+
+
 def test_session_last_consolidated_round_trip(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
 

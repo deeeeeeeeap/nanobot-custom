@@ -24,9 +24,14 @@ pip install -e '.[feishu]'
 pip install -e '.[dingtalk]'
 pip install -e '.[qq]'
 pip install -e '.[whatsapp]'
+pip install -e '.[duckduckgo]'
 pip install -e '.[vector]'
 pip install -e '.[dev]'
 ```
+
+说明：
+- `.[dev]` 面向开发/CI，不建议在 1C1G VPS 上安装。
+- Docker 适合需要 bridge/多渠道的场景；1C1G VPS 最小路径优先使用 venv + systemd。
 
 ## 2. 初始化与诊断
 
@@ -78,6 +83,10 @@ nanobot doctor
       "apiBase": "https://api.minimaxi.com/v1"
     }
   },
+  "memory": {
+    "compressThreshold": 30,
+    "maxMessageChars": 2000
+  },
   "tools": {
     "web": {
       "search": {
@@ -90,8 +99,8 @@ nanobot doctor
       "turnBudgetChars": 60000,
       "path": "tool-results",
       "previewChars": 3000,
-      "maxFiles": 500,
-      "maxBytes": 268435456,
+      "maxFiles": 100,
+      "maxBytes": 67108864,
       "maxAgeDays": 30
     }
   },

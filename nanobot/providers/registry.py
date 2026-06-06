@@ -393,7 +393,11 @@ def find_gateway(
             continue
         if spec.detect_by_key_prefix and api_key and api_key.startswith(spec.detect_by_key_prefix):
             return spec
-        if spec.detect_by_base_keyword and api_base and spec.detect_by_base_keyword in api_base:
+        if (
+            spec.detect_by_base_keyword
+            and api_base
+            and spec.detect_by_base_keyword in api_base.lower()
+        ):
             return spec
 
     return None

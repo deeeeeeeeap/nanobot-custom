@@ -75,6 +75,7 @@ def test_search_config_defaults_and_validation() -> None:
     assert cfg.search.vector_enabled is False
     assert cfg.memory.auto_compress is True
     assert cfg.memory.compress_threshold == 10
+    assert cfg.memory.max_message_chars == 4000
     assert cfg.agents.defaults.max_tool_iterations == 50
     assert cfg.agents.defaults.loop_break_threshold == 25
     assert cfg.agents.defaults.max_exempt_rounds == 4
@@ -141,6 +142,10 @@ def test_search_config_defaults_and_validation() -> None:
         {"agents": {"defaults": {"reasoning_effort": "HIGH"}}}
     )
     assert cfg_with_reasoning.agents.defaults.reasoning_effort == "high"
+    cfg_without_reasoning = Config.model_validate(
+        {"agents": {"defaults": {"reasoning_effort": "none"}}}
+    )
+    assert cfg_without_reasoning.agents.defaults.reasoning_effort == "none"
     with pytest.raises(ValidationError):
         Config.model_validate({"agents": {"defaults": {"reasoning_effort": "extreme"}}})
     with pytest.raises(ValidationError):

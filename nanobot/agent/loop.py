@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import json
 import re
@@ -51,6 +52,11 @@ from nanobot.agent.hallucination_detector import (
     create_honest_response,
 )
 from nanobot.agent.status import StatusMessage, StatusReporter, NullReporter
+
+_TOOL_RESULT_TURN_CHARS: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "nanobot_tool_result_turn_chars",
+    default=0,
+)
 
 
 def _is_lazy_response(content: str, user_message: str = "") -> bool:
@@ -560,7 +566,6 @@ class AgentLoop:
         )
         self.tool_result_max_chars = max(1000, tool_result_max_chars)
         self.result_storage_config = result_storage_config or ResultStorageConfig()
-        self._tool_result_turn_chars = 0
         self.compaction_enabled = compaction_enabled
         self.compaction_target_ratio = min(0.9, max(0.1, compaction_target_ratio))
         self.search_store = None
@@ -613,7 +618,7 @@ class AgentLoop:
     @staticmethod
     def _normalize_reasoning_effort(value: str | None) -> str:
         effort = (value or "medium").strip().lower()
-        if effort in {"low", "medium", "high"}:
+        if effort in {"none", "low", "medium", "high"}:
             return effort
         logger.warning("Invalid reasoning_effort={}, fallback to medium", value)
         return "medium"
@@ -720,6 +725,7 @@ class AgentLoop:
             workspace=self.workspace,
             model=self.model,
             output_language=self.memory_config.output_language,
+            max_message_chars=self.memory_config.max_message_chars,
         )
         self.memory_compressor = SessionCompressor(
             extractor=extractor,
@@ -730,6 +736,7 @@ class AgentLoop:
             indexer=self.search_indexer,
             max_memories_per_category=self.memory_config.max_memories_per_category,
             output_language=self.memory_config.output_language,
+            max_message_chars=self.memory_config.max_message_chars,
         )
 
     async def run(self) -> None:
@@ -801,16 +808,22 @@ class AgentLoop:
     # 跟踪已写入 os.environ 的敏感 key 名称，用于写入后遮蔽
     _sensitive_env_keys: set[str] = set()
 
-    def _update_provider_env(self, model: str, api_key: str | None, api_base: str | None) -> None:
+    def _update_provider_env(
+        self,
+        provider: LLMProvider,
+        model: str,
+        api_key: str | None,
+        api_base: str | None,
+    ) -> None:
         """根据 registry 设置 provider 凭据，同时遮蔽环境变量防止 shell 泄漏。"""
         import os
         from nanobot.providers.registry import find_by_model
 
         if api_key:
-            self.provider.api_key = api_key
+            provider.api_key = api_key
 
             # 通过 registry 查找正确的 env_key 和 env_extras
-            spec = find_by_model(model)
+            spec = getattr(provider, "_gateway", None) or find_by_model(model)
             if spec:
                 # 先写入让 litellm 等库初始化时能读取
                 os.environ[spec.env_key] = api_key
@@ -829,7 +842,7 @@ class AgentLoop:
                         os.environ[key] = os.environ[key][:4] + "***"
 
         # 始终更新 api_base，确保切换模型后 provider endpoint 正确重置
-        self.provider.api_base = api_base
+        provider.api_base = api_base
 
     def _refresh_runtime_options(self, config) -> None:
         """Refresh loop controls from latest config without recreating the loop."""
@@ -1520,15 +1533,15 @@ class AgentLoop:
         return f"{result[:head]}\n[...省略 {omitted} 字符...]\n{tail_text}"
 
     def _reset_tool_result_turn_budget(self) -> None:
-        self._tool_result_turn_chars = 0
+        _TOOL_RESULT_TURN_CHARS.set(0)
 
     def _prepare_tool_result(self, result: str, tool_name: str, tool_call_id: str) -> str:
         """Persist large tool output or output that would exceed this turn's budget."""
         force_persist = False
         if self.result_storage_config.enabled:
-            next_total = self._tool_result_turn_chars + len(result)
+            next_total = _TOOL_RESULT_TURN_CHARS.get() + len(result)
             force_persist = next_total > self.result_storage_config.turn_budget_chars
-            self._tool_result_turn_chars = next_total
+            _TOOL_RESULT_TURN_CHARS.set(next_total)
         try:
             stored = persist_tool_result_if_needed(
                 content=result,
@@ -1609,12 +1622,55 @@ class AgentLoop:
     def _should_retry_same_model(self, error_type: str) -> bool:
         return error_type in {"timeout", "rate_limit"}
 
-    def _pick_provider_for_model(self, model_name: str) -> LLMProvider:
+    def _build_runtime_provider_for_model(self, model_name: str, runtime_config) -> LLMProvider | None:
+        """Build a provider with model-matched gateway metadata from the latest config."""
+        if "codex" in model_name.lower():
+            return None
+
+        from nanobot.providers.litellm_provider import LiteLLMProvider
+        from nanobot.providers.openai_responses_provider import OpenAIResponsesProvider
+
+        provider_config = runtime_config.get_provider(model_name)
+        if provider_config is None and not model_name.startswith("bedrock/"):
+            return None
+
+        api_key = provider_config.api_key if provider_config else None
+        api_base = runtime_config.get_api_base(model_name)
+        provider_name = runtime_config.get_provider_name(model_name)
+        if provider_config and provider_config.api_type == "responses":
+            return OpenAIResponsesProvider(
+                api_key=api_key,
+                api_base=api_base,
+                default_model=model_name,
+                extra_headers=provider_config.extra_headers,
+                extra_body=provider_config.extra_body,
+            )
+        return LiteLLMProvider(
+            api_key=api_key,
+            api_base=api_base,
+            default_model=model_name,
+            extra_headers=provider_config.extra_headers if provider_config else None,
+            extra_body=provider_config.extra_body if provider_config else None,
+            provider_name=provider_name,
+        )
+
+    def _pick_provider_for_model(self, model_name: str, runtime_config=None) -> LLMProvider:
         """根据模型名选择合适的 provider：codex 模型走 CodexProvider，其他走 fallback/primary。"""
         from nanobot.providers.codex_provider import CodexProvider
+        from nanobot.providers.litellm_provider import LiteLLMProvider
+        from nanobot.providers.openai_responses_provider import OpenAIResponsesProvider
         is_codex_model = "codex" in model_name.lower()
         if is_codex_model and isinstance(self.provider, CodexProvider):
             return self.provider
+        if not is_codex_model and runtime_config is not None:
+            if self.fallback_provider is not None and not isinstance(
+                self.fallback_provider,
+                (LiteLLMProvider, OpenAIResponsesProvider),
+            ):
+                return self.fallback_provider
+            runtime_provider = self._build_runtime_provider_for_model(model_name, runtime_config)
+            if runtime_provider is not None:
+                return runtime_provider
         if not is_codex_model and isinstance(self.provider, CodexProvider):
             # 非 codex 模型不应走 CodexProvider，使用 fallback_provider
             if self.fallback_provider is not None:
@@ -1643,15 +1699,22 @@ class AgentLoop:
         last_response = None
         active_model = primary_model
         for model_name in candidates:
+            provider = self._pick_provider_for_model(model_name, runtime_config=runtime_config)
             if runtime_config is not None:
+                from nanobot.providers.codex_provider import CodexProvider
+                api_key = runtime_config.get_api_key(model_name)
+                api_base = runtime_config.get_api_base(model_name)
+                if isinstance(provider, CodexProvider):
+                    api_key = None
+                    api_base = None
                 self._update_provider_env(
+                    provider,
                     model_name,
-                    runtime_config.get_api_key(model_name),
-                    runtime_config.get_api_base(model_name),
+                    api_key,
+                    api_base,
                 )
 
             # 根据模型名选择正确的 provider
-            provider = self._pick_provider_for_model(model_name)
             retries_left = 1 if self.failover_retry_once else 0
             while True:
                 chat_kwargs = {
@@ -1738,7 +1801,12 @@ class AgentLoop:
             self._refresh_runtime_options(runtime_config)
             api_key = runtime_config.get_api_key(current_model)
             api_base = runtime_config.get_api_base(current_model)
-            self._update_provider_env(current_model, api_key, api_base)
+            active_provider = self._pick_provider_for_model(current_model, runtime_config=runtime_config)
+            from nanobot.providers.codex_provider import CodexProvider
+            if isinstance(active_provider, CodexProvider):
+                api_key = None
+                api_base = None
+            self._update_provider_env(active_provider, current_model, api_key, api_base)
             if current_model != self.model:
                 logger.info(f"Model changed from {self.model} to {current_model}")
                 self.model = current_model

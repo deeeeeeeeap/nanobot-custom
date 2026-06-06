@@ -274,7 +274,7 @@ class AgentDefaults(BaseModel):
     @classmethod
     def validate_reasoning_effort(cls, value: str) -> str:
         effort = value.strip().lower()
-        allowed = {"low", "medium", "high"}
+        allowed = {"none", "low", "medium", "high"}
         if effort not in allowed:
             raise ValueError(f"reasoning_effort must be one of: {', '.join(sorted(allowed))}")
         return effort
@@ -444,6 +444,7 @@ class MemoryConfig(BaseModel):
     auto_compress: bool = True
     compress_threshold: int = Field(default=10, ge=1, le=500)
     max_memories_per_category: int = Field(default=50, ge=1, le=5000)
+    max_message_chars: int = Field(default=4000, ge=512, le=50000)
     output_language: str = "zh-CN"
     dedup_min_score: float = Field(default=0.15, ge=0.0, le=1.0)
 

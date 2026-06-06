@@ -308,6 +308,10 @@ def _initialize_config(*, wizard: bool, profile: str | None, force_wizard_profil
             console.print(f"[red]Invalid existing config:[/red] {e}")
             raise typer.Exit(1) from e
         console.print(f"[cyan]Using existing config at {config_path}; blank wizard input keeps current values.[/cyan]")
+        if profile:
+            console.print(
+                "[yellow]Profile values will be re-applied; existing secrets are preserved.[/yellow]"
+            )
     else:
         config = Config()
 
@@ -353,13 +357,15 @@ def _apply_vps_profile(config):
     config.agents.defaults.compaction_target_ratio = 0.35
     config.logging.max_file_bytes = 50 * 1024 * 1024
     config.logging.max_files = 3
+    config.memory.compress_threshold = 30
+    config.memory.max_message_chars = 2000
     config.tools.result_storage.enabled = True
     config.tools.result_storage.threshold_chars = 8000
     config.tools.result_storage.turn_budget_chars = 60000
     config.tools.result_storage.path = "tool-results"
     config.tools.result_storage.preview_chars = 3000
-    config.tools.result_storage.max_files = 500
-    config.tools.result_storage.max_bytes = 256 * 1024 * 1024
+    config.tools.result_storage.max_files = 100
+    config.tools.result_storage.max_bytes = 64 * 1024 * 1024
     config.tools.result_storage.max_age_days = 30
 
     return config
@@ -374,6 +380,28 @@ def _mask_secret(value: str | None) -> str:
     if len(raw) <= 10:
         return f"{raw[:1]}***{raw[-1:]} ({len(raw)} chars)"
     return f"{raw[:3]}...{raw[-3:]} ({len(raw)} chars)"
+
+
+def _looks_like_placeholder(value: str | None) -> bool:
+    raw = (value or "").strip()
+    if not raw:
+        return False
+    lowered = raw.lower()
+    uppered = raw.upper()
+    placeholder_markers = (
+        "在这里",
+        "填入",
+        "你的",
+        "替换",
+        "replace_me",
+        "changeme",
+        "example_",
+    )
+    return (
+        uppered.startswith("YOUR_")
+        or lowered.startswith("your ")
+        or any(marker in lowered for marker in placeholder_markers)
+    )
 
 
 def _prompt_keep_or_new(label: str, current: str = "", *, secret: bool = False) -> str:
@@ -447,6 +475,10 @@ def _run_setup_wizard(config, default_profile: str | None = None):
                 f"{provider_name} API base",
                 base_default,
             ) or None
+            if provider.api_base:
+                console.print(
+                    "[dim]If this relay does not explicitly support /responses, keep apiType=chat_completions.[/dim]"
+                )
 
     config.channels.telegram.enabled = _prompt_bool(
         "Enable Telegram channel",
@@ -508,8 +540,12 @@ def _is_vps_profile_effective(config) -> bool:
         and config.agents.defaults.max_tool_iterations <= 20
         and config.agents.defaults.tool_result_max_chars <= 8000
         and config.agents.defaults.compaction_enabled is True
+        and config.memory.compress_threshold >= 30
+        and config.memory.max_message_chars <= 2000
         and config.tools.result_storage.enabled is True
         and config.tools.result_storage.threshold_chars <= 8000
+        and config.tools.result_storage.max_files <= 100
+        and config.tools.result_storage.max_bytes <= 64 * 1024 * 1024
         and config.logging.max_file_bytes <= 50 * 1024 * 1024
         and config.logging.max_files <= 3
     )
@@ -586,10 +622,19 @@ def doctor():
             add("Workspace write", "FAIL", str(e))
 
     if config.channels.telegram.enabled:
+        token = config.channels.telegram.token
+        token_status = "OK"
+        token_detail = "configured"
+        if not token:
+            token_status = "FAIL"
+            token_detail = "missing token"
+        elif _looks_like_placeholder(token):
+            token_status = "FAIL"
+            token_detail = "placeholder token; replace it or disable Telegram"
         add(
             "Telegram token",
-            "OK" if config.channels.telegram.token else "FAIL",
-            "configured" if config.channels.telegram.token else "missing token",
+            token_status,
+            token_detail,
         )
     else:
         add("Telegram token", "WARN", "channel disabled")
@@ -604,16 +649,38 @@ def doctor():
     else:
         add("Codex auth", "WARN", "provider disabled")
 
-    add(
-        "Brave Search key",
-        "OK" if config.tools.web.search.api_key else "WARN",
-        "configured" if config.tools.web.search.api_key else "not set; web search tool will be limited",
-    )
+    brave_key = config.tools.web.search.api_key
+    if brave_key and _looks_like_placeholder(brave_key):
+        add("Brave Search key", "WARN", "placeholder key; web search tool will be limited")
+    else:
+        add(
+            "Brave Search key",
+            "OK" if brave_key else "WARN",
+            "configured" if brave_key else "not set; web search tool will be limited",
+        )
     add(
         "VPS profile",
         "OK" if _is_vps_profile_effective(config) else "WARN",
         "vps-1c1g settings active" if _is_vps_profile_effective(config) else "not fully applied",
     )
+
+    provider_name = config.get_provider_name()
+    provider = config.get_provider()
+    if provider is None:
+        add(
+            "LLM provider",
+            "WARN" if config.providers.codex.enabled else "FAIL",
+            "no API-key provider configured; Codex enabled" if config.providers.codex.enabled
+            else "configure a provider API key or enable Codex",
+        )
+    elif _looks_like_placeholder(provider.api_key):
+        add("LLM provider", "FAIL", f"{provider_name or 'provider'} API key is a placeholder")
+    else:
+        add(
+            "LLM provider",
+            "OK",
+            f"{provider_name or 'provider'} configured; apiType={getattr(provider, 'api_type', 'auto')}",
+        )
 
     try:
         rs = config.tools.result_storage
@@ -644,7 +711,6 @@ def doctor():
         except OSError as e:
             add("Tool result usage", "WARN", f"could not inspect: {e}")
 
-    provider = config.get_provider()
     if provider and getattr(provider, "api_type", "auto") == "responses":
         add(
             "Responses API",
@@ -653,25 +719,41 @@ def doctor():
         )
 
     optional_modules = {
-        "slack": ("slack_sdk", config.channels.slack.enabled),
-        "feishu": ("lark_oapi", config.channels.feishu.enabled),
-        "dingtalk": ("dingtalk_stream", config.channels.dingtalk.enabled),
-        "qq": ("botpy", config.channels.qq.enabled),
-        "mochat": ("socketio", config.channels.mochat.enabled),
-        "whatsapp": ("websockets", config.channels.whatsapp.enabled),
-        "vector": ("sentence_transformers", config.search.vector_enabled),
+        "slack": ("slack_sdk", config.channels.slack.enabled, "slack"),
+        "feishu": ("lark_oapi", config.channels.feishu.enabled, "feishu"),
+        "dingtalk": ("dingtalk_stream", config.channels.dingtalk.enabled, "dingtalk"),
+        "qq": ("botpy", config.channels.qq.enabled, "qq"),
+        "mochat": ("socketio", config.channels.mochat.enabled, "mochat"),
+        "whatsapp": ("websockets", config.channels.whatsapp.enabled, "whatsapp"),
+        "vector": ("sentence_transformers", config.search.vector_enabled, "vector"),
     }
-    for name, (module, enabled) in optional_modules.items():
+    duckduckgo_enabled = {
+        os.environ.get("WEB_SEARCH_PROVIDER", ""),
+        os.environ.get("WEB_SEARCH_FALLBACK_PROVIDER", ""),
+    }
+    if any(value.strip().lower() == "duckduckgo" for value in duckduckgo_enabled):
+        optional_modules["duckduckgo"] = ("ddgs", True, "duckduckgo")
+    optional_install_hints: list[tuple[str, str]] = []
+    for name, (module, enabled, extra) in optional_modules.items():
         if not enabled:
             add(f"Optional {name}", "OK", "disabled; dependency not required")
         else:
+            available = _module_available(module)
+            if not available:
+                optional_install_hints.append((name, extra))
             add(
                 f"Optional {name}",
-                "OK" if _module_available(module) else "FAIL",
-                f"{module} {'available' if _module_available(module) else 'missing'}",
+                "OK" if available else "FAIL",
+                f"{module} available" if available
+                else f"{module} missing; install pip install -e '.[{extra}]' or disable it",
             )
 
     console.print(table)
+    for name, extra in optional_install_hints:
+        console.print(
+            f"Optional {name} missing: pip install -e '.[{extra}]' or disable it",
+            markup=False,
+        )
     if errors:
         console.print(f"[red]{errors} failure(s), {warnings} warning(s).[/red]")
         raise typer.Exit(1)

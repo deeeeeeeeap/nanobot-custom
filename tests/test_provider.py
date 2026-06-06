@@ -1,6 +1,17 @@
 from types import SimpleNamespace
 
 from nanobot.providers.litellm_provider import LiteLLMProvider
+from nanobot.providers.redaction import redact_provider_error
+
+
+def test_redact_provider_error_masks_json_secret_values() -> None:
+    text = '{"api_key":"sk-super-secret-token","authorization":"Bearer sk-other-secret"}'
+
+    redacted = redact_provider_error(text)
+
+    assert "sk-super-secret-token" not in redacted
+    assert "sk-other-secret" not in redacted
+    assert "[REDACTED]" in redacted
 
 
 async def test_provider_chat_returns_error_response_on_runtime_failure(monkeypatch) -> None:
@@ -16,6 +27,24 @@ async def test_provider_chat_returns_error_response_on_runtime_failure(monkeypat
     assert resp.content is not None
     assert "Error calling LLM:" in resp.content
     assert resp.error_type == "unknown"
+
+
+async def test_provider_error_response_redacts_credentials(monkeypatch) -> None:
+    async def _boom(**kwargs):
+        raise RuntimeError(
+            "upstream failed Authorization: Bearer sk-super-secret-token api_key=relay-secret"
+        )
+
+    monkeypatch.setattr("nanobot.providers.litellm_provider.acompletion", _boom)
+
+    provider = LiteLLMProvider(api_key="k", default_model="openai/gpt-4o-mini")
+    resp = await provider.chat(messages=[{"role": "user", "content": "hi"}])
+
+    assert resp.finish_reason == "error"
+    assert resp.content is not None
+    assert "sk-super-secret-token" not in resp.content
+    assert "relay-secret" not in resp.content
+    assert "[REDACTED]" in resp.content
 
 
 async def test_provider_chat_classifies_timeout_error(monkeypatch) -> None:
@@ -230,6 +259,33 @@ async def test_provider_chat_passes_reasoning_effort(monkeypatch) -> None:
     kwargs = captured["kwargs"]
     assert isinstance(kwargs, dict)
     assert kwargs["reasoning_effort"] == "high"
+
+
+async def test_provider_chat_omits_reasoning_effort_when_none(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def _fake_completion(**kwargs):
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(content="ok", reasoning_content=None, tool_calls=None),
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+
+    monkeypatch.setattr("nanobot.providers.litellm_provider.acompletion", _fake_completion)
+    provider = LiteLLMProvider(api_key="k", default_model="openai/gpt-4o-mini")
+    await provider.chat(
+        messages=[{"role": "user", "content": "hi"}],
+        reasoning_effort="none",
+    )
+
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert "reasoning_effort" not in kwargs
 
 
 def test_provider_sanitize_messages_whitelist_and_assistant_content() -> None:

@@ -26,11 +26,13 @@ class MemoryExtractor:
         workspace: Path,
         model: str,
         output_language: str = "zh-CN",
+        max_message_chars: int = 4000,
     ):
         self._provider = provider
         self._workspace = Path(workspace).expanduser()
         self._model = model
         self._output_language = output_language
+        self._max_message_chars = max(512, max_message_chars)
         self._memory_root = ensure_dir(self._workspace / "memory")
 
     async def extract(self, messages: list[dict[str, Any]], session_key: str) -> list[CandidateMemory]:
@@ -130,14 +132,15 @@ class MemoryExtractor:
             logger.warning(f"Memory merge failed: {e}")
             return None
 
-    @staticmethod
-    def _format_messages(messages: list[dict[str, Any]]) -> str:
+    def _format_messages(self, messages: list[dict[str, Any]]) -> str:
         lines = []
         for msg in messages:
             role = str(msg.get("role", "unknown")).upper()
             content = str(msg.get("content", "")).strip()
             if not content:
                 continue
+            if len(content) > self._max_message_chars:
+                content = f"{content[:self._max_message_chars]}\n[truncated]"
             lines.append(f"[{role}] {content}")
         return "\n".join(lines)
 

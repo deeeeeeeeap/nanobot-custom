@@ -138,3 +138,64 @@ async def test_codex_provider_classifies_orphan_call_error_as_format(tmp_path: P
 
     assert response.finish_reason == "error"
     assert response.error_type == "format"
+
+
+async def test_codex_provider_returns_format_error_for_empty_sse(tmp_path: Path) -> None:
+    auth = _DummyAuth()
+    provider = CodexProvider(
+        default_model="gpt-5.3-codex",
+        auth=auth,
+        responses_url="http://localhost:8081/v1/responses",
+    )
+
+    async def _fake_send(payload, headers):
+        return 200, _ParsedSSE(content=None, tool_calls=[], reasoning_content=None)
+
+    provider._send_request = _fake_send  # type: ignore[method-assign]
+    response = await provider.chat(messages=[{"role": "user", "content": "hi"}])
+
+    assert response.finish_reason == "error"
+    assert response.error_type == "format"
+    assert "no parseable SSE output" in response.content
+
+
+async def test_codex_provider_redacts_http_error_body(tmp_path: Path) -> None:
+    auth = _DummyAuth()
+    provider = CodexProvider(
+        default_model="gpt-5.3-codex",
+        auth=auth,
+        responses_url="http://localhost:8081/v1/responses",
+    )
+
+    async def _fake_send(payload, headers):
+        return 401, "bad Authorization: Bearer sk-super-secret-token api_key=relay-secret"
+
+    provider._send_request = _fake_send  # type: ignore[method-assign]
+    response = await provider.chat(messages=[{"role": "user", "content": "hi"}])
+
+    assert response.finish_reason == "error"
+    assert response.error_type == "auth_expired"
+    assert response.content is not None
+    assert "sk-super-secret-token" not in response.content
+    assert "relay-secret" not in response.content
+    assert "[REDACTED]" in response.content
+
+
+async def test_codex_provider_redacts_runtime_error(tmp_path: Path) -> None:
+    auth = _DummyAuth()
+    provider = CodexProvider(
+        default_model="gpt-5.3-codex",
+        auth=auth,
+        responses_url="http://localhost:8081/v1/responses",
+    )
+
+    async def _fake_send(payload, headers):
+        raise RuntimeError('upstream {"api_key":"sk-super-secret-token"} failed')
+
+    provider._send_request = _fake_send  # type: ignore[method-assign]
+    response = await provider.chat(messages=[{"role": "user", "content": "hi"}])
+
+    assert response.finish_reason == "error"
+    assert response.content is not None
+    assert "sk-super-secret-token" not in response.content
+    assert "[REDACTED]" in response.content
