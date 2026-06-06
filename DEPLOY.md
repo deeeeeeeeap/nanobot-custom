@@ -103,6 +103,29 @@ nanobot doctor
 }
 ```
 
+如果你的第三方中转站明确支持 OpenAI `/responses`，可在对应 provider 中启用：
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "model": "openai/gpt-5-mini"
+    }
+  },
+  "providers": {
+    "openai": {
+      "apiKey": "YOUR_RELAY_API_KEY",
+      "apiBase": "https://relay.example/v1",
+      "apiType": "responses",
+      "extraHeaders": {},
+      "extraBody": {}
+    }
+  }
+}
+```
+
+未确认支持 `/responses` 的中转站继续使用默认 `chat_completions`。
+
 ## 4. Codex 登录
 
 Codex Provider 读取 `~/.codex/auth.json`：

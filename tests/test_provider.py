@@ -39,6 +39,11 @@ def test_provider_classify_error_uses_precise_format_phrases() -> None:
     assert LiteLLMProvider._classify_error(None, "unsupported format image/webp") == "unknown"
 
 
+def test_provider_classifies_gateway_localized_errors() -> None:
+    assert LiteLLMProvider._classify_error(None, "访问量过大，请稍后再试") == "rate_limit"
+    assert LiteLLMProvider._classify_error(None, "账户欠费或余额不足") == "billing"
+
+
 def test_provider_gateway_prefix_resolution() -> None:
     provider = LiteLLMProvider(
         api_key="k",
@@ -372,3 +377,31 @@ async def test_provider_chat_clamps_max_tokens(monkeypatch) -> None:
     kwargs = captured["kwargs"]
     assert isinstance(kwargs, dict)
     assert kwargs["max_tokens"] == 1
+
+
+async def test_provider_chat_passes_extra_body(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def _fake_completion(**kwargs):
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(content="ok", reasoning_content=None, tool_calls=None),
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+
+    monkeypatch.setattr("nanobot.providers.litellm_provider.acompletion", _fake_completion)
+    provider = LiteLLMProvider(
+        api_key="k",
+        default_model="openai/gpt-4o-mini",
+        extra_body={"metadata": {"route": "vps"}},
+    )
+    await provider.chat(messages=[{"role": "user", "content": "hi"}])
+
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs["extra_body"] == {"metadata": {"route": "vps"}}

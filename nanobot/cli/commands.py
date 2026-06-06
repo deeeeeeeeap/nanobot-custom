@@ -726,6 +726,7 @@ def _make_provider(config):
     """
     from nanobot.providers.codex_provider import CodexProvider
     from nanobot.providers.litellm_provider import LiteLLMProvider
+    from nanobot.providers.openai_responses_provider import OpenAIResponsesProvider
 
     model = config.agents.defaults.model
     codex_cfg = getattr(config.providers, "codex", None)
@@ -734,13 +735,23 @@ def _make_provider(config):
     p = config.get_provider()
     litellm_provider = None
     if p and p.api_key or model.startswith("bedrock/"):
-        litellm_provider = LiteLLMProvider(
-            api_key=p.api_key if p else None,
-            api_base=config.get_api_base(),
-            default_model=model,
-            extra_headers=p.extra_headers if p else None,
-            provider_name=config.get_provider_name(),
-        )
+        if p and p.api_type == "responses":
+            litellm_provider = OpenAIResponsesProvider(
+                api_key=p.api_key,
+                api_base=config.get_api_base(),
+                default_model=model,
+                extra_headers=p.extra_headers,
+                extra_body=p.extra_body,
+            )
+        else:
+            litellm_provider = LiteLLMProvider(
+                api_key=p.api_key if p else None,
+                api_base=config.get_api_base(),
+                default_model=model,
+                extra_headers=p.extra_headers if p else None,
+                extra_body=p.extra_body if p else None,
+                provider_name=config.get_provider_name(),
+            )
 
     if codex_cfg and codex_cfg.enabled and "codex" in model.lower():
         codex_provider = CodexProvider(

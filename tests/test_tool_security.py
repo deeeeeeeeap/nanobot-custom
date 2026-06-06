@@ -8,9 +8,11 @@ from nanobot.agent.tools.filesystem import (
     ReadFileTool,
     WriteFileTool,
 )
+from nanobot.agent.tools.web import _get_with_safe_redirects
 from nanobot.agent.tools.memory_tool import MemoryTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.shell import ExecTool
+from nanobot.security.network import validate_resolved_url
 
 
 async def test_exec_tool_blocks_command_injection_pattern() -> None:
@@ -67,6 +69,39 @@ def test_exec_blocks_unsafe_subcommand_composition() -> None:
     result = tool._guard_command("echo $(date; whoami)", cwd=".")
     assert result is not None
     assert "unsafe subcommand composition" in result.lower()
+
+
+def test_ssrf_blocks_ipv6_mapped_loopback() -> None:
+    ok, detail = validate_resolved_url("http://[::ffff:127.0.0.1]/metadata")
+    assert not ok
+    assert "private address" in detail.lower()
+
+
+async def test_web_fetch_validates_redirect_before_following(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_validate(url: str):
+        if "169.254.169.254" in url:
+            return False, "metadata target"
+        return True, ""
+
+    class FakeClient:
+        async def get(self, url, *, headers=None, follow_redirects=False):
+            calls.append(url)
+            return httpx.Response(
+                302,
+                headers={"location": "http://169.254.169.254/latest"},
+                request=httpx.Request("GET", url),
+            )
+
+    import httpx
+
+    monkeypatch.setattr("nanobot.agent.tools.web.validate_url_target", fake_validate)
+    response, error = await _get_with_safe_redirects(FakeClient(), "https://example.com")
+
+    assert response is None
+    assert "redirect blocked" in error.lower()
+    assert calls == ["https://example.com"]
 
 
 async def test_exec_timeout_waits_for_process_exit(monkeypatch) -> None:

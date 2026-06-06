@@ -81,6 +81,7 @@ def convert_messages_to_payload(
     model: str,
     tools: list[dict[str, Any]] | None,
     tool_choice: str,
+    stream: bool = True,
     enable_server_compaction: bool = False,
     compact_threshold: int = 80000,
 ) -> tuple[dict[str, Any], int]:
@@ -153,7 +154,7 @@ def convert_messages_to_payload(
         "model": model,
         "instructions": "\n\n---\n\n".join(system_sections),
         "input": input_items,
-        "stream": True,
+        "stream": stream,
         "store": False,
     }
 

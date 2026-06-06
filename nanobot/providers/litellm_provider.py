@@ -40,11 +40,13 @@ class LiteLLMProvider(LLMProvider):
         api_base: str | None = None,
         default_model: str = "anthropic/claude-opus-4-5",
         extra_headers: dict[str, str] | None = None,
+        extra_body: dict[str, Any] | None = None,
         provider_name: str | None = None,
     ):
         super().__init__(api_key, api_base)
         self.default_model = default_model
         self.extra_headers = extra_headers or {}
+        self.extra_body = extra_body or {}
         self._gateway = find_gateway(provider_name, api_key, api_base)
 
         if api_key:
@@ -298,9 +300,11 @@ class LiteLLMProvider(LLMProvider):
     def _classify_error(status_code: int | None, message: str, code: str | None = None) -> str:
         """Classify provider/network failures into a stable error category."""
         text = f"{message} {code or ''}".lower()
-        if status_code == 402 or "billing" in text or "quota" in text:
+        if status_code == 402 or any(k in text for k in ("billing", "quota", "arrearage", "欠费", "余额不足")):
             return "billing"
-        if status_code == 429 or "rate limit" in text or "too many requests" in text:
+        if status_code == 429 or any(
+            k in text for k in ("rate limit", "too many requests", "访问量过大", "请求过多")
+        ):
             return "rate_limit"
         if status_code in {401, 403} or "unauthorized" in text or "forbidden" in text:
             return "auth"
@@ -364,6 +368,8 @@ class LiteLLMProvider(LLMProvider):
             kwargs["api_base"] = self.api_base
         if self.extra_headers:
             kwargs["extra_headers"] = self.extra_headers
+        if self.extra_body:
+            kwargs["extra_body"] = self.extra_body
         if reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort
         if tools:

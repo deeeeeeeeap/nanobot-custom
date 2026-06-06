@@ -518,6 +518,61 @@ def test_session_compression_lock_reuses_lock_for_same_session(
     assert first is second
 
 
+def test_session_turn_lock_uses_weak_container(monkeypatch, tmp_path: Path) -> None:
+    loop = _make_loop(monkeypatch, tmp_path)
+    assert isinstance(loop._session_turn_locks, weakref.WeakValueDictionary)
+
+
+async def test_process_direct_serializes_same_session(monkeypatch, tmp_path: Path) -> None:
+    loop = _make_loop(monkeypatch, tmp_path)
+    active = 0
+    max_active = 0
+
+    async def _fake_process(msg):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return SimpleNamespace(content=msg.content)
+
+    monkeypatch.setattr(loop, "_process_message", _fake_process)
+
+    first, second = await asyncio.gather(
+        loop.process_direct("one", session_key="cli:same"),
+        loop.process_direct("two", session_key="cli:same"),
+    )
+
+    assert {first, second} == {"one", "two"}
+    assert max_active == 1
+
+
+async def test_process_direct_allows_parallel_different_sessions(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    loop = _make_loop(monkeypatch, tmp_path)
+    active = 0
+    max_active = 0
+
+    async def _fake_process(msg):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return SimpleNamespace(content=msg.content)
+
+    monkeypatch.setattr(loop, "_process_message", _fake_process)
+
+    await asyncio.gather(
+        loop.process_direct("one", session_key="cli:one"),
+        loop.process_direct("two", session_key="cli:two"),
+    )
+
+    assert max_active == 2
+
+
 def test_lazy_detects_empty_promises() -> None:
     content = (
         "Please wait while I prepare everything for execution. "

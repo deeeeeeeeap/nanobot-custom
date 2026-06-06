@@ -571,6 +571,9 @@ class AgentLoop:
         self._session_compression_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
+        self._session_turn_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+            weakref.WeakValueDictionary()
+        )
         self._sessions_compressing: set[str] = set()
 
         self.context = ContextBuilder(workspace)
@@ -1546,6 +1549,13 @@ class AgentLoop:
         if lock is None:
             lock = asyncio.Lock()
             self._session_compression_locks[session_key] = lock
+        return lock
+
+    def _get_session_turn_lock(self, session_key: str) -> asyncio.Lock:
+        lock = self._session_turn_locks.get(session_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_turn_locks[session_key] = lock
         return lock
 
     @staticmethod
@@ -2738,6 +2748,9 @@ Respond with ONLY valid JSON, no markdown fences."""
             metadata={"session_key": session_key} if session_key else {},
         )
 
-        response = await self._process_message(msg)
+        effective_session_key = session_key or msg.session_key
+        lock = self._get_session_turn_lock(effective_session_key)
+        async with lock:
+            response = await self._process_message(msg)
         return response.content if response else ""
 

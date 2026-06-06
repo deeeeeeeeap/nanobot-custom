@@ -23,7 +23,16 @@ _BLOCKED_NETWORKS = [
 _URL_RE = re.compile(r"https?://[^\s\"'`;|<>]+", re.IGNORECASE)
 
 
+def _normalize_addr(
+    addr: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        return addr.ipv4_mapped
+    return addr
+
+
 def _is_private(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    addr = _normalize_addr(addr)
     return any(addr in network for network in _BLOCKED_NETWORKS)
 
 
@@ -50,7 +59,7 @@ def validate_url_target(url: str) -> tuple[bool, str]:
 
     for info in infos:
         try:
-            addr = ipaddress.ip_address(info[4][0])
+            addr = _normalize_addr(ipaddress.ip_address(info[4][0]))
         except ValueError:
             continue
         if _is_private(addr):
@@ -71,7 +80,7 @@ def validate_resolved_url(url: str) -> tuple[bool, str]:
         return True, ""
 
     try:
-        addr = ipaddress.ip_address(hostname)
+        addr = _normalize_addr(ipaddress.ip_address(hostname))
     except ValueError:
         try:
             infos = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
@@ -79,7 +88,7 @@ def validate_resolved_url(url: str) -> tuple[bool, str]:
             return True, ""
         for info in infos:
             try:
-                addr = ipaddress.ip_address(info[4][0])
+                addr = _normalize_addr(ipaddress.ip_address(info[4][0]))
             except ValueError:
                 continue
             if _is_private(addr):

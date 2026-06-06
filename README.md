@@ -212,6 +212,35 @@ LiteLLM provider 示例：
 }
 ```
 
+OpenAI-compatible Responses relay 示例：
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "model": "openai/gpt-5-mini"
+    }
+  },
+  "providers": {
+    "openai": {
+      "apiKey": "YOUR_RELAY_API_KEY",
+      "apiBase": "https://relay.example/v1",
+      "apiType": "responses",
+      "extraHeaders": {
+        "X-Relay": "optional"
+      },
+      "extraBody": {
+        "parallel_tool_calls": false
+      }
+    }
+  }
+}
+```
+
+`apiType` 支持 `chat_completions` 和 `responses`。只有中转站明确支持
+`/responses` 时才设为 `responses`；否则保持 `chat_completions`。`extraHeaders`
+和 `extraBody` 会原样透传，不会改写 header/body 内部键名。
+
 不要把真实 token/API key 提交到仓库。
 
 ## Codex auth

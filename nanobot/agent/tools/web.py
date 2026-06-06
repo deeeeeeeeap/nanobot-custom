@@ -16,7 +16,7 @@ import os
 import re
 import time
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -61,6 +61,32 @@ def _validate_url(url: str) -> tuple[bool, str]:
 def _validate_url_safe(url: str) -> tuple[bool, str]:
     """Validate URL with SSRF protections."""
     return validate_url_target(url)
+
+
+async def _get_with_safe_redirects(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+) -> tuple[httpx.Response | None, str | None]:
+    """GET a URL while validating every redirect target before requesting it."""
+    current_url = url
+    for _ in range(MAX_REDIRECTS + 1):
+        ok, error = validate_url_target(current_url)
+        if not ok:
+            return None, f"Redirect blocked: {error}"
+
+        response = await client.get(current_url, headers=headers, follow_redirects=False)
+        if not 300 <= response.status_code < 400:
+            return response, None
+
+        location = response.headers.get("location")
+        if not location:
+            return response, None
+
+        current_url = urljoin(current_url, location)
+
+    return None, f"Too many redirects: exceeded limit of {MAX_REDIRECTS}"
 
 
 def _wrap_external_content(text: str, source: str = "web") -> str:
@@ -523,15 +549,21 @@ class WebFetchTool(Tool):
 
         try:
             client_kwargs: dict[str, Any] = {
-                "follow_redirects": True,
-                "max_redirects": MAX_REDIRECTS,
                 "timeout": 30.0,
             }
             if self.proxy:
                 client_kwargs["proxy"] = self.proxy
 
             async with httpx.AsyncClient(**client_kwargs) as client:
-                r = await client.get(url, headers={"User-Agent": USER_AGENT})
+                r, redirect_error = await _get_with_safe_redirects(
+                    client,
+                    url,
+                    headers={"User-Agent": USER_AGENT},
+                )
+                if redirect_error:
+                    return json.dumps({"error": redirect_error, "url": url})
+                if r is None:
+                    return json.dumps({"error": "Request failed before response", "url": url})
                 r.raise_for_status()
 
             redir_ok, redir_err = validate_resolved_url(str(r.url))

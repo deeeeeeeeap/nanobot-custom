@@ -29,6 +29,13 @@
             "apiKey": "在这里填入 MiniMax API Key",
             "apiBase": "https://api.minimaxi.com/anthropic"
         },
+        "openai": {
+            "apiKey": "YOUR_OPENAI_OR_COMPATIBLE_API_KEY",
+            "apiBase": "https://api.openai.com/v1",
+            "apiType": "chat_completions",
+            "extraHeaders": {},
+            "extraBody": {}
+        },
         "codex": {
             "enabled": false,
             "codexHome": "~/.codex",

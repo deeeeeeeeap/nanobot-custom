@@ -6,10 +6,11 @@ import pytest
 from pydantic import ValidationError
 
 from nanobot.cli.commands import _make_provider
-from nanobot.config.loader import load_config
+from nanobot.config.loader import load_config, save_config
 from nanobot.config.schema import Config, ResultStorageConfig
 from nanobot.exceptions import ConfigError
 from nanobot.providers.codex_provider import CodexProvider
+from nanobot.providers.openai_responses_provider import OpenAIResponsesProvider
 
 
 def test_schema_rejects_enabled_telegram_without_token() -> None:
@@ -171,6 +172,33 @@ def test_load_config_accepts_result_storage_camel_case(tmp_path) -> None:
     assert config.tools.result_storage.preview_chars == 2500
 
 
+def test_load_config_accepts_provider_api_type_and_extra_body(tmp_path) -> None:
+    config_path = tmp_path / "config.json"
+    data = {
+        "providers": {
+            "openai": {
+                "apiKey": "sk-test",
+                "apiBase": "https://relay.example/v1",
+                "apiType": "responses",
+                "extraHeaders": {"X-Relay": "yes"},
+                "extraBody": {"parallel_tool_calls": False},
+            }
+        }
+    }
+    config_path.write_text(json.dumps(data), encoding="utf-8")
+
+    config = load_config(config_path)
+    assert config.providers.openai.api_type == "responses"
+    assert config.providers.openai.extra_headers == {"X-Relay": "yes"}
+    assert config.providers.openai.extra_body == {"parallel_tool_calls": False}
+
+    out_path = tmp_path / "saved.json"
+    save_config(config, out_path)
+    saved = json.loads(out_path.read_text(encoding="utf-8"))
+    assert saved["providers"]["openai"]["extraHeaders"] == {"X-Relay": "yes"}
+    assert saved["providers"]["openai"]["extraBody"] == {"parallel_tool_calls": False}
+
+
 def test_make_provider_selects_codex_when_enabled(monkeypatch, tmp_path) -> None:
     auth_path = tmp_path / "auth.json"
     auth_path.write_text(
@@ -195,6 +223,26 @@ def test_make_provider_selects_codex_when_enabled(monkeypatch, tmp_path) -> None
     )
     provider, fallback = _make_provider(cfg)
     assert isinstance(provider, CodexProvider)
+
+
+def test_make_provider_selects_responses_provider() -> None:
+    cfg = Config.model_validate(
+        {
+            "agents": {"defaults": {"model": "openai/gpt-5-mini"}},
+            "providers": {
+                "openai": {
+                    "api_key": "sk-test",
+                    "api_base": "https://relay.example/v1",
+                    "api_type": "responses",
+                    "extra_body": {"parallel_tool_calls": False},
+                }
+            },
+        }
+    )
+    provider, fallback = _make_provider(cfg)
+    assert isinstance(provider, OpenAIResponsesProvider)
+    assert fallback is None
+    assert provider.extra_body == {"parallel_tool_calls": False}
 
 
 def test_commands_agentloop_calls_pass_reasoning_effort() -> None:

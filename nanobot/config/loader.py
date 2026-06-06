@@ -86,7 +86,14 @@ def _migrate_config(data: dict) -> dict:
 def convert_keys(data: Any) -> Any:
     """Convert camelCase keys to snake_case for Pydantic."""
     if isinstance(data, dict):
-        return {camel_to_snake(k): convert_keys(v) for k, v in data.items()}
+        converted: dict[str, Any] = {}
+        for key, value in data.items():
+            new_key = camel_to_snake(key)
+            if new_key in {"extra_headers", "extra_body"}:
+                converted[new_key] = value
+            else:
+                converted[new_key] = convert_keys(value)
+        return converted
     if isinstance(data, list):
         return [convert_keys(item) for item in data]
     return data
@@ -95,7 +102,13 @@ def convert_keys(data: Any) -> Any:
 def convert_to_camel(data: Any) -> Any:
     """Convert snake_case keys to camelCase."""
     if isinstance(data, dict):
-        return {snake_to_camel(k): convert_to_camel(v) for k, v in data.items()}
+        converted: dict[str, Any] = {}
+        for key, value in data.items():
+            if key in {"extra_headers", "extra_body"}:
+                converted[snake_to_camel(key)] = value
+            else:
+                converted[snake_to_camel(key)] = convert_to_camel(value)
+        return converted
     if isinstance(data, list):
         return [convert_to_camel(item) for item in data]
     return data
