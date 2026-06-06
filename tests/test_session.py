@@ -23,14 +23,17 @@ def test_session_manager_recovers_from_corrupted_jsonl(monkeypatch, tmp_path: Pa
 
     recovered = manager.get_or_create(key)
     assert recovered.key == key
-    assert recovered.messages == []
+    assert recovered.get_history() == [{"role": "user", "content": "ok"}]
 
     recovered.add_message("user", "hello")
     manager.save(recovered)
 
     reloaded_manager = SessionManager(tmp_path)
     reloaded = reloaded_manager.get_or_create(key)
-    assert reloaded.get_history() == [{"role": "user", "content": "hello"}]
+    assert reloaded.get_history() == [
+        {"role": "user", "content": "ok"},
+        {"role": "user", "content": "hello"},
+    ]
 
 
 def test_session_save_replace_failure_keeps_previous_file(monkeypatch, tmp_path: Path) -> None:
@@ -163,6 +166,57 @@ def test_session_metadata_loads_legacy_files_without_new_fields(monkeypatch, tmp
     assert session.metadata == {"custom": "value"}
     assert session.get_history() == [{"role": "user", "content": "hello"}]
     assert session.updated_at.isoformat().startswith("2026-02-16T00:00:01")
+
+
+def test_session_last_consolidated_round_trip(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+    manager = SessionManager(tmp_path)
+    session = manager.get_or_create("telegram:consolidated")
+    session.add_message("user", "old")
+    session.add_message("user", "new")
+    session.last_consolidated = 1
+    manager.save(session)
+
+    reloaded = SessionManager(tmp_path).get_or_create("telegram:consolidated")
+    assert reloaded.last_consolidated == 1
+    assert reloaded.get_history() == [{"role": "user", "content": "new"}]
+
+
+def test_session_get_history_token_budget_starts_at_user() -> None:
+    session = Session(key="telegram:budget")
+    session.add_message("user", "first " + "x" * 200)
+    session.add_message("assistant", "old answer " + "y" * 200)
+    session.add_message("user", "latest request")
+    session.add_message("assistant", "latest answer")
+
+    history = session.get_history(max_messages=10, max_tokens=20)
+    assert history[0]["role"] == "user"
+    assert history[0]["content"] == "latest request"
+
+
+def test_session_enforce_file_cap_drops_orphan_tool_prefix() -> None:
+    session = Session(key="telegram:cap")
+    session.add_message("user", "keep-anchor")
+    session.add_message(
+        "assistant",
+        "",
+        tool_calls=[
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "read_file", "arguments": "{}"},
+            }
+        ],
+    )
+    session.add_message("tool", "old result", tool_call_id="call-1", name="read_file")
+    session.add_message("user", "new request")
+    session.add_message("assistant", "new answer")
+
+    dropped, _ = session.retain_recent_legal_suffix(2)
+    assert dropped
+    assert session.messages[0]["role"] == "user"
+    assert session.messages[0]["content"] == "new request"
 
 
 def test_session_metadata_ignores_non_dict_metadata(monkeypatch, tmp_path: Path) -> None:

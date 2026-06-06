@@ -1,3 +1,5 @@
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -72,3 +74,43 @@ def test_large_tool_result_uses_unique_paths_for_same_call_id(tmp_path: Path) ->
 def test_result_storage_rejects_paths_outside_workspace() -> None:
     with pytest.raises(ValidationError):
         ResultStorageConfig(path="../outside")
+
+
+def test_result_storage_enforces_file_count_retention(tmp_path: Path) -> None:
+    config = ResultStorageConfig(threshold_chars=1000, preview_chars=500, max_files=2)
+
+    stored = []
+    for idx in range(3):
+        stored.append(
+            persist_tool_result_if_needed(
+                content=str(idx) * 1200,
+                tool_name="exec",
+                tool_call_id=f"call-{idx}",
+                workspace=tmp_path,
+                config=config,
+            )
+        )
+
+    assert stored[-1].path is not None and stored[-1].path.exists()
+    files = list((tmp_path / "tool-results").glob("*.txt"))
+    assert len(files) == 2
+
+
+def test_result_storage_removes_expired_files(tmp_path: Path) -> None:
+    config = ResultStorageConfig(threshold_chars=1000, preview_chars=500, max_age_days=1)
+    root = tmp_path / "tool-results"
+    root.mkdir()
+    old = root / "old.txt"
+    old.write_text("old", encoding="utf-8")
+    old_time = time.time() - 3 * 24 * 60 * 60
+    os.utime(old, (old_time, old_time))
+
+    persist_tool_result_if_needed(
+        content="N" * 1200,
+        tool_name="exec",
+        tool_call_id="call-new",
+        workspace=tmp_path,
+        config=config,
+    )
+
+    assert not old.exists()

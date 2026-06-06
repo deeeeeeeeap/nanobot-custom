@@ -18,6 +18,9 @@ def test_apply_vps_profile_sets_low_resource_defaults() -> None:
     assert config.logging.max_files == 3
     assert config.tools.result_storage.enabled is True
     assert config.tools.result_storage.threshold_chars == 8000
+    assert config.tools.result_storage.max_files == 500
+    assert config.tools.result_storage.max_bytes == 256 * 1024 * 1024
+    assert config.tools.result_storage.max_age_days == 30
 
 
 def test_apply_vps_profile_preserves_enabled_optional_channels() -> None:
@@ -74,4 +77,5 @@ def test_doctor_does_not_leak_secrets(monkeypatch, tmp_path) -> None:
     assert result.exit_code == 0
     assert "123456:secret-token-value" not in result.output
     assert "minimax-secret-key" not in result.output
+    assert "Tool result storage" in result.output
     assert "Doctor complete" in result.output

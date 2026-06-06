@@ -20,6 +20,8 @@ class Tool(ABC):
         "array": list,
         "object": dict,
     }
+    _BOOL_TRUE = frozenset(("true", "1", "yes"))
+    _BOOL_FALSE = frozenset(("false", "0", "no"))
     
     @property
     @abstractmethod
@@ -52,8 +54,56 @@ class Tool(ABC):
         """
         pass
 
+    def cast_params(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Apply safe schema-driven casts before validation."""
+        schema = self.parameters or {}
+        if not isinstance(params, dict) or schema.get("type", "object") != "object":
+            return params
+        return self._cast_object(params, schema)
+
+    def _cast_object(self, obj: Any, schema: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(obj, dict):
+            return obj
+        props = schema.get("properties", {})
+        return {key: self._cast_value(value, props[key]) if key in props else value for key, value in obj.items()}
+
+    def _cast_value(self, val: Any, schema: dict[str, Any]) -> Any:
+        t = schema.get("type")
+        if isinstance(t, list):
+            t = next((item for item in t if item != "null"), None)
+
+        if t == "integer" and isinstance(val, str):
+            try:
+                return int(val)
+            except ValueError:
+                return val
+        if t == "number" and isinstance(val, str):
+            try:
+                return float(val)
+            except ValueError:
+                return val
+        if t == "boolean" and isinstance(val, str):
+            lower = val.lower()
+            if lower in self._BOOL_TRUE:
+                return True
+            if lower in self._BOOL_FALSE:
+                return False
+            return val
+        if t == "string":
+            if isinstance(val, (dict, list)):
+                return val
+            return val if val is None else str(val)
+        if t == "array" and isinstance(val, list):
+            item_schema = schema.get("items")
+            return [self._cast_value(item, item_schema) for item in val] if isinstance(item_schema, dict) else val
+        if t == "object" and isinstance(val, dict):
+            return self._cast_object(val, schema)
+        return val
+
     def validate_params(self, params: dict[str, Any]) -> list[str]:
         """Validate tool parameters against JSON schema. Returns error list (empty if valid)."""
+        if not isinstance(params, dict):
+            return [f"parameters must be an object, got {type(params).__name__}"]
         schema = self.parameters or {}
         if schema.get("type", "object") != "object":
             raise ValueError(f"Schema must be object type, got {schema.get('type')!r}")
@@ -61,7 +111,15 @@ class Tool(ABC):
 
     def _validate(self, val: Any, schema: dict[str, Any], path: str) -> list[str]:
         t, label = schema.get("type"), path or "parameter"
-        if t in self._TYPE_MAP and not isinstance(val, self._TYPE_MAP[t]):
+        if isinstance(t, list):
+            if val is None and "null" in t:
+                return []
+            t = next((item for item in t if item != "null"), None)
+        if t == "integer" and (not isinstance(val, int) or isinstance(val, bool)):
+            return [f"{label} should be integer"]
+        if t == "number" and (not isinstance(val, self._TYPE_MAP["number"]) or isinstance(val, bool)):
+            return [f"{label} should be number"]
+        if t in self._TYPE_MAP and t not in ("integer", "number") and not isinstance(val, self._TYPE_MAP[t]):
             return [f"{label} should be {t}"]
         
         errors = []

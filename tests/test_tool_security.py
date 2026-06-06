@@ -146,6 +146,36 @@ async def test_exec_timeout_waits_for_process_exit(monkeypatch) -> None:
     assert proc.wait_called
 
 
+async def test_exec_detaches_stdin(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeProcess:
+        returncode = 0
+
+        async def communicate(self):
+            return b"ok", b""
+
+    async def _fake_create_subprocess_shell(*args, **kwargs):
+        captured.update(kwargs)
+        return _FakeProcess()
+
+    monkeypatch.setattr("nanobot.agent.tools.shell.asyncio.create_subprocess_shell", _fake_create_subprocess_shell)
+
+    result = await ExecTool().execute("echo ok")
+    assert result == "ok"
+    assert captured["stdin"] == asyncio.subprocess.DEVNULL
+
+
+def test_exec_windows_multiline_python_split(monkeypatch) -> None:
+    monkeypatch.setattr("nanobot.agent.tools.shell.os.name", "nt")
+    command = 'python -c "print(1)\\nprint(2)"'.replace("\\n", "\n")
+    assert ExecTool._split_windows_multiline_python(command) == [
+        "python",
+        "-c",
+        "print(1)\nprint(2)",
+    ]
+
+
 async def test_exec_respects_workspace_restriction(tmp_path: Path) -> None:
     outside = (tmp_path.parent / "outside.txt").resolve()
     tool = ExecTool(working_dir=str(tmp_path), restrict_to_workspace=True)

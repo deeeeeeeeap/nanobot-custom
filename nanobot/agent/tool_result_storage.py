@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import os
 import re
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+
+from loguru import logger
 
 from nanobot.config.schema import ResultStorageConfig
 
@@ -57,6 +60,63 @@ def _write_atomic(path: Path, content: str) -> None:
     os.replace(tmp, path)
 
 
+def _result_files(storage_dir: Path) -> list[Path]:
+    return [path for path in storage_dir.glob("*.txt") if path.is_file()]
+
+
+def _cleanup_storage_dir(storage_dir: Path, config: ResultStorageConfig, keep_path: Path) -> None:
+    """Bound result-storage growth by age, file count, and total bytes."""
+
+    now = time.time()
+    max_age_seconds = config.max_age_days * 24 * 60 * 60
+    files: list[Path] = []
+
+    for path in _result_files(storage_dir):
+        try:
+            stat = path.stat()
+        except OSError as exc:
+            logger.warning("Could not stat tool result file {}: {}", path, exc)
+            continue
+
+        if path != keep_path and now - stat.st_mtime > max_age_seconds:
+            try:
+                path.unlink()
+            except OSError as exc:
+                logger.warning("Could not remove expired tool result file {}: {}", path, exc)
+            continue
+        files.append(path)
+
+    def _stat_key(path: Path) -> tuple[float, int]:
+        try:
+            stat = path.stat()
+            return stat.st_mtime, stat.st_size
+        except OSError:
+            return 0.0, 0
+
+    files = [path for path in files if path.exists()]
+    files.sort(key=_stat_key, reverse=True)
+
+    kept: list[Path] = []
+    total_bytes = 0
+    for path in files:
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            logger.warning("Could not stat tool result file {}: {}", path, exc)
+            continue
+
+        over_count = len(kept) >= config.max_files
+        over_bytes = total_bytes + size > config.max_bytes
+        if path != keep_path and (over_count or over_bytes):
+            try:
+                path.unlink()
+            except OSError as exc:
+                logger.warning("Could not remove old tool result file {}: {}", path, exc)
+            continue
+        kept.append(path)
+        total_bytes += size
+
+
 def persist_tool_result_if_needed(
     *,
     content: str,
@@ -76,6 +136,7 @@ def persist_tool_result_if_needed(
     safe_tool = _safe_tool_id(tool_name)
     path = storage_dir / f"{safe_id}_{safe_tool}_{uuid.uuid4().hex[:12]}.txt"
     _write_atomic(path, content)
+    _cleanup_storage_dir(storage_dir, config, keep_path=path)
 
     preview, has_more = _preview(content, config.preview_chars)
     rel = path.relative_to(workspace.expanduser().resolve()).as_posix()

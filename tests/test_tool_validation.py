@@ -86,3 +86,49 @@ async def test_registry_returns_validation_error() -> None:
     reg.register(SampleTool())
     result = await reg.execute("sample", {"query": "hi"})
     assert "Invalid parameters" in result
+
+
+def test_tool_cast_params_uses_schema() -> None:
+    tool = SampleTool()
+    params = tool.cast_params({"query": 123, "count": "2", "meta": {"tag": 9, "flags": [1]}})
+    assert params == {"query": "123", "count": 2, "meta": {"tag": "9", "flags": ["1"]}}
+    assert tool.validate_params(params) == []
+
+
+def test_tool_cast_params_does_not_stringify_objects() -> None:
+    tool = SampleTool()
+    params = tool.cast_params({"query": {"bad": "shape"}, "count": "2"})
+    assert params["query"] == {"bad": "shape"}
+    assert any("query should be string" in err for err in tool.validate_params(params))
+
+
+def test_registry_prepare_call_casts_and_validates() -> None:
+    reg = ToolRegistry()
+    reg.register(SampleTool())
+    tool, params, error = reg.prepare_call("sample", {"query": 123, "count": "2"})
+    assert tool is not None
+    assert params["query"] == "123"
+    assert params["count"] == 2
+    assert error is None
+
+
+def test_registry_rejects_non_object_params() -> None:
+    reg = ToolRegistry()
+    reg.register(SampleTool())
+    tool, _params, error = reg.prepare_call("sample", ["bad"])  # type: ignore[arg-type]
+    assert tool is None
+    assert error is not None
+    assert "must be a JSON object" in error
+
+
+def test_registry_definitions_are_stably_sorted() -> None:
+    reg = ToolRegistry()
+
+    class ZTool(SampleTool):
+        @property
+        def name(self) -> str:
+            return "z_tool"
+
+    reg.register(ZTool())
+    reg.register(SampleTool())
+    assert [item["function"]["name"] for item in reg.get_definitions()] == ["sample", "z_tool"]

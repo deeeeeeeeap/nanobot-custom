@@ -397,6 +397,9 @@ class ResultStorageConfig(BaseModel):
     turn_budget_chars: int = Field(default=60000, ge=5000, le=2_000_000)
     path: str = "tool-results"
     preview_chars: int = Field(default=3000, ge=500, le=100_000)
+    max_files: int = Field(default=500, ge=1, le=100_000)
+    max_bytes: int = Field(default=256 * 1024 * 1024, ge=1024 * 1024, le=10 * 1024**3)
+    max_age_days: int = Field(default=30, ge=1, le=3650)
 
     @field_validator("path")
     @classmethod

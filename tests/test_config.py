@@ -92,6 +92,9 @@ def test_search_config_defaults_and_validation() -> None:
     assert cfg.tools.result_storage.threshold_chars == 8000
     assert cfg.tools.result_storage.turn_budget_chars == 60000
     assert cfg.tools.result_storage.path == "tool-results"
+    assert cfg.tools.result_storage.max_files == 500
+    assert cfg.tools.result_storage.max_bytes == 256 * 1024 * 1024
+    assert cfg.tools.result_storage.max_age_days == 30
 
     with pytest.raises(ValidationError):
         Config.model_validate({"search": {"default_limit": 0}})
@@ -160,6 +163,9 @@ def test_load_config_accepts_result_storage_camel_case(tmp_path) -> None:
                 "turnBudgetChars": 70000,
                 "path": "tool-results",
                 "previewChars": 2500,
+                "maxFiles": 7,
+                "maxBytes": 1234567,
+                "maxAgeDays": 9,
             }
         }
     }
@@ -170,6 +176,9 @@ def test_load_config_accepts_result_storage_camel_case(tmp_path) -> None:
     assert config.tools.result_storage.threshold_chars == 12345
     assert config.tools.result_storage.turn_budget_chars == 70000
     assert config.tools.result_storage.preview_chars == 2500
+    assert config.tools.result_storage.max_files == 7
+    assert config.tools.result_storage.max_bytes == 1234567
+    assert config.tools.result_storage.max_age_days == 9
 
 
 def test_load_config_accepts_provider_api_type_and_extra_body(tmp_path) -> None:

@@ -126,7 +126,10 @@ nanobot gateway
       "thresholdChars": 8000,
       "turnBudgetChars": 60000,
       "path": "tool-results",
-      "previewChars": 3000
+      "previewChars": 3000,
+      "maxFiles": 500,
+      "maxBytes": 268435456,
+      "maxAgeDays": 30
     }
   },
   "search": {
@@ -188,7 +191,10 @@ nanobot gateway
       "enabled": true,
       "thresholdChars": 8000,
       "turnBudgetChars": 60000,
-      "path": "tool-results"
+      "path": "tool-results",
+      "maxFiles": 500,
+      "maxBytes": 268435456,
+      "maxAgeDays": 30
     }
   }
 }

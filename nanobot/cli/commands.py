@@ -358,6 +358,9 @@ def _apply_vps_profile(config):
     config.tools.result_storage.turn_budget_chars = 60000
     config.tools.result_storage.path = "tool-results"
     config.tools.result_storage.preview_chars = 3000
+    config.tools.result_storage.max_files = 500
+    config.tools.result_storage.max_bytes = 256 * 1024 * 1024
+    config.tools.result_storage.max_age_days = 30
 
     return config
 
@@ -612,12 +615,51 @@ def doctor():
         "vps-1c1g settings active" if _is_vps_profile_effective(config) else "not fully applied",
     )
 
+    try:
+        rs = config.tools.result_storage
+        workspace_root = workspace.expanduser().resolve()
+        rs_path = (workspace_root / rs.path).resolve()
+        in_workspace = rs_path == workspace_root or workspace_root in rs_path.parents
+    except OSError as e:
+        in_workspace = False
+        add("Tool result storage", "FAIL", f"path resolution failed: {e}")
+    else:
+        add(
+            "Tool result storage",
+            "OK" if rs.enabled and in_workspace else "WARN",
+            (
+                f"enabled at {rs.path}; threshold={rs.threshold_chars}; "
+                f"turnBudget={rs.turn_budget_chars}; retention={rs.max_files} files/"
+                f"{rs.max_bytes} bytes/{rs.max_age_days} days"
+            )
+            if rs.enabled and in_workspace
+            else "disabled or outside workspace",
+        )
+    if rs.enabled and in_workspace and rs_path.exists():
+        try:
+            files = [item for item in rs_path.glob("*.txt") if item.is_file()]
+            total_bytes = sum(item.stat().st_size for item in files)
+            status = "WARN" if total_bytes > rs.max_bytes else "OK"
+            add("Tool result usage", status, f"{len(files)} file(s), {total_bytes} bytes")
+        except OSError as e:
+            add("Tool result usage", "WARN", f"could not inspect: {e}")
+
+    provider = config.get_provider()
+    if provider and getattr(provider, "api_type", "auto") == "responses":
+        add(
+            "Responses API",
+            "WARN",
+            "apiType=responses configured; doctor does not verify relay support online",
+        )
+
     optional_modules = {
         "slack": ("slack_sdk", config.channels.slack.enabled),
         "feishu": ("lark_oapi", config.channels.feishu.enabled),
         "dingtalk": ("dingtalk_stream", config.channels.dingtalk.enabled),
         "qq": ("botpy", config.channels.qq.enabled),
         "mochat": ("socketio", config.channels.mochat.enabled),
+        "whatsapp": ("websockets", config.channels.whatsapp.enabled),
+        "vector": ("sentence_transformers", config.search.vector_enabled),
     }
     for name, (module, enabled) in optional_modules.items():
         if not enabled:
@@ -978,6 +1020,7 @@ def gateway(
             cron.stop()
             agent.stop()
             await channels.stop_all()
+            session_manager.flush_all()
     
     _run_async(run())
 

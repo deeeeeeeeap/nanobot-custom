@@ -132,12 +132,7 @@ class ExecTool(Tool):
         effective_timeout = max(1, min(timeout or self.timeout, self.MAX_TIMEOUT))
 
         try:
-            process = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-            )
+            process = await self._create_subprocess(command, cwd)
 
             try:
                 stdout, stderr = await asyncio.wait_for(
@@ -174,6 +169,48 @@ class ExecTool(Tool):
             return result
         except (OSError, ValueError, UnicodeError) as e:
             return f"Error executing command: {e}"
+
+    async def _create_subprocess(
+        self,
+        command: str,
+        cwd: str,
+    ) -> asyncio.subprocess.Process:
+        windows_python = self._split_windows_multiline_python(command)
+        if windows_python is not None:
+            return await asyncio.create_subprocess_exec(
+                *windows_python,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                stdin=asyncio.subprocess.DEVNULL,
+                cwd=cwd,
+            )
+        return await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.DEVNULL,
+            cwd=cwd,
+        )
+
+    @staticmethod
+    def _split_windows_multiline_python(command: str) -> list[str] | None:
+        """Bypass cmd.exe for simple multiline `python -c` commands on Windows."""
+        if os.name != "nt" or "\n" not in command:
+            return None
+        match = re.match(
+            r"^\s*(py(?:\.exe)?|python(?:\.exe)?|python3(?:\.exe)?)\s+-c\s+(.+?)\s*$",
+            command,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not match:
+            return None
+        executable, code = match.groups()
+        code = code.strip()
+        if len(code) >= 2 and code[0] in {"'", '"'} and code[-1] == code[0]:
+            code = code[1:-1]
+        if not code:
+            return None
+        return [executable, "-c", code]
 
     def _guard_command(self, command: str, cwd: str) -> str | None:
         """Best-effort safety guard for potentially destructive commands."""

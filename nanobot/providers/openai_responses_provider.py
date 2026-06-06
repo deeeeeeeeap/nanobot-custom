@@ -8,8 +8,8 @@ from typing import Any
 import httpx
 from loguru import logger
 
-from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
-from nanobot.providers.codex_adapter import convert_messages_to_payload, parse_response_output
+from nanobot.providers.base import LLMProvider, LLMResponse
+from nanobot.providers.openai_responses import convert_messages_to_payload, parse_response_output
 
 
 class OpenAIResponsesProvider(LLMProvider):
@@ -36,30 +36,6 @@ class OpenAIResponsesProvider(LLMProvider):
         if base.endswith("/responses"):
             return base
         return f"{base}/responses"
-
-    @staticmethod
-    def _usage(response: dict[str, Any]) -> dict[str, int]:
-        usage = response.get("usage")
-        if not isinstance(usage, dict):
-            return {}
-
-        def get_int(*keys: str) -> int:
-            for key in keys:
-                value = usage.get(key)
-                if isinstance(value, int):
-                    return value
-            return 0
-
-        prompt = get_int("input_tokens", "prompt_tokens")
-        completion = get_int("output_tokens", "completion_tokens")
-        total = get_int("total_tokens")
-        if not total:
-            total = prompt + completion
-        return {
-            "prompt_tokens": prompt,
-            "completion_tokens": completion,
-            "total_tokens": total,
-        }
 
     @staticmethod
     def _error_type(status_code: int | None, text: str) -> str:
@@ -148,10 +124,11 @@ class OpenAIResponsesProvider(LLMProvider):
 
         try:
             data = response.json()
-            output = data.get("output", [])
-            if not isinstance(output, list):
+            if not isinstance(data, dict):
+                raise ValueError("Responses API returned non-object response")
+            if not isinstance(data.get("output", []), list):
                 raise ValueError("Responses API returned non-list output")
-            text, raw_tool_calls, reasoning = parse_response_output(output)
+            parsed = parse_response_output(data)
         except (json.JSONDecodeError, TypeError, ValueError) as exc:
             return LLMResponse(
                 content=f"Error parsing Responses API response: {exc}",
@@ -159,33 +136,13 @@ class OpenAIResponsesProvider(LLMProvider):
                 error_type="format",
             )
 
-        tool_calls = [
-            ToolCallRequest(
-                id=str(item.get("id", "")),
-                name=str(item.get("name", "")),
-                arguments=self._parse_arguments(item.get("arguments", "{}")),
-            )
-            for item in raw_tool_calls
-        ]
         return LLMResponse(
-            content=text or None,
-            tool_calls=tool_calls,
-            finish_reason="tool_calls" if tool_calls else "stop",
-            usage=self._usage(data),
-            reasoning_content=reasoning or None,
+            content=parsed.content,
+            tool_calls=parsed.tool_calls,
+            finish_reason=parsed.finish_reason,
+            usage=parsed.usage,
+            reasoning_content=parsed.reasoning_content,
         )
-
-    @staticmethod
-    def _parse_arguments(raw: Any) -> dict[str, Any]:
-        if isinstance(raw, dict):
-            return raw
-        if not isinstance(raw, str) or not raw.strip():
-            return {}
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            return {"raw": raw}
-        return parsed if isinstance(parsed, dict) else {"value": parsed}
 
     def get_default_model(self) -> str:
         return self.default_model
